@@ -1,0 +1,6 @@
+{
+  "name": "Narendra Edu Valley - Transport Management System",
+  "description": "Comprehensive School Transport Management System managing student & staff transport memberships, routes, multi-trip vehicles, dual-observation attendance, driver paper registers, vehicle logbooks, fuel advances, automated fee billing, recovery cycles, staff payroll, and double-entry transport accounting with Google Sheets backend.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

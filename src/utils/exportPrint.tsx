@@ -1,0 +1,467 @@
+import React, { useState } from 'react';
+import { Printer, Download, Check, X, SlidersHorizontal, RotateCcw } from 'lucide-react';
+
+export interface ExportColumn<T> {
+  header: string;
+  accessor: (row: T, index: number) => string | number | undefined | null;
+}
+
+export function exportToCsv<T>(
+  filename: string,
+  columns: ExportColumn<T>[],
+  data: T[]
+) {
+  const escapeCsvCell = (val: string | number | undefined | null): string => {
+    if (val === undefined || val === null) return '""';
+    const str = String(val).replace(/"/g, '""');
+    return `"${str}"`;
+  };
+
+  const headers = columns.map((col) => escapeCsvCell(col.header)).join(',');
+  const rows = data.map((row, idx) =>
+    columns.map((col) => escapeCsvCell(col.accessor(row, idx))).join(',')
+  );
+
+  const csvContent = '\uFEFF' + [headers, ...rows].join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${filename}_${new Date().toISOString().split('T')[0]}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export function buildPrintableHtml<T>(options: {
+  title: string;
+  schoolName?: string;
+  subtitle?: string;
+  filterDescription?: string;
+  columns: ExportColumn<T>[];
+  data: T[];
+}): string {
+  const { title, schoolName, subtitle, filterDescription, columns, data } = options;
+
+  const escapeHtml = (val: string | number | undefined | null): string => {
+    if (val === undefined || val === null) return '';
+    return String(val)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  };
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    @page { size: A4 landscape; margin: 12mm; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #0f172a;
+      margin: 0;
+      padding: 16px;
+      font-size: 11px;
+      background: #fff;
+    }
+    .header {
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .school-name {
+      font-size: 18px;
+      font-weight: 800;
+      margin: 0 0 3px 0;
+      text-transform: uppercase;
+    }
+    .report-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #334155;
+      margin: 0;
+    }
+    .meta {
+      text-align: right;
+      font-size: 10px;
+      color: #475569;
+    }
+    .filter-badge {
+      display: inline-block;
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+      margin-top: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      border: 1px solid #cbd5e1;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background-color: #f8fafc;
+      font-weight: 700;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.03em;
+      color: #334155;
+    }
+    tr:nth-child(even) td {
+      background-color: #f8fafc;
+    }
+    .footer {
+      margin-top: 14px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #64748b;
+      border-top: 1px solid #e2e8f0;
+      padding-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      ${schoolName ? `<div class="school-name">${escapeHtml(schoolName)}</div>` : ''}
+      <div class="report-title">${escapeHtml(title)}${subtitle ? ` — ${escapeHtml(subtitle)}` : ''}</div>
+      ${filterDescription ? `<div class="filter-badge">${escapeHtml(filterDescription)}</div>` : ''}
+    </div>
+    <div class="meta">
+      <div>Printed on: ${new Date().toLocaleString()}</div>
+      <div>Total Records: <strong>${data.length}</strong></div>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 36px;">#</th>
+        ${columns.map((c) => `<th>${escapeHtml(c.header)}</th>`).join('')}
+      </tr>
+    </thead>
+    <tbody>
+      ${
+        data.length === 0
+          ? `<tr><td colspan="${columns.length + 1}" style="text-align:center; padding: 20px;">No records found</td></tr>`
+          : data
+              .map(
+                (row, idx) =>
+                  `<tr>
+                    <td>${idx + 1}</td>
+                    ${columns
+                      .map((col) => `<td>${escapeHtml(col.accessor(row, idx))}</td>`)
+                      .join('')}
+                  </tr>`
+              )
+              .join('')
+      }
+    </tbody>
+  </table>
+  <div class="footer">
+    <div>Generated by School Transport Management System</div>
+    <div>Authorized Signatory: _______________________</div>
+  </div>
+</body>
+</html>`;
+}
+
+export function openHtmlPrintPreview(options: {
+  title: string;
+  subtitle?: string;
+  html: string;
+  filename?: string;
+}) {
+  const { title, subtitle, html, filename } = options;
+
+  // Create an immediate, visible full-screen Print Preview Modal in DOM so it works reliably even in sandboxed iframes
+  const existing = document.getElementById('stms-global-print-modal');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'stms-global-print-modal';
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,0.75);backdrop-filter:blur(4px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;';
+
+  const container = document.createElement('div');
+  container.style.cssText =
+    'background:#ffffff;border-radius:16px;width:100%;max-width:1000px;max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.4);border:1px solid #cbd5e1;';
+
+  const topBar = document.createElement('div');
+  topBar.style.cssText =
+    'background:#0f172a;color:#ffffff;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
+
+  const leftInfo = document.createElement('div');
+  leftInfo.innerHTML = `<div style="font-weight:800;font-size:14px;">Print Preview — ${title}</div>
+    <div style="font-size:11px;color:#94a3b8;">${subtitle || 'Ready to print or save as A4 document'}</div>`;
+
+  const btnGroup = document.createElement('div');
+  btnGroup.style.cssText = 'display:flex;align-items:center;gap:8px;';
+
+  const printNowBtn = document.createElement('button');
+  printNowBtn.type = 'button';
+  printNowBtn.textContent = '🖨️ Print Now (A4)';
+  printNowBtn.style.cssText =
+    'background:#f59e0b;color:#0f172a;border:none;padding:8px 16px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;';
+
+  const downloadHtmlBtn = document.createElement('button');
+  downloadHtmlBtn.type = 'button';
+  downloadHtmlBtn.textContent = '⬇ Download Printable (.html)';
+  downloadHtmlBtn.style.cssText =
+    'background:#1e293b;color:#ffffff;border:1px solid #334155;padding:8px 14px;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = '✕ Close';
+  closeBtn.style.cssText =
+    'background:#334155;color:#ffffff;border:none;padding:8px 14px;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;';
+
+  const frameWrapper = document.createElement('div');
+  frameWrapper.style.cssText = 'flex:1;overflow:auto;background:#f1f5f9;padding:20px;display:flex;justify-content:center;';
+
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText =
+    'width:100%;min-height:660px;background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.06);';
+
+  printNowBtn.onclick = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch {
+      window.print();
+    }
+  };
+
+  downloadHtmlBtn.onclick = () => {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const baseName = filename || title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    a.download = `${baseName}_${new Date().toISOString().split('T')[0]}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  closeBtn.onclick = () => {
+    overlay.remove();
+  };
+
+  overlay.onclick = (e) => {
+    if (e.target === overlay) overlay.remove();
+  };
+
+  btnGroup.appendChild(printNowBtn);
+  btnGroup.appendChild(downloadHtmlBtn);
+  btnGroup.appendChild(closeBtn);
+  topBar.appendChild(leftInfo);
+  topBar.appendChild(btnGroup);
+
+  frameWrapper.appendChild(iframe);
+  container.appendChild(topBar);
+  container.appendChild(frameWrapper);
+  overlay.appendChild(container);
+  document.body.appendChild(overlay);
+
+  const doc = iframe.contentWindow?.document;
+  if (doc) {
+    doc.open();
+    doc.write(html);
+    doc.close();
+  }
+}
+
+export function printTableReport<T>(options: {
+  title: string;
+  schoolName?: string;
+  subtitle?: string;
+  filterDescription?: string;
+  columns: ExportColumn<T>[];
+  data: T[];
+}) {
+  const html = buildPrintableHtml(options);
+  openHtmlPrintPreview({
+    title: options.title,
+    subtitle: `${options.data.length} record(s) ${options.filterDescription ? `• ${options.filterDescription}` : '• Full View'}`,
+    html,
+  });
+}
+
+export interface PrintExportToolbarProps<T> {
+  title: string;
+  filename: string;
+  schoolName?: string;
+  columns: ExportColumn<T>[];
+  filteredData?: T[];
+  allData?: T[];
+  hasActiveFilters?: boolean;
+  filteredRows?: T[];
+  allRows?: T[];
+  isFiltered?: boolean;
+  filterSummary?: string;
+}
+
+export function PrintExportToolbar<T>({
+  title,
+  filename,
+  schoolName,
+  columns,
+  filteredData,
+  hasActiveFilters,
+  filteredRows,
+  isFiltered,
+  filterSummary,
+}: PrintExportToolbarProps<T>) {
+  const [exportedDone, setExportedDone] = useState(false);
+  const rowsToUse = filteredData ?? filteredRows ?? [];
+  const activeFilterFlag = hasActiveFilters ?? isFiltered ?? false;
+
+  const handlePrint = () => {
+    const desc = activeFilterFlag && filterSummary ? `Filter Applied: ${filterSummary}` : undefined;
+    printTableReport({
+      title,
+      schoolName,
+      filterDescription: desc,
+      columns,
+      data: rowsToUse,
+    });
+  };
+
+  const handleExport = () => {
+    exportToCsv(filename, columns, rowsToUse);
+    setExportedDone(true);
+    setTimeout(() => setExportedDone(false), 2200);
+  };
+
+  return (
+    <div className="inline-flex items-center gap-1.5 shrink-0">
+      <button
+        type="button"
+        onClick={handlePrint}
+        className="inline-flex items-center gap-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 font-semibold px-3 py-2 rounded-xl text-xs shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
+        title="Print current view"
+      >
+        <Printer className="w-3.5 h-3.5 text-slate-600" />
+        <span>Print</span>
+      </button>
+
+      <button
+        type="button"
+        onClick={handleExport}
+        className={`inline-flex items-center gap-1.5 border font-semibold px-3 py-2 rounded-xl text-xs shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+          exportedDone
+            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+            : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+        }`}
+        title="Export current view to CSV"
+      >
+        {exportedDone ? (
+          <>
+            <Check className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Exported</span>
+          </>
+        ) : (
+          <>
+            <Download className="w-3.5 h-3.5 text-slate-600" />
+            <span>Export</span>
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
+
+export interface FilterPopoverProps {
+  isFiltered?: boolean;
+  onReset?: () => void;
+  label?: string;
+  children: React.ReactNode;
+}
+
+export const FilterPopover: React.FC<FilterPopoverProps> = ({
+  isFiltered = false,
+  onReset,
+  label = 'Filters',
+  children,
+}) => {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="relative inline-block shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
+          isFiltered || open
+            ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+            : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 shadow-2xs'
+        }`}
+        title="Filter records"
+      >
+        <SlidersHorizontal className={`w-3.5 h-3.5 ${isFiltered || open ? 'text-amber-400' : 'text-slate-600'}`} />
+        <span>{label}</span>
+        {isFiltered && (
+          <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div
+            className="fixed inset-0 z-30"
+            onClick={() => setOpen(false)}
+          />
+          <div className="absolute right-0 mt-2 w-72 sm:w-80 bg-white rounded-2xl border border-slate-200 shadow-xl p-4 z-40 space-y-3 text-xs">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+              <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                <SlidersHorizontal className="w-3.5 h-3.5 text-amber-600" />
+                <span>Filter Options</span>
+              </span>
+              <div className="flex items-center gap-2">
+                {isFiltered && onReset && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onReset();
+                    }}
+                    className="text-[11px] font-semibold text-rose-600 hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  className="p-1 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2.5 max-h-[65vh] overflow-y-auto pr-0.5">
+              {children}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
