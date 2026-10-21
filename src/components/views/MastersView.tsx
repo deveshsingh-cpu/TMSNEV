@@ -1444,32 +1444,38 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 </button>
               )}
             </div>
-            <div className="flex gap-2">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const val = newClassName.trim();
+                if (!val) return;
+                const oldVal = editingClassOldName;
+                setNewClassName('');
+                setEditingClassOldName(null);
+                runMasterAction(async () => {
+                  if (oldVal && onUpdateClass) {
+                    await onUpdateClass(oldVal, val);
+                  } else {
+                    await onAddClass(val);
+                  }
+                });
+              }}
+              className="flex gap-2"
+            >
               <input
                 type="text"
-                placeholder="Class Name (e.g. Class VI or LKG)"
+                placeholder="Class Name (e.g. Playgroup, Nursery, Class VI)"
                 value={newClassName}
                 onChange={(e) => setNewClassName(e.target.value)}
                 className="flex-1 p-2 border border-slate-300 rounded-xl text-xs font-semibold"
               />
               <button
-                onClick={() =>
-                  runMasterAction(async () => {
-                    if (!newClassName.trim()) return;
-                    if (editingClassOldName && onUpdateClass) {
-                      await onUpdateClass(editingClassOldName, newClassName.trim());
-                      setEditingClassOldName(null);
-                    } else {
-                      await onAddClass(newClassName.trim());
-                    }
-                    setNewClassName('');
-                  })
-                }
+                type="submit"
                 className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl cursor-pointer"
               >
                 {editingClassOldName ? 'Save Class' : '+ Add Class'}
               </button>
-            </div>
+            </form>
             <p className="text-[11px] text-slate-500">
               Click the pencil icon on any class to rename/edit it, or click &times; to remove it.
             </p>
@@ -1532,7 +1538,24 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 </button>
               )}
             </div>
-            <div className="flex gap-2">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const val = newSectionName.trim();
+                if (!val) return;
+                const oldVal = editingSectionOldName;
+                setNewSectionName('');
+                setEditingSectionOldName(null);
+                runMasterAction(async () => {
+                  if (oldVal && onUpdateSection) {
+                    await onUpdateSection(oldVal, val);
+                  } else {
+                    await onAddSection(val);
+                  }
+                });
+              }}
+              className="flex gap-2"
+            >
               <input
                 type="text"
                 placeholder="Section Name (e.g. A, B, Rose)"
@@ -1541,23 +1564,12 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 className="flex-1 p-2 border border-slate-300 rounded-xl text-xs font-semibold"
               />
               <button
-                onClick={() =>
-                  runMasterAction(async () => {
-                    if (!newSectionName.trim()) return;
-                    if (editingSectionOldName && onUpdateSection) {
-                      await onUpdateSection(editingSectionOldName, newSectionName.trim());
-                      setEditingSectionOldName(null);
-                    } else {
-                      await onAddSection(newSectionName.trim());
-                    }
-                    setNewSectionName('');
-                  })
-                }
+                type="submit"
                 className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl cursor-pointer"
               >
                 {editingSectionOldName ? 'Save Section' : '+ Add Section'}
               </button>
-            </div>
+            </form>
             <p className="text-[11px] text-slate-500">
               Click the pencil icon on any section to rename/edit it, or click &times; to remove it.
             </p>
@@ -1618,7 +1630,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 </h3>
               </div>
               <span className="px-3 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
-                Synced Live to Google Sheets (System_Users Tab)
+                Active Role Directory
               </span>
             </div>
 
@@ -1626,19 +1638,19 @@ export const MastersView: React.FC<MastersViewProps> = ({
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-amber-500/30 space-y-1">
                 <div className="font-bold text-amber-300">1. Admin Role</div>
                 <p className="text-slate-300 text-[11px]">
-                  Full access to all 11 modules: Executive Dashboard, Approvals (Suspensions, Work Orders, Expenses), Payroll, Chart of Accounts, Trial Balance, Users &amp; Passwords, and Google Sheets Sync.
+                  Full access to all modules: Executive Dashboard, Masters &amp; Users, Approvals (Suspensions, Work Orders, Expenses), Payroll, Chart of Accounts, Trial Balance, and Reports.
                 </p>
               </div>
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-sky-500/30 space-y-1">
                 <div className="font-bold text-sky-300">2. Transport Coordinator Role</div>
                 <p className="text-slate-300 text-[11px]">
-                  Operational &amp; collection access: Member Directory, Fee Collection &amp; Follow-ups, Active Routes, Vehicles, Staff Attendance, and submitting Work Orders / Suspensions for Admin approval.
+                  Operational &amp; collection access (no Masters access): Member Directory, Fee Collection &amp; Follow-ups, Active Routes, Vehicles, Staff Attendance, and submitting Work Orders / Suspensions for Admin approval.
                 </p>
               </div>
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-emerald-500/30 space-y-1">
                 <div className="font-bold text-emerald-300">3. Transport Assistant Role</div>
                 <p className="text-slate-300 text-[11px]">
-                  Field &amp; Gate Desk only: Gate Arrival &amp; Departure Attendance, Weekly Route Lists, 24-Hr Vehicle Log Book (Odometer), Driver Fuel Advances, and Student Bus Discipline.
+                  Authorized for Fee Receipts, Dues Follow-ups, Work Order Requests, Route &amp; Staff Attendance, 24-Hr Vehicle Log Book, Expense Entries, Adding New Members, and Receiving Candidate Resumes (no Masters access).
                 </p>
               </div>
             </div>

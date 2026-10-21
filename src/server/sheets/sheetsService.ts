@@ -159,6 +159,10 @@ export class SheetsDatabaseManager {
   private initPromise: Promise<void> = Promise.resolve();
   private lastHydratedAt = 0;
   private lastLocalWriteAt = 0;
+  private hasHydratedFromSheets = false;
+  private hydratingPromise: Promise<void> | null = null;
+  private lastStatusCheckedAt = 0;
+  private lastConnectedState = false;
 
   constructor() {
     this.loadLocalSnapshot();
@@ -176,10 +180,12 @@ export class SheetsDatabaseManager {
       await this.initPromise;
       await this.writeQueue;
       if (this.isGoogleConfigured) {
-        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 2000;
-        if (forceFresh && !recentlyWroteLocally) {
+        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 2500;
+        if (!this.hasHydratedFromSheets) {
           await this.hydrateFromGoogleSheets(true);
-        } else if (process.env.VERCEL && !recentlyWroteLocally) {
+        } else if (forceFresh && !recentlyWroteLocally) {
+          await this.hydrateFromGoogleSheets(true);
+        } else if (process.env.VERCEL && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 1500) {
           await this.hydrateFromGoogleSheets(true);
         } else if (this.lastHydratedAt === 0) {
           await this.hydrateFromGoogleSheets(false);
@@ -507,52 +513,73 @@ export class SheetsDatabaseManager {
       this.loadLocalSnapshot();
       return;
     }
-    if (!force && this.lastHydratedAt > 0 && Date.now() - this.lastHydratedAt < 2500) {
+    if (!force && this.hasHydratedFromSheets && this.lastHydratedAt > 0 && Date.now() - this.lastHydratedAt < 2500) {
       return;
     }
+    if (this.hydratingPromise) {
+      return this.hydratingPromise;
+    }
 
-    try {
-      const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
-        spreadsheetId: this.sheetId,
-        ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
-      });
-
-      const valueRanges: any[] = batchRes.data?.valueRanges || [];
-      const tabMap = new Map<string, any[][]>();
-      ALL_ERP_SHEET_TABS.forEach((tab, idx) => {
-        tabMap.set(tab, valueRanges[idx]?.values || []);
-      });
-
-      // 1. Hydrate School_Masters
-      const schoolMastersRows = tabMap.get('School_Masters');
-      if (schoolMastersRows && schoolMastersRows.length >= 2 && schoolMastersRows[1]?.length > 0) {
-        const row2 = schoolMastersRows[1];
-        const rawMastersJson = row2[8];
-        if (typeof rawMastersJson === 'string' && rawMastersJson.trim().startsWith('{')) {
-          try {
-            const parsedMasters = JSON.parse(rawMastersJson);
-            if (parsedMasters.config) this.config = { ...this.config, ...parsedMasters.config };
-            if (Array.isArray(parsedMasters.campusesMaster)) this.campusesMaster = parsedMasters.campusesMaster;
-            if (Array.isArray(parsedMasters.memberTypesMaster)) this.memberTypesMaster = parsedMasters.memberTypesMaster;
-            if (Array.isArray(parsedMasters.classesMaster)) this.classesMaster = parsedMasters.classesMaster;
-            if (Array.isArray(parsedMasters.sectionsMaster)) this.sectionsMaster = parsedMasters.sectionsMaster;
-            if (Array.isArray(parsedMasters.tripsMaster)) this.tripsMaster = parsedMasters.tripsMaster;
-            if (Array.isArray(parsedMasters.designationsMaster)) this.designationsMaster = parsedMasters.designationsMaster;
-          } catch {
-            // fallback to columns
+    this.hydratingPromise = (async () => {
+      let lastErr: any = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, attempt * 450));
           }
-        }
-        // Always ensure direct column edits in School_Masters row 2 (like School Name in A2) take effect
-        if (row2[0]) this.config.schoolName = String(row2[0]).trim();
-        if (row2[1] !== undefined) this.config.tagline = String(row2[1]).trim();
-        if (row2[2] !== undefined) this.config.address = String(row2[2]).trim();
-        if (row2[3] !== undefined) this.config.phone = String(row2[3]).trim();
-        if (row2[4] !== undefined) this.config.email = String(row2[4]).trim();
-        if (row2[5]) this.config.currentAcademicSession = String(row2[5]).trim();
-        if (row2[6]) this.config.currentFinancialYear = String(row2[6]).trim();
-        if (row2[7]) this.config.timezone = String(row2[7]).trim();
-        this.config.campuses = [...this.campusesMaster];
-      }
+          const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
+            spreadsheetId: this.sheetId,
+            ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
+          });
+
+          const valueRanges: any[] = batchRes.data?.valueRanges || [];
+          const tabMap = new Map<string, any[][]>();
+          ALL_ERP_SHEET_TABS.forEach((tab, idx) => {
+            tabMap.set(tab, valueRanges[idx]?.values || []);
+          });
+
+          // 1. Hydrate School_Masters
+          const schoolMastersRows = tabMap.get('School_Masters');
+          if (schoolMastersRows && schoolMastersRows.length >= 2 && schoolMastersRows[1]?.length > 0) {
+            const row2 = schoolMastersRows[1];
+            const rawMastersJson = row2[8];
+            let parsedJsonOk = false;
+            if (typeof rawMastersJson === 'string' && rawMastersJson.trim().startsWith('{')) {
+              try {
+                const parsedMasters = JSON.parse(rawMastersJson);
+                if (parsedMasters.config) this.config = { ...this.config, ...parsedMasters.config };
+                if (Array.isArray(parsedMasters.campusesMaster)) this.campusesMaster = parsedMasters.campusesMaster;
+                if (Array.isArray(parsedMasters.memberTypesMaster)) this.memberTypesMaster = parsedMasters.memberTypesMaster;
+                if (Array.isArray(parsedMasters.classesMaster)) this.classesMaster = parsedMasters.classesMaster;
+                if (Array.isArray(parsedMasters.sectionsMaster)) this.sectionsMaster = parsedMasters.sectionsMaster;
+                if (Array.isArray(parsedMasters.tripsMaster)) this.tripsMaster = parsedMasters.tripsMaster;
+                if (Array.isArray(parsedMasters.designationsMaster)) this.designationsMaster = parsedMasters.designationsMaster;
+                parsedJsonOk = true;
+              } catch {
+                // fallback to columns
+              }
+            }
+            if (!parsedJsonOk) {
+              const classesRow = schoolMastersRows.find(r => Array.isArray(r) && String(r[0] || '').trim() === 'Classes');
+              if (classesRow && classesRow.length > 1) {
+                this.classesMaster = classesRow.slice(1).map(c => String(c || '').trim()).filter(Boolean);
+              }
+              const sectionsRow = schoolMastersRows.find(r => Array.isArray(r) && String(r[0] || '').trim() === 'Sections');
+              if (sectionsRow && sectionsRow.length > 1) {
+                this.sectionsMaster = sectionsRow.slice(1).map(s => String(s || '').trim()).filter(Boolean);
+              }
+            }
+            // Always ensure direct column edits in School_Masters row 2 (like School Name in A2) take effect, ignoring formula errors (#ERROR!)
+            if (row2[0] && !String(row2[0]).startsWith('#')) this.config.schoolName = String(row2[0]).trim();
+            if (row2[1] !== undefined && !String(row2[1]).startsWith('#')) this.config.tagline = String(row2[1]).trim();
+            if (row2[2] !== undefined && !String(row2[2]).startsWith('#')) this.config.address = String(row2[2]).trim();
+            if (row2[3] !== undefined && !String(row2[3]).startsWith('#')) this.config.phone = String(row2[3]).trim();
+            if (row2[4] !== undefined && !String(row2[4]).startsWith('#')) this.config.email = String(row2[4]).trim();
+            if (row2[5] && !String(row2[5]).startsWith('#')) this.config.currentAcademicSession = String(row2[5]).trim();
+            if (row2[6] && !String(row2[6]).startsWith('#')) this.config.currentFinancialYear = String(row2[6]).trim();
+            if (row2[7] && !String(row2[7]).startsWith('#')) this.config.timezone = String(row2[7]).trim();
+            this.config.campuses = [...this.campusesMaster];
+          }
 
       // 2. Hydrate entity tabs (respecting empty tabs when headers exist so deletions persist)
       if ((tabMap.get('Villages_And_Stops') || []).length >= 1) {
@@ -643,14 +670,26 @@ export class SheetsDatabaseManager {
         this.systemUsers = users;
       }
 
-      this.rebuildScheduledServices();
-      this.saveLocalSnapshot();
-      this.lastHydratedAt = Date.now();
-      this.lastError = null;
-    } catch (err: any) {
-      this.lastError = err.message;
-      console.error('Google Sheets Hydrate Error:', err.message);
-    }
+          this.rebuildScheduledServices();
+          this.saveLocalSnapshot();
+          this.hasHydratedFromSheets = true;
+          this.lastConnectedState = true;
+          this.lastHydratedAt = Date.now();
+          this.lastError = null;
+          return;
+        } catch (err: any) {
+          lastErr = err;
+        }
+      }
+      if (lastErr) {
+        this.lastError = lastErr.message;
+        console.error('Google Sheets Hydrate Error:', lastErr.message);
+      }
+    })().finally(() => {
+      this.hydratingPromise = null;
+    });
+
+    return this.hydratingPromise;
   }
 
   private async autoBootstrapGoogleSheets() {
@@ -705,10 +744,15 @@ export class SheetsDatabaseManager {
     this.queueCount++;
     const execution = this.writeQueue.then(async () => {
       try {
-        // On serverless or before any write, ensure we have latest Google Sheets state before mutating
-        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 2000;
-        if (this.isGoogleConfigured && ((process.env.VERCEL && !recentlyWroteLocally) || this.lastHydratedAt === 0)) {
+        await this.initPromise;
+        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 1800;
+        if (this.isGoogleConfigured && (!this.hasHydratedFromSheets || (!recentlyWroteLocally && Date.now() - this.lastHydratedAt > 1500))) {
           await this.hydrateFromGoogleSheets(true);
+        }
+        if (this.isGoogleConfigured && !this.hasHydratedFromSheets) {
+          throw new Error(
+            'Could not read current data from Google Sheets before saving. Please retry in a few seconds so existing records are not overwritten.'
+          );
         }
         const res = await task();
         const now = Date.now();
@@ -724,31 +768,8 @@ export class SheetsDatabaseManager {
     return execution;
   }
 
-  public async getStatus(): Promise<SheetsConnectionStatus> {
-    let isConnected = false;
-    if (this.isGoogleConfigured && this.sheetsClient && this.sheetId) {
-      try {
-        const meta = await this.sheetsClient.spreadsheets.get({
-          spreadsheetId: this.sheetId,
-          fields: 'spreadsheetId,properties.title,sheets.properties.title',
-        });
-        isConnected = true;
-        if (meta.data?.properties?.title) {
-          this.spreadsheetTitle = meta.data.properties.title;
-        }
-        const sheetTitles = (meta.data?.sheets || [])
-          .map((s: any) => s.properties?.title)
-          .filter(Boolean);
-        if (sheetTitles.length > 0) {
-          this.provisionedTabsList = sheetTitles;
-        }
-        this.lastError = null;
-      } catch (err: any) {
-        this.lastError = err.message;
-        isConnected = false;
-      }
-    }
-
+  public getCachedStatus(): SheetsConnectionStatus {
+    const isConnected = this.isGoogleConfigured && (this.lastConnectedState || this.hasHydratedFromSheets);
     const totalRecords =
       this.students.length +
       this.employees.length +
@@ -809,6 +830,110 @@ export class SheetsDatabaseManager {
       lastError: this.lastError,
       activeWriterQueueLength: this.queueCount,
     };
+  }
+
+  public getBootstrapSnapshot() {
+    const students = this.getStudents();
+    const trips = this.getTrips();
+    const vehicles = this.getVehicles();
+    const invoices = this.getInvoices();
+    const receipts = this.getReceipts();
+    const accounts = this.getAccounts();
+    const expenses = this.getExpenses();
+
+    return {
+      attendance: this.getAllAttendance(),
+      masters: {
+        config: this.getSchoolConfig(),
+        campuses: [...this.getCampuses()],
+        memberTypes: [...this.getMemberTypes()],
+        classes: [...this.getClasses()],
+        sections: [...this.getSections()],
+        trips: [...this.getTripsMaster()],
+        designations: [...this.getDesignationsMaster()],
+        villages: [...this.getVillages()],
+        vehicles: [...vehicles],
+        routes: [...this.getRoutes()],
+        users: [...this.getUsers()],
+      },
+      status: this.getCachedStatus(),
+      students: [...students],
+      employees: [...this.getEmployees()],
+      resumes: [...this.getResumes()],
+      trips: [...trips],
+      services: [...this.getScheduledServices()],
+      invoices: [...invoices],
+      receipts: [...receipts],
+      warningLetters: [...this.getWarningLetters()],
+      expenses: [...expenses],
+      expenseHeads: [...this.getExpenseHeads()],
+      incomeHeads: [...this.getIncomeHeads()],
+      incomes: [...this.getIncomes()],
+      odometerLogs: [...this.getOdometerLogs()],
+      fuelAdvances: [...this.getFuelAdvances()],
+      maintenance: [...this.getMaintenanceRequests()],
+      accounts: [...accounts],
+      vouchers: [...this.getVouchers()],
+      reportsSummary: {
+        metrics: {
+          totalStudents: students.length,
+          activeStudents: students.filter(s => s.transportStatus === 'Active').length,
+          suspendedStudents: students.filter(s => s.transportStatus === 'Suspended').length,
+          needsSetupStudents: students.filter(s => s.transportStatus === 'Needs Setup').length,
+          totalBilled: invoices.reduce((s, i) => s + i.netAmount, 0),
+          totalCollected: receipts.reduce((s, r) => s + r.amount, 0),
+          totalOutstanding: students.reduce((s, st) => s + st.balanceDue, 0),
+          totalVehicles: vehicles.length,
+          availableVehicles: vehicles.filter(v => v.availability === 'Available').length,
+          totalTripsToday: trips.length,
+          tripsArrived: trips.filter(t => t.status === 'Arrived').length,
+          tripsPending: trips.filter(t => t.status === 'Ready' || t.status === 'Planned').length,
+          mismatchesCount: trips.reduce((s, t) => s + t.mismatchCount, 0),
+          totalFuelSpend: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected' && e.category.includes('Fuel')).reduce((s, e) => s + e.amount, 0),
+          totalRepairsSpend: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected' && e.category.includes('Repairs')).reduce((s, e) => s + e.amount, 0),
+          totalExpensesAll: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected').reduce((s, e) => s + e.amount, 0),
+          unsettledAdvances: 0,
+        },
+        accountsOverview: accounts,
+      },
+      followUps: [...this.getFollowUps()],
+      disciplineRecords: [...this.getDisciplineRecords()],
+      vehicleAssignments: [...this.getVehicleAssignments()],
+      staffAttendance: [...this.getStaffAttendance()],
+      staffAdvances: [...this.getStaffAdvances()],
+      staffPayrolls: [...this.getStaffPayrolls()],
+      holidays: [...this.getHolidays()],
+    };
+  }
+
+  public async getStatus(): Promise<SheetsConnectionStatus> {
+    if (this.isGoogleConfigured && this.sheetsClient && this.sheetId) {
+      if (this.lastStatusCheckedAt > 0 && Date.now() - this.lastStatusCheckedAt < 25000 && this.lastConnectedState) {
+        return this.getCachedStatus();
+      }
+      try {
+        const meta = await this.sheetsClient.spreadsheets.get({
+          spreadsheetId: this.sheetId,
+          fields: 'spreadsheetId,properties.title,sheets.properties.title',
+        });
+        this.lastConnectedState = true;
+        this.lastStatusCheckedAt = Date.now();
+        if (meta.data?.properties?.title) {
+          this.spreadsheetTitle = meta.data.properties.title;
+        }
+        const sheetTitles = (meta.data?.sheets || [])
+          .map((s: any) => s.properties?.title)
+          .filter(Boolean);
+        if (sheetTitles.length > 0) {
+          this.provisionedTabsList = sheetTitles;
+        }
+        this.lastError = null;
+      } catch (err: any) {
+        this.lastError = err.message;
+        this.lastConnectedState = false;
+      }
+    }
+    return this.getCachedStatus();
   }
 
   public async provisionSpreadsheetTabs(): Promise<{ success: boolean; message: string }> {
@@ -1517,30 +1642,47 @@ export class SheetsDatabaseManager {
         },
       ];
 
-      // 1. Write all current rows first so no tab is ever blank during concurrent reads
-      await this.sheetsClient.spreadsheets.values.batchUpdate({
-        spreadsheetId: this.sheetId,
-        requestBody: {
-          valueInputOption: 'USER_ENTERED',
-          data: dataPayload,
-        },
-      });
-
-      // 2. Clear any trailing rows below each tab's current row count so deleted rows are permanently removed
+      // 1. Write all current rows first with RAW valueInputOption (so +91 phone numbers never become #ERROR! formulas)
       const trailingClearRanges = dataPayload.map(entry => {
         const tabName = entry.range.split('!')[0];
         const writtenRows = Array.isArray(entry.values) ? entry.values.length : 1;
         return `${tabName}!A${writtenRows + 1}:Z2000`;
       });
 
-      await this.sheetsClient.spreadsheets.values.batchClear({
-        spreadsheetId: this.sheetId,
-        requestBody: {
-          ranges: trailingClearRanges,
-        },
-      });
+      let syncErr: any = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, attempt * 500));
+          }
+          await this.sheetsClient.spreadsheets.values.batchUpdate({
+            spreadsheetId: this.sheetId,
+            requestBody: {
+              valueInputOption: 'RAW',
+              data: dataPayload,
+            },
+          });
+
+          // 2. Clear any trailing rows below each tab's current row count so deleted rows are permanently removed
+          await this.sheetsClient.spreadsheets.values.batchClear({
+            spreadsheetId: this.sheetId,
+            requestBody: {
+              ranges: trailingClearRanges,
+            },
+          });
+          syncErr = null;
+          break;
+        } catch (e: any) {
+          syncErr = e;
+        }
+      }
+
+      if (syncErr) {
+        throw syncErr;
+      }
 
       this.lastSyncAt = new Date().toISOString();
+      this.lastConnectedState = true;
       this.lastError = null;
       return {
         success: true,
@@ -1548,7 +1690,7 @@ export class SheetsDatabaseManager {
       };
     } catch (err: any) {
       this.lastError = err.message;
-      return { success: false, message: `Sync failed: ${err.message}` };
+      throw new Error(`Google Sheets Sync Error: ${err.message}`);
     }
   }
 
@@ -1730,17 +1872,18 @@ export class SheetsDatabaseManager {
   public getClasses() { return this.classesMaster; }
   public async addClass(className: string) {
     return this.enqueueWrite(async () => {
-      const trimmed = className.trim();
-      if (trimmed && !this.classesMaster.includes(trimmed)) {
+      const trimmed = (className || '').trim();
+      if (!trimmed) throw new Error('Class name cannot be empty.');
+      if (!this.classesMaster.some(c => c.toLowerCase() === trimmed.toLowerCase())) {
         this.classesMaster.push(trimmed);
         await this.internalSyncToGoogleSheets();
       }
-      return this.classesMaster;
+      return [...this.classesMaster];
     });
   }
   public async updateClass(oldName: string, newName: string) {
     return this.enqueueWrite(async () => {
-      const trimmed = newName.trim();
+      const trimmed = (newName || '').trim();
       if (!trimmed) throw new Error('Class name cannot be empty.');
       const idx = this.classesMaster.findIndex(c => c === oldName);
       if (idx < 0) throw new Error(`Class "${oldName}" not found.`);
@@ -1752,7 +1895,7 @@ export class SheetsDatabaseManager {
         if (s.class === oldName) s.class = trimmed;
       });
       await this.internalSyncToGoogleSheets();
-      return this.classesMaster;
+      return [...this.classesMaster];
     });
   }
   public async removeClass(className: string) {
@@ -1765,24 +1908,25 @@ export class SheetsDatabaseManager {
       }
       this.classesMaster = this.classesMaster.filter(c => c !== className);
       await this.internalSyncToGoogleSheets();
-      return this.classesMaster;
+      return [...this.classesMaster];
     });
   }
 
   public getSections() { return this.sectionsMaster; }
   public async addSection(sectionName: string) {
     return this.enqueueWrite(async () => {
-      const trimmed = sectionName.trim();
-      if (trimmed && !this.sectionsMaster.includes(trimmed)) {
+      const trimmed = (sectionName || '').trim();
+      if (!trimmed) throw new Error('Section name cannot be empty.');
+      if (!this.sectionsMaster.some(s => s.toLowerCase() === trimmed.toLowerCase())) {
         this.sectionsMaster.push(trimmed);
         await this.internalSyncToGoogleSheets();
       }
-      return this.sectionsMaster;
+      return [...this.sectionsMaster];
     });
   }
   public async updateSection(oldName: string, newName: string) {
     return this.enqueueWrite(async () => {
-      const trimmed = newName.trim();
+      const trimmed = (newName || '').trim();
       if (!trimmed) throw new Error('Section name cannot be empty.');
       const idx = this.sectionsMaster.findIndex(s => s === oldName);
       if (idx < 0) throw new Error(`Section "${oldName}" not found.`);
@@ -1794,7 +1938,7 @@ export class SheetsDatabaseManager {
         if (s.section === oldName) s.section = trimmed;
       });
       await this.internalSyncToGoogleSheets();
-      return this.sectionsMaster;
+      return [...this.sectionsMaster];
     });
   }
   public async removeSection(sectionName: string) {
@@ -1807,7 +1951,7 @@ export class SheetsDatabaseManager {
       }
       this.sectionsMaster = this.sectionsMaster.filter(s => s !== sectionName);
       await this.internalSyncToGoogleSheets();
-      return this.sectionsMaster;
+      return [...this.sectionsMaster];
     });
   }
 
@@ -1828,7 +1972,7 @@ export class SheetsDatabaseManager {
       }
       this.tripsMaster.sort((a, b) => a.tripNumber - b.tripNumber);
       await this.internalSyncToGoogleSheets();
-      return this.tripsMaster;
+      return [...this.tripsMaster];
     });
   }
   public async updateTripMaster(id: string, data: Partial<TripMaster>) {
@@ -1844,7 +1988,7 @@ export class SheetsDatabaseManager {
       this.tripsMaster[idx] = { ...oldTrip, tripNumber: newNum, description: newDesc || `Trip ${newNum}` };
       this.tripsMaster.sort((a, b) => a.tripNumber - b.tripNumber);
       await this.internalSyncToGoogleSheets();
-      return this.tripsMaster;
+      return [...this.tripsMaster];
     });
   }
   public async removeTripMaster(id: string) {
@@ -1860,7 +2004,7 @@ export class SheetsDatabaseManager {
       }
       this.tripsMaster = this.tripsMaster.filter(t => t.id !== id);
       await this.internalSyncToGoogleSheets();
-      return this.tripsMaster;
+      return [...this.tripsMaster];
     });
   }
 
@@ -1906,23 +2050,25 @@ export class SheetsDatabaseManager {
   }
 
   public async authenticateUser(username: string, password: string): Promise<SystemUser> {
-    const cleanUser = (username || '').trim().toLowerCase();
-    const cleanPass = (password || '').trim();
-    if (!cleanUser || !cleanPass) {
-      throw new Error('Please enter both username and password.');
-    }
-    const found = this.systemUsers.find(
-      u => u.username.toLowerCase() === cleanUser && u.password === cleanPass
-    );
-    if (!found) {
-      throw new Error('Invalid username or password. Please check your credentials and try again.');
-    }
-    if (found.status !== 'Active') {
-      throw new Error(`Account "${found.username}" is currently disabled. Please contact the Administrator.`);
-    }
-    found.lastLoginAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    await this.internalSyncToGoogleSheets();
-    return found;
+    return this.enqueueWrite(async () => {
+      const cleanUser = (username || '').trim().toLowerCase();
+      const cleanPass = (password || '').trim();
+      if (!cleanUser || !cleanPass) {
+        throw new Error('Please enter both username and password.');
+      }
+      const found = this.systemUsers.find(
+        u => u.username.toLowerCase() === cleanUser && u.password === cleanPass
+      );
+      if (!found) {
+        throw new Error('Invalid username or password. Please check your credentials and try again.');
+      }
+      if (found.status !== 'Active') {
+        throw new Error(`Account "${found.username}" is currently disabled. Please contact the Administrator.`);
+      }
+      found.lastLoginAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      await this.internalSyncToGoogleSheets();
+      return found;
+    });
   }
 
   public async saveUser(data: Partial<SystemUser>): Promise<SystemUser> {

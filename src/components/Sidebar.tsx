@@ -478,13 +478,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       defaultNavKey: 'reports',
       allowedRoles: ['Admin', 'Transport Coordinator'],
     },
-    {
-      key: 'setup',
-      label: '11- Google Sheets & Drive',
-      icon: <Settings className="w-5 h-5" />,
-      defaultNavKey: 'setup',
-      allowedRoles: ['Admin'],
-    },
   ];
 
   const visibleGroups = (currentRole === 'Transport Assistant' ? assistantGroups : standardGroups)

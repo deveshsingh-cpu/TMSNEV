@@ -67,6 +67,47 @@ export interface MastersData {
   users?: SystemUser[];
 }
 
+let bootstrapUpdateListener: ((boot: any) => void) | null = null;
+let lastMutationBootstrapAt = 0;
+
+export function subscribeToBootstrapUpdates(listener: ((boot: any) => void) | null) {
+  bootstrapUpdateListener = listener;
+}
+
+export function getLastMutationBootstrapAt(): number {
+  return lastMutationBootstrapAt;
+}
+
+function unwrapMutationEnvelope(data: any): any {
+  if (data && typeof data === 'object' && data.__erpEnvelope === true) {
+    if (data.bootstrap && bootstrapUpdateListener) {
+      lastMutationBootstrapAt = Date.now();
+      bootstrapUpdateListener(data.bootstrap);
+    }
+    return data.result;
+  }
+  return data;
+}
+
+const nativeFetch = globalThis.fetch.bind(globalThis);
+
+async function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const method = (init?.method || 'GET').toUpperCase();
+  let nextInit = init;
+  if (method !== 'GET') {
+    const headers = new Headers(init?.headers || {});
+    headers.set('X-ERP-Include-Bootstrap', '1');
+    nextInit = { ...init, headers };
+  }
+  const res = await nativeFetch(input, nextInit);
+  const origJson = res.json.bind(res);
+  res.json = async () => {
+    const parsed = await origJson();
+    return unwrapMutationEnvelope(parsed);
+  };
+  return res;
+}
+
 async function parseApiJson(res: Response, fallbackError: string) {
   const text = await res.text();
   let data: any = null;
@@ -85,7 +126,7 @@ async function parseApiJson(res: Response, fallbackError: string) {
   if (!res.ok) {
     throw new Error(data?.error || fallbackError);
   }
-  return data;
+  return unwrapMutationEnvelope(data);
 }
 
 export const api = {

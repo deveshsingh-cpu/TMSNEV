@@ -15,7 +15,13 @@ import { ReportsView } from './components/views/ReportsView.js';
 import { SetupView } from './components/views/SetupView.js';
 import { LoginView } from './components/views/LoginView.js';
 import { PublicWebsiteView } from './components/views/PublicWebsiteView.js';
-import { api, ReportsSummary, SheetsStatus } from './services/api.js';
+import {
+  api,
+  ReportsSummary,
+  SheetsStatus,
+  subscribeToBootstrapUpdates,
+  getLastMutationBootstrapAt,
+} from './services/api.js';
 import {
   SchoolConfig,
   CampusMaster,
@@ -90,11 +96,12 @@ export function App() {
   // Core Masters & State
   const [config, setConfig] = useState<SchoolConfig>({
     schoolName: 'Narendra Edu Valley',
-    tagline: 'Fleet & Transport Operations ERP',
+    tagline: 'The Future Begins Here..',
     academicYear: '2026-2027',
-    address: 'NH-27, Civil Lines, Prayagraj, UP',
-    phone: '+91 94150 00000',
-    email: 'transport@narendraeduvalley.ac.in',
+    currentAcademicSession: '2026-2027',
+    address: 'Nayagaon , Chainpur , Siwan , Bihar -841203',
+    phone: '+91 7050421421',
+    email: 'narendra.eduvalley@gmail.com',
     lateFeePerDay: 10,
     autoSuspendAfterMonths: 2,
   });
@@ -142,10 +149,9 @@ export function App() {
   const [reportsSummary, setReportsSummary] = useState<ReportsSummary | null>(null);
   const [sheetsStatus, setSheetsStatus] = useState<SheetsStatus | null>(null);
 
-  const loadAllData = useCallback(async () => {
-    try {
-      setError(null);
-      const boot = await api.getBootstrap(true);
+  const applyBootstrapPayload = useCallback(
+    (boot: any) => {
+      if (!boot) return;
       const mastersData = boot?.masters;
 
       if (mastersData?.config) setConfig(mastersData.config);
@@ -200,18 +206,37 @@ export function App() {
         const tripIdToLoad = selectedTripId || tripsList[0].id;
         setSelectedTripId(tripIdToLoad);
         if (Array.isArray(boot?.attendance)) {
-          setAttendanceRecords(boot.attendance.filter((a: TripAttendanceRecord) => a.tripId === tripIdToLoad));
-        } else {
-          const att = await api.getTripAttendance(tripIdToLoad);
-          setAttendanceRecords(att || []);
+          setAttendanceRecords(
+            boot.attendance.filter((a: TripAttendanceRecord) => a.tripId === tripIdToLoad)
+          );
         }
       }
+    },
+    [selectedTripId]
+  );
+
+  useEffect(() => {
+    subscribeToBootstrapUpdates(applyBootstrapPayload);
+    return () => subscribeToBootstrapUpdates(null);
+  }, [applyBootstrapPayload]);
+
+  const loadAllData = useCallback(async () => {
+    // If state was already updated synchronously from a mutation envelope response within the last 4s,
+    // skip a second HTTP round-trip that could hit a stale serverless container.
+    if (getLastMutationBootstrapAt() > 0 && Date.now() - getLastMutationBootstrapAt() < 4000) {
+      setLoading(false);
+      return;
+    }
+    try {
+      setError(null);
+      const boot = await api.getBootstrap(true);
+      applyBootstrapPayload(boot);
     } catch (err: any) {
       setError(err.message || 'Failed to load application data');
     } finally {
       setLoading(false);
     }
-  }, [selectedTripId]);
+  }, [applyBootstrapPayload]);
 
   useEffect(() => {
     loadAllData();
@@ -886,35 +911,6 @@ export function App() {
                 <span>Users &amp; Passwords</span>
               </button>
             )}
-
-            {isAdmin && sheetsStatus?.isConnected && (
-              <button
-                onClick={() => handleNavigate('setup')}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100 transition-colors cursor-pointer"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Google Sheets Live ({sheetsStatus.totalTabs} Tabs)</span>
-              </button>
-            )}
-
-            {isAdmin && sheetsStatus && !sheetsStatus.isConnected && (
-              <button
-                onClick={() => handleNavigate('setup')}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border bg-rose-50 border-rose-300 text-rose-800 hover:bg-rose-100 transition-colors cursor-pointer"
-                title={sheetsStatus.lastError || 'Click to connect Google Sheets'}
-              >
-                <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
-                <span>Google Sheets Not Connected — Setup</span>
-              </button>
-            )}
-
-            <button
-              onClick={loadAllData}
-              className="p-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors cursor-pointer"
-              title="Refresh Data"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            </button>
 
             <button
               onClick={() => handleLogout(false)}

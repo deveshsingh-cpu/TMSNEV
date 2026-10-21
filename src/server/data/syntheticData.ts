@@ -17,15 +17,18 @@ export const initialCampusesMaster: CampusMaster[] = [
 // School Configuration & Branding (Editable in Masters -> Name of Institute)
 export const initialSchoolConfig: SchoolConfig = {
   schoolName: 'Narendra Edu Valley',
-  tagline: 'Transport Management System',
-  address: '',
-  phone: '',
-  email: '',
+  tagline: 'The Future Begins Here..',
+  address: 'Nayagaon , Chainpur , Siwan , Bihar -841203',
+  phone: '+91 7050421421',
+  email: 'narendra.eduvalley@gmail.com',
   currentAcademicSession: '2026-2027',
   currentFinancialYear: '2026-2027',
   currency: 'INR',
   timezone: 'Asia/Kolkata',
   campuses: [...initialCampusesMaster],
+  academicYear: '2026-2027',
+  lateFeePerDay: 10,
+  autoSuspendAfterMonths: 2,
 };
 
 // Masters: Member Types
@@ -36,11 +39,11 @@ export const initialMemberTypesMaster: MemberTypeMaster[] = [
 ];
 
 export const initialClassesMaster: string[] = [
-  'LKG', 'UKG', 'Class I', 'Class II', 'Class III', 'Class IV', 'Class V',
-  'Class VI', 'Class VII', 'Class VIII', 'Class IX', 'Class X', 'Class XI', 'Class XII', 'Staff'
+  'Playgroup', 'Nursery', 'LKG', 'UKG', 'Class I', 'Class II', 'Class III', 'Class IV', 'Class V',
+  'Class VI', 'Class VII', 'Class VIII', 'Class IX', 'Class X', 'Class XI', 'Staff'
 ];
 
-export const initialSectionsMaster: string[] = ['A', 'B', 'C'];
+export const initialSectionsMaster: string[] = ['A', 'B'];
 
 export const initialTripsMaster: TripMaster[] = [
   { id: 'trp-1', tripNumber: 1, description: 'Trip 1 — First Shift' },

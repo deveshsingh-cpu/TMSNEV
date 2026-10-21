@@ -3,11 +3,30 @@ import { sheetsDb } from '../sheets/sheetsService.js';
 
 export const apiRouter = Router();
 
-apiRouter.use(async (_req: Request, res: Response, next) => {
+apiRouter.use(async (req: Request, res: Response, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  await sheetsDb.ensureInitialized();
+
+  if (req.method === 'GET') {
+    await sheetsDb.ensureInitialized(req.query.fresh === '1');
+  } else {
+    const originalJson = res.json.bind(res);
+    res.json = ((body: any) => {
+      if (
+        res.statusCode < 400 &&
+        req.headers['x-erp-include-bootstrap'] === '1' &&
+        (!body || typeof body !== 'object' || !body.__erpEnvelope)
+      ) {
+        return originalJson({
+          __erpEnvelope: true,
+          result: body,
+          bootstrap: sheetsDb.getBootstrapSnapshot(),
+        });
+      }
+      return originalJson(body);
+    }) as any;
+  }
   next();
 });
 
@@ -49,83 +68,9 @@ apiRouter.post('/sheets/credentials', async (req: Request, res: Response) => {
 });
 
 // Unified Single-Request Bootstrap (Prevents multi-instance serverless race conditions)
-apiRouter.get('/bootstrap', async (req: Request, res: Response) => {
+apiRouter.get('/bootstrap', async (_req: Request, res: Response) => {
   try {
-    if (req.query.fresh === '1') {
-      await sheetsDb.ensureInitialized(true);
-    }
-    const status = await sheetsDb.getStatus();
-    const students = sheetsDb.getStudents();
-    const trips = sheetsDb.getTrips();
-    const vehicles = sheetsDb.getVehicles();
-    const invoices = sheetsDb.getInvoices();
-    const receipts = sheetsDb.getReceipts();
-    const accounts = sheetsDb.getAccounts();
-    const expenses = sheetsDb.getExpenses();
-
-    res.json({
-      attendance: sheetsDb.getAllAttendance(),
-      masters: {
-        config: sheetsDb.getSchoolConfig(),
-        campuses: sheetsDb.getCampuses(),
-        memberTypes: sheetsDb.getMemberTypes(),
-        classes: sheetsDb.getClasses(),
-        sections: sheetsDb.getSections(),
-        trips: sheetsDb.getTripsMaster(),
-        designations: sheetsDb.getDesignationsMaster(),
-        villages: sheetsDb.getVillages(),
-        vehicles,
-        routes: sheetsDb.getRoutes(),
-        users: sheetsDb.getUsers(),
-      },
-      status,
-      students,
-      employees: sheetsDb.getEmployees(),
-      resumes: sheetsDb.getResumes(),
-      trips,
-      services: sheetsDb.getScheduledServices(),
-      invoices,
-      receipts,
-      warningLetters: sheetsDb.getWarningLetters(),
-      expenses,
-      expenseHeads: sheetsDb.getExpenseHeads(),
-      incomeHeads: sheetsDb.getIncomeHeads(),
-      incomes: sheetsDb.getIncomes(),
-      odometerLogs: sheetsDb.getOdometerLogs(),
-      fuelAdvances: sheetsDb.getFuelAdvances(),
-      maintenance: sheetsDb.getMaintenanceRequests(),
-      accounts,
-      vouchers: sheetsDb.getVouchers(),
-      reportsSummary: {
-        metrics: {
-          totalStudents: students.length,
-          activeStudents: students.filter(s => s.transportStatus === 'Active').length,
-          suspendedStudents: students.filter(s => s.transportStatus === 'Suspended').length,
-          needsSetupStudents: students.filter(s => s.transportStatus === 'Needs Setup').length,
-          totalBilled: invoices.reduce((s, i) => s + i.netAmount, 0),
-          totalCollected: receipts.reduce((s, r) => s + r.amount, 0),
-          totalOutstanding: students.reduce((s, st) => s + st.balanceDue, 0),
-          totalVehicles: vehicles.length,
-          availableVehicles: vehicles.filter(v => v.availability === 'Available').length,
-          totalTripsToday: trips.length,
-          tripsArrived: trips.filter(t => t.status === 'Arrived').length,
-          tripsPending: trips.filter(t => t.status === 'Ready' || t.status === 'Planned').length,
-          mismatchesCount: trips.reduce((s, t) => s + t.mismatchCount, 0),
-          totalFuelSpend: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected' && e.category.includes('Fuel')).reduce((s, e) => s + e.amount, 0),
-          totalRepairsSpend: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected' && e.category.includes('Repairs')).reduce((s, e) => s + e.amount, 0),
-          totalExpensesAll: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected').reduce((s, e) => s + e.amount, 0),
-          unsettledAdvances: 0,
-        },
-        accountsOverview: accounts,
-      },
-      followUps: sheetsDb.getFollowUps(),
-      disciplineRecords: sheetsDb.getDisciplineRecords(),
-      vehicleAssignments: sheetsDb.getVehicleAssignments(),
-      staffAttendance: sheetsDb.getStaffAttendance(),
-      staffAdvances: sheetsDb.getStaffAdvances(),
-      staffPayrolls: sheetsDb.getStaffPayrolls(),
-      holidays: sheetsDb.getHolidays(),
-    });
+    res.json(sheetsDb.getBootstrapSnapshot());
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
