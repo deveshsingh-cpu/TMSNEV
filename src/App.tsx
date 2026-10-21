@@ -14,6 +14,7 @@ import { AccountsView } from './components/views/AccountsView.js';
 import { ReportsView } from './components/views/ReportsView.js';
 import { SetupView } from './components/views/SetupView.js';
 import { LoginView } from './components/views/LoginView.js';
+import { PublicWebsiteView } from './components/views/PublicWebsiteView.js';
 import { api, ReportsSummary, SheetsStatus } from './services/api.js';
 import {
   SchoolConfig,
@@ -75,6 +76,7 @@ export function App() {
 
   const [activeNav, setActiveNav] = useState<NavItemKey>('dashboard');
   const [activeSubTab, setActiveSubTab] = useState<string>('');
+  const [unauthScreen, setUnauthScreen] = useState<'public_website' | 'transport_login'>('public_website');
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -293,8 +295,9 @@ export function App() {
     await loadAllData();
   };
 
-  const handleLogout = () => {
+  const handleLogout = (goToWebsite = false) => {
     setCurrentUser(null);
+    setUnauthScreen(goToWebsite ? 'public_website' : 'transport_login');
     try {
       localStorage.removeItem(AUTH_STORAGE_KEY);
     } catch {
@@ -806,9 +809,27 @@ export function App() {
       }
     : null;
 
-  // Render Full-Screen Role Login View if not authenticated
+  // Render Public School Website or Transport Login View if not authenticated
   if (!currentUser) {
-    return <LoginView config={config} users={users} onLogin={handleLogin} />;
+    if (unauthScreen === 'public_website') {
+      return (
+        <PublicWebsiteView
+          config={config}
+          campuses={campuses}
+          routesCount={routes.length}
+          vehiclesCount={vehicles.length}
+          villagesCount={villages.length}
+          onOpenTransportLogin={() => setUnauthScreen('transport_login')}
+        />
+      );
+    }
+    return (
+      <LoginView
+        config={config}
+        onLogin={handleLogin}
+        onBackToWebsite={() => setUnauthScreen('public_website')}
+      />
+    );
   }
 
   return (
@@ -899,7 +920,7 @@ export function App() {
             </button>
 
             <button
-              onClick={handleLogout}
+              onClick={() => handleLogout(false)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-bold transition-colors cursor-pointer"
               title="Sign Out or Switch Role Account"
             >

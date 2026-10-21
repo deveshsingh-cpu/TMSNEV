@@ -73,7 +73,7 @@ export interface SheetsConnectionStatus {
   activeWriterQueueLength: number;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+const DATA_DIR = process.env.VERCEL ? '/tmp/.data' : path.resolve(process.cwd(), '.data');
 const DB_SNAPSHOT_FILE = path.join(DATA_DIR, 'erp_database.json');
 
 function stripLargeBase64ForSheetCell(obj: any): string {
@@ -141,15 +141,24 @@ export class SheetsDatabaseManager {
   private lastSyncAt: string | null = null;
   private lastError: string | null = null;
   private queueCount = 0;
+  private initPromise: Promise<void> = Promise.resolve();
 
   constructor() {
     this.loadLocalSnapshot();
     this.initGoogleServiceAccount();
     if (this.isGoogleConfigured) {
-      this.autoBootstrapGoogleSheets().catch((err) => {
+      this.initPromise = this.autoBootstrapGoogleSheets().catch((err) => {
         this.lastError = err.message;
         console.error('Google Sheets Auto-Bootstrap Error:', err.message);
       });
+    }
+  }
+
+  public async ensureInitialized(): Promise<void> {
+    try {
+      await this.initPromise;
+    } catch {
+      // Non-fatal: continue with in-memory / snapshot state
     }
   }
 
@@ -310,8 +319,256 @@ export class SheetsDatabaseManager {
     }
   }
 
+  private parseRowsFromSheet<T>(rows: any[][] | undefined | null, dedupeById = true): T[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON');
+    const results: T[] = [];
+    const seenIds = new Set<string>();
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const rawJson = jsonColIdx >= 0 ? row[jsonColIdx] : row[row.length - 1];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(rawJson);
+          if (parsed && typeof parsed === 'object') {
+            if (dedupeById && parsed.id) {
+              if (seenIds.has(String(parsed.id))) continue;
+              seenIds.add(String(parsed.id));
+            }
+            results.push(parsed as T);
+          }
+        } catch {
+          // Ignore malformed JSON cell
+        }
+      }
+    }
+    return results;
+  }
+
+  private parseSystemUsersFromSheet(rows: any[][] | undefined | null): SystemUser[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const users: SystemUser[] = [];
+    const seenIds = new Set<string>();
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length < 3) continue;
+      const rawJson = row[10];
+      let base: Partial<SystemUser> = {};
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          base = JSON.parse(rawJson);
+        } catch {
+          base = {};
+        }
+      }
+      const id = String(row[0] || base.id || `usr-${i}`).trim();
+      const username = String(row[1] || base.username || '').trim();
+      const password = String(row[2] || base.password || '').trim();
+      if (!username || !password || seenIds.has(id)) continue;
+      seenIds.add(id);
+      const roleRaw = String(row[4] || base.role || 'Transport Assistant').trim();
+      const role: UserRole =
+        roleRaw === 'Admin' || roleRaw === 'Transport Coordinator' || roleRaw === 'Transport Assistant'
+          ? roleRaw
+          : 'Transport Assistant';
+      users.push({
+        id,
+        username,
+        password,
+        fullName: String(row[3] || base.fullName || username).trim(),
+        role,
+        campus: String(row[5] || base.campus || 'All Campuses').trim(),
+        mobile: String(row[6] || base.mobile || '').trim(),
+        status: String(row[7] || base.status || 'Active').trim() === 'Inactive' ? 'Inactive' : 'Active',
+        lastLoginAt: row[8] && row[8] !== 'Never' ? String(row[8]) : base.lastLoginAt,
+        createdAt: String(row[9] || base.createdAt || new Date().toISOString().split('T')[0]),
+      });
+    }
+    return users;
+  }
+
   private async autoBootstrapGoogleSheets() {
-    await this.provisionSpreadsheetTabs();
+    if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) return;
+
+    try {
+      const spreadsheet = await this.sheetsClient.spreadsheets.get({
+        spreadsheetId: this.sheetId,
+      });
+
+      if (spreadsheet.data?.properties?.title) {
+        this.spreadsheetTitle = spreadsheet.data.properties.title;
+      }
+
+      const existingSheets = spreadsheet.data.sheets || [];
+      const existingTabs: string[] = existingSheets.map((s: any) => s.properties?.title).filter(Boolean);
+
+      const addSheetRequests = ALL_ERP_SHEET_TABS
+        .filter(tab => !existingTabs.includes(tab))
+        .map(tab => ({
+          addSheet: {
+            properties: {
+              title: tab,
+              gridProperties: {
+                frozenRowCount: 1,
+              },
+            },
+          },
+        }));
+
+      if (addSheetRequests.length > 0) {
+        await this.sheetsClient.spreadsheets.batchUpdate({
+          spreadsheetId: this.sheetId,
+          requestBody: { requests: addSheetRequests },
+        });
+      }
+
+      // Hydrate state from existing Google Sheet tabs before any write
+      const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
+        spreadsheetId: this.sheetId,
+        ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
+      });
+
+      const valueRanges: any[] = batchRes.data?.valueRanges || [];
+      const tabMap = new Map<string, any[][]>();
+      ALL_ERP_SHEET_TABS.forEach((tab, idx) => {
+        tabMap.set(tab, valueRanges[idx]?.values || []);
+      });
+
+      // 1. Hydrate School_Masters
+      const schoolMastersRows = tabMap.get('School_Masters');
+      if (schoolMastersRows && schoolMastersRows.length >= 2 && schoolMastersRows[1]?.length > 0) {
+        const row2 = schoolMastersRows[1];
+        const rawMastersJson = row2[8];
+        if (typeof rawMastersJson === 'string' && rawMastersJson.trim().startsWith('{')) {
+          try {
+            const parsedMasters = JSON.parse(rawMastersJson);
+            if (parsedMasters.config) this.config = { ...this.config, ...parsedMasters.config };
+            if (Array.isArray(parsedMasters.campusesMaster)) this.campusesMaster = parsedMasters.campusesMaster;
+            if (Array.isArray(parsedMasters.memberTypesMaster)) this.memberTypesMaster = parsedMasters.memberTypesMaster;
+            if (Array.isArray(parsedMasters.classesMaster)) this.classesMaster = parsedMasters.classesMaster;
+            if (Array.isArray(parsedMasters.sectionsMaster)) this.sectionsMaster = parsedMasters.sectionsMaster;
+            if (Array.isArray(parsedMasters.tripsMaster)) this.tripsMaster = parsedMasters.tripsMaster;
+            if (Array.isArray(parsedMasters.designationsMaster)) this.designationsMaster = parsedMasters.designationsMaster;
+          } catch {
+            // fallback to columns
+          }
+        } else {
+          this.config = {
+            ...this.config,
+            schoolName: row2[0] || this.config.schoolName,
+            tagline: row2[1] || this.config.tagline,
+            address: row2[2] || this.config.address,
+            phone: row2[3] || this.config.phone,
+            email: row2[4] || this.config.email,
+            currentAcademicSession: row2[5] || this.config.currentAcademicSession,
+            currentFinancialYear: row2[6] || this.config.currentFinancialYear,
+            timezone: row2[7] || this.config.timezone,
+          };
+        }
+      }
+
+      // 2. Hydrate entity tabs if present in Google Sheets
+      const villages = this.parseRowsFromSheet<Village>(tabMap.get('Villages_And_Stops'), true);
+      if (villages.length > 0) this.villages = villages;
+
+      const vehicles = this.parseRowsFromSheet<Vehicle>(tabMap.get('Vehicles_Master'), true);
+      if (vehicles.length > 0) this.vehicles = vehicles;
+
+      const assignments = this.parseRowsFromSheet<VehicleAssignmentRecord>(tabMap.get('Vehicle_Assignments'), true);
+      if (assignments.length > 0) this.vehicleAssignments = assignments;
+
+      const routes = this.parseRowsFromSheet<Route>(tabMap.get('Routes_Master'), true);
+      if (routes.length > 0) this.routes = routes;
+
+      const students = this.parseRowsFromSheet<StudentMember>(tabMap.get('Members_Transport'), true);
+      if (students.length > 0) this.students = students;
+
+      const resumes = this.parseRowsFromSheet<CandidateResume>(tabMap.get('Candidate_Resumes'), true);
+      if (resumes.length > 0) this.resumes = resumes;
+
+      const employees = this.parseRowsFromSheet<Employee>(tabMap.get('Employees_Staff'), true);
+      if (employees.length > 0) this.employees = employees;
+
+      const staffAtt = this.parseRowsFromSheet<StaffAttendanceRecord>(tabMap.get('Staff_Attendance'), true);
+      if (staffAtt.length > 0) this.staffAttendance = staffAtt;
+
+      const staffAdv = this.parseRowsFromSheet<StaffAdvanceRecord>(tabMap.get('Staff_Advances'), true);
+      if (staffAdv.length > 0) this.staffAdvances = staffAdv;
+
+      const staffPay = this.parseRowsFromSheet<StaffPayrollRecord>(tabMap.get('Staff_Payroll'), true);
+      if (staffPay.length > 0) this.staffPayrolls = staffPay;
+
+      const holidays = this.parseRowsFromSheet<HolidayRecord>(tabMap.get('Holidays_Calendar'), true);
+      if (holidays.length > 0) this.holidays = holidays;
+
+      const trips = this.parseRowsFromSheet<DailyTrip>(tabMap.get('Daily_Trips'), true);
+      if (trips.length > 0) this.trips = trips;
+
+      const attendance = this.parseRowsFromSheet<TripAttendanceRecord>(tabMap.get('Trip_Attendance'), true);
+      if (attendance.length > 0) this.attendance = attendance;
+
+      const logs = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true);
+      if (logs.length > 0) this.odometerLogs = logs;
+
+      const fuelAdv = this.parseRowsFromSheet<FuelAdvanceAndPurchase>(tabMap.get('Driver_Fuel_Advances'), true);
+      if (fuelAdv.length > 0) this.fuelAdvances = fuelAdv;
+
+      const maint = this.parseRowsFromSheet<MaintenanceRequest>(tabMap.get('Vehicle_Maintenance'), true);
+      if (maint.length > 0) this.maintenance = maint;
+
+      const expHeads = this.parseRowsFromSheet<ExpenseHead>(tabMap.get('Expense_Heads'), true);
+      if (expHeads.length > 0) this.expenseHeads = expHeads;
+
+      const expenses = this.parseRowsFromSheet<ExpenseRecord>(tabMap.get('Expenses_Fuel_Ledger'), true);
+      if (expenses.length > 0) this.expenses = expenses;
+
+      const incHeads = this.parseRowsFromSheet<IncomeHead>(tabMap.get('Income_Heads'), true);
+      if (incHeads.length > 0) this.incomeHeads = incHeads;
+
+      const incomes = this.parseRowsFromSheet<IncomeRecord>(tabMap.get('Other_Incomes'), true);
+      if (incomes.length > 0) this.incomes = incomes;
+
+      const invoices = this.parseRowsFromSheet<FeeInvoice>(tabMap.get('Fee_Invoices'), true);
+      if (invoices.length > 0) this.invoices = invoices;
+
+      const receipts = this.parseRowsFromSheet<FeeReceipt>(tabMap.get('Fee_Receipts'), true);
+      if (receipts.length > 0) this.receipts = receipts;
+
+      const followUps = this.parseRowsFromSheet<FollowUpRecord>(tabMap.get('Fee_FollowUps'), true);
+      if (followUps.length > 0) this.followUps = followUps;
+
+      const warnings = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
+      if (warnings.length > 0) this.warningLetters = warnings;
+
+      const discipline = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
+      if (discipline.length > 0) this.disciplineRecords = discipline;
+
+      const accounts = this.parseRowsFromSheet<AccountHead>(tabMap.get('Chart_Of_Accounts'), true);
+      if (accounts.length > 0) this.accounts = accounts;
+
+      const vouchers = this.parseRowsFromSheet<JournalVoucher>(tabMap.get('Journal_Vouchers'), true);
+      if (vouchers.length > 0) this.vouchers = vouchers;
+
+      const users = this.parseSystemUsersFromSheet(tabMap.get('System_Users'));
+      if (users.length > 0) {
+        this.systemUsers = users;
+      }
+
+      this.rebuildScheduledServices();
+      this.saveLocalSnapshot();
+      this.provisionedTabsList = [...ALL_ERP_SHEET_TABS];
+      this.lastSyncAt = new Date().toISOString();
+
+      // If any tab was newly added or System_Users had no rows yet, sync initial headers & data
+      if (addSheetRequests.length > 0 || users.length === 0) {
+        await this.internalSyncToGoogleSheets();
+      }
+    } catch (err: any) {
+      this.lastError = err.message;
+      console.error('Google Sheets Auto-Bootstrap Error:', err.message);
+    }
   }
 
   private enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
@@ -503,7 +760,7 @@ export class SheetsDatabaseManager {
         {
           range: 'School_Masters!A1',
           values: [
-            ['School Name', 'Tagline', 'Address', 'Phone', 'Email', 'Academic Session', 'Financial Year', 'Timezone'],
+            ['School Name', 'Tagline', 'Address', 'Phone', 'Email', 'Academic Session', 'Financial Year', 'Timezone', '_JSON'],
             [
               this.config.schoolName,
               this.config.tagline,
@@ -513,6 +770,15 @@ export class SheetsDatabaseManager {
               this.config.currentAcademicSession || '2026-2027',
               this.config.currentFinancialYear || '2026-2027',
               this.config.timezone || 'Asia/Kolkata',
+              stripLargeBase64ForSheetCell({
+                config: this.config,
+                campusesMaster: this.campusesMaster,
+                memberTypesMaster: this.memberTypesMaster,
+                classesMaster: this.classesMaster,
+                sectionsMaster: this.sectionsMaster,
+                tripsMaster: this.tripsMaster,
+                designationsMaster: this.designationsMaster,
+              }),
             ],
             [],
             ['Master Category', 'Configured Values'],

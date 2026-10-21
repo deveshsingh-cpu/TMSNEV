@@ -3,6 +3,11 @@ import { sheetsDb } from '../sheets/sheetsService.js';
 
 export const apiRouter = Router();
 
+apiRouter.use(async (_req: Request, _res: Response, next) => {
+  await sheetsDb.ensureInitialized();
+  next();
+});
+
 // 1. Google Sheets Connection & Diagnostic Status
 apiRouter.get('/status', async (_req: Request, res: Response) => {
   try {

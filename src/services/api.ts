@@ -67,6 +67,24 @@ export interface MastersData {
   users?: SystemUser[];
 }
 
+async function parseApiJson(res: Response, fallbackError: string) {
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(
+      res.status === 404
+        ? 'Backend API route (/api/*) not found on server. Please ensure the latest code with /api/index.ts and vercel.json is pushed to GitHub & redeployed on Vercel.'
+        : `${fallbackError} (HTTP ${res.status})`
+    );
+  }
+  if (!res.ok) {
+    throw new Error(data?.error || fallbackError);
+  }
+  return data;
+}
+
 export const api = {
   // Authentication & System Users
   login: async (username: string, password: string): Promise<SystemUser> => {
@@ -75,14 +93,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Authentication failed');
-    return data;
+    return parseApiJson(res, 'Authentication failed');
   },
   getUsers: async (): Promise<SystemUser[]> => {
     const res = await fetch('/api/users');
-    if (!res.ok) throw new Error('Failed to fetch users');
-    return res.json();
+    return parseApiJson(res, 'Failed to fetch users');
   },
   saveUser: async (user: Partial<SystemUser>): Promise<SystemUser> => {
     const res = await fetch('/api/users', {
@@ -90,15 +105,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(user),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to save user account');
-    return data;
+    return parseApiJson(res, 'Failed to save user account');
   },
   deleteUser: async (id: string): Promise<{ success: boolean }> => {
     const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to delete user account');
-    return data;
+    return parseApiJson(res, 'Failed to delete user account');
   },
 
   // Status & Sheets
