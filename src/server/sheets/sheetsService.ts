@@ -75,16 +75,31 @@ export interface SheetsConnectionStatus {
 
 const DATA_DIR = process.env.VERCEL ? '/tmp/.data' : path.resolve(process.cwd(), '.data');
 const DB_SNAPSHOT_FILE = path.join(DATA_DIR, 'erp_database.json');
+const RUNTIME_CREDS_FILE = path.join(DATA_DIR, 'google_credentials.json');
 
 function stripLargeBase64ForSheetCell(obj: any): string {
   try {
     const json = JSON.stringify(obj, (_key, value) => {
-      if (typeof value === 'string' && value.length > 25000) {
+      if (typeof value === 'string' && value.length > 38000) {
         return '[ATTACHMENT_STORED]';
       }
       return value;
     });
-    return json.length <= 45000 ? json : json.slice(0, 45000);
+    if (json.length <= 46000) return json;
+    // Never slice JSON mid-string; keep compressed profilePhoto while stripping heavy secondary attachments
+    const compactJson = JSON.stringify(obj, (key, value) => {
+      if (key === 'profilePhoto' && typeof value === 'string' && value.length <= 36000) {
+        return value;
+      }
+      if (typeof value === 'string' && value.startsWith('data:') && value.length > 1500) {
+        return '[ATTACHMENT_STORED]';
+      }
+      if (typeof value === 'string' && value.length > 4000) {
+        return value.slice(0, 4000);
+      }
+      return value;
+    });
+    return compactJson.length <= 48000 ? compactJson : '{}';
   } catch {
     return '{}';
   }
@@ -142,6 +157,8 @@ export class SheetsDatabaseManager {
   private lastError: string | null = null;
   private queueCount = 0;
   private initPromise: Promise<void> = Promise.resolve();
+  private lastHydratedAt = 0;
+  private lastLocalWriteAt = 0;
 
   constructor() {
     this.loadLocalSnapshot();
@@ -154,9 +171,20 @@ export class SheetsDatabaseManager {
     }
   }
 
-  public async ensureInitialized(): Promise<void> {
+  public async ensureInitialized(forceFresh = false): Promise<void> {
     try {
       await this.initPromise;
+      await this.writeQueue;
+      if (this.isGoogleConfigured) {
+        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 2000;
+        if (forceFresh && !recentlyWroteLocally) {
+          await this.hydrateFromGoogleSheets(true);
+        } else if (process.env.VERCEL && !recentlyWroteLocally) {
+          await this.hydrateFromGoogleSheets(true);
+        } else if (this.lastHydratedAt === 0) {
+          await this.hydrateFromGoogleSheets(false);
+        }
+      }
     } catch {
       // Non-fatal: continue with in-memory / snapshot state
     }
@@ -289,15 +317,66 @@ export class SheetsDatabaseManager {
     });
   }
 
-  private initGoogleServiceAccount() {
-    this.sheetId = (process.env.GOOGLE_SHEET_ID || '').trim();
-    this.clientEmail = (process.env.GOOGLE_CLIENT_EMAIL || '').trim();
-    this.projectId = (process.env.GOOGLE_PROJECT_ID || '').trim();
-    let privateKey = process.env.GOOGLE_PRIVATE_KEY || '';
+  private initGoogleServiceAccount(customCreds?: {
+    sheetId?: string;
+    clientEmail?: string;
+    projectId?: string;
+    privateKey?: string;
+  }) {
+    let savedCreds: any = null;
+    if (!customCreds && !process.env.GOOGLE_PRIVATE_KEY) {
+      try {
+        if (fs.existsSync(RUNTIME_CREDS_FILE)) {
+          savedCreds = JSON.parse(fs.readFileSync(RUNTIME_CREDS_FILE, 'utf-8'));
+        }
+      } catch {
+        savedCreds = null;
+      }
+    }
+
+    this.sheetId = (
+      customCreds?.sheetId ||
+      savedCreds?.sheetId ||
+      process.env.GOOGLE_SHEET_ID ||
+      '1euDnyIIcKOF9epIFzwxMN2JKxUOYrduZs28ENtgZqQE'
+    ).trim();
+    this.clientEmail = (
+      customCreds?.clientEmail ||
+      savedCreds?.clientEmail ||
+      process.env.GOOGLE_CLIENT_EMAIL ||
+      'tmsnev@tmsnev.iam.gserviceaccount.com'
+    ).trim();
+    this.projectId = (
+      customCreds?.projectId ||
+      savedCreds?.projectId ||
+      process.env.GOOGLE_PROJECT_ID ||
+      'tmsnev'
+    ).trim();
+    let privateKey = (
+      customCreds?.privateKey ||
+      savedCreds?.privateKey ||
+      process.env.GOOGLE_PRIVATE_KEY ||
+      ''
+    ).trim();
+
+    // Support pasting full service account JSON into GOOGLE_PRIVATE_KEY
+    if (privateKey.startsWith('{')) {
+      try {
+        const parsedJson = JSON.parse(privateKey);
+        if (parsedJson.private_key) privateKey = String(parsedJson.private_key).trim();
+        if (parsedJson.client_email) this.clientEmail = String(parsedJson.client_email).trim();
+        if (parsedJson.project_id) this.projectId = String(parsedJson.project_id).trim();
+      } catch {
+        // Not a JSON object, treat as PEM string
+      }
+    }
 
     if (this.sheetId && this.clientEmail && privateKey) {
       try {
-        if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+        if (
+          (privateKey.startsWith('"') && privateKey.endsWith('"')) ||
+          (privateKey.startsWith("'") && privateKey.endsWith("'"))
+        ) {
           privateKey = privateKey.slice(1, -1);
         }
         privateKey = privateKey.replace(/\\n/g, '\n');
@@ -310,13 +389,47 @@ export class SheetsDatabaseManager {
 
         this.sheetsClient = google.sheets({ version: 'v4', auth });
         this.isGoogleConfigured = true;
+        this.lastError = null;
       } catch (err: any) {
         this.lastError = `Google Auth Init Error: ${err.message}`;
         this.isGoogleConfigured = false;
       }
     } else {
       this.isGoogleConfigured = false;
+      this.lastError =
+        'GOOGLE_PRIVATE_KEY environment variable is not set on this server. Add GOOGLE_PRIVATE_KEY in Vercel Environment Variables or configure it in Google Sheets Sync.';
     }
+  }
+
+  public async configureCredentialsAtRuntime(creds: {
+    sheetId?: string;
+    clientEmail?: string;
+    projectId?: string;
+    privateKey: string;
+  }) {
+    this.initGoogleServiceAccount(creds);
+    if (!this.isGoogleConfigured) {
+      throw new Error(this.lastError || 'Invalid Google Service Account credentials');
+    }
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(
+        RUNTIME_CREDS_FILE,
+        JSON.stringify({
+          sheetId: this.sheetId,
+          clientEmail: this.clientEmail,
+          projectId: this.projectId,
+          privateKey: creds.privateKey,
+        }),
+        'utf-8'
+      );
+    } catch {
+      // ignore fs error
+    }
+    await this.autoBootstrapGoogleSheets();
+    return this.getStatus();
   }
 
   private parseRowsFromSheet<T>(rows: any[][] | undefined | null, dedupeById = true): T[] {
@@ -389,6 +502,157 @@ export class SheetsDatabaseManager {
     return users;
   }
 
+  public async hydrateFromGoogleSheets(force = false): Promise<void> {
+    if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) {
+      this.loadLocalSnapshot();
+      return;
+    }
+    if (!force && this.lastHydratedAt > 0 && Date.now() - this.lastHydratedAt < 2500) {
+      return;
+    }
+
+    try {
+      const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
+        spreadsheetId: this.sheetId,
+        ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
+      });
+
+      const valueRanges: any[] = batchRes.data?.valueRanges || [];
+      const tabMap = new Map<string, any[][]>();
+      ALL_ERP_SHEET_TABS.forEach((tab, idx) => {
+        tabMap.set(tab, valueRanges[idx]?.values || []);
+      });
+
+      // 1. Hydrate School_Masters
+      const schoolMastersRows = tabMap.get('School_Masters');
+      if (schoolMastersRows && schoolMastersRows.length >= 2 && schoolMastersRows[1]?.length > 0) {
+        const row2 = schoolMastersRows[1];
+        const rawMastersJson = row2[8];
+        if (typeof rawMastersJson === 'string' && rawMastersJson.trim().startsWith('{')) {
+          try {
+            const parsedMasters = JSON.parse(rawMastersJson);
+            if (parsedMasters.config) this.config = { ...this.config, ...parsedMasters.config };
+            if (Array.isArray(parsedMasters.campusesMaster)) this.campusesMaster = parsedMasters.campusesMaster;
+            if (Array.isArray(parsedMasters.memberTypesMaster)) this.memberTypesMaster = parsedMasters.memberTypesMaster;
+            if (Array.isArray(parsedMasters.classesMaster)) this.classesMaster = parsedMasters.classesMaster;
+            if (Array.isArray(parsedMasters.sectionsMaster)) this.sectionsMaster = parsedMasters.sectionsMaster;
+            if (Array.isArray(parsedMasters.tripsMaster)) this.tripsMaster = parsedMasters.tripsMaster;
+            if (Array.isArray(parsedMasters.designationsMaster)) this.designationsMaster = parsedMasters.designationsMaster;
+          } catch {
+            // fallback to columns
+          }
+        }
+        // Always ensure direct column edits in School_Masters row 2 (like School Name in A2) take effect
+        if (row2[0]) this.config.schoolName = String(row2[0]).trim();
+        if (row2[1] !== undefined) this.config.tagline = String(row2[1]).trim();
+        if (row2[2] !== undefined) this.config.address = String(row2[2]).trim();
+        if (row2[3] !== undefined) this.config.phone = String(row2[3]).trim();
+        if (row2[4] !== undefined) this.config.email = String(row2[4]).trim();
+        if (row2[5]) this.config.currentAcademicSession = String(row2[5]).trim();
+        if (row2[6]) this.config.currentFinancialYear = String(row2[6]).trim();
+        if (row2[7]) this.config.timezone = String(row2[7]).trim();
+        this.config.campuses = [...this.campusesMaster];
+      }
+
+      // 2. Hydrate entity tabs (respecting empty tabs when headers exist so deletions persist)
+      if ((tabMap.get('Villages_And_Stops') || []).length >= 1) {
+        this.villages = this.parseRowsFromSheet<Village>(tabMap.get('Villages_And_Stops'), true);
+      }
+      if ((tabMap.get('Vehicles_Master') || []).length >= 1) {
+        this.vehicles = this.parseRowsFromSheet<Vehicle>(tabMap.get('Vehicles_Master'), true);
+      }
+      if ((tabMap.get('Vehicle_Assignments') || []).length >= 1) {
+        this.vehicleAssignments = this.parseRowsFromSheet<VehicleAssignmentRecord>(tabMap.get('Vehicle_Assignments'), true);
+      }
+      if ((tabMap.get('Routes_Master') || []).length >= 1) {
+        this.routes = this.parseRowsFromSheet<Route>(tabMap.get('Routes_Master'), true);
+      }
+      if ((tabMap.get('Members_Transport') || []).length >= 1) {
+        this.students = this.parseRowsFromSheet<StudentMember>(tabMap.get('Members_Transport'), true);
+      }
+      if ((tabMap.get('Candidate_Resumes') || []).length >= 1) {
+        this.resumes = this.parseRowsFromSheet<CandidateResume>(tabMap.get('Candidate_Resumes'), true);
+      }
+      if ((tabMap.get('Employees_Staff') || []).length >= 1) {
+        this.employees = this.parseRowsFromSheet<Employee>(tabMap.get('Employees_Staff'), true);
+      }
+      if ((tabMap.get('Staff_Attendance') || []).length >= 1) {
+        this.staffAttendance = this.parseRowsFromSheet<StaffAttendanceRecord>(tabMap.get('Staff_Attendance'), true);
+      }
+      if ((tabMap.get('Staff_Advances') || []).length >= 1) {
+        this.staffAdvances = this.parseRowsFromSheet<StaffAdvanceRecord>(tabMap.get('Staff_Advances'), true);
+      }
+      if ((tabMap.get('Staff_Payroll') || []).length >= 1) {
+        this.staffPayrolls = this.parseRowsFromSheet<StaffPayrollRecord>(tabMap.get('Staff_Payroll'), true);
+      }
+      if ((tabMap.get('Holidays_Calendar') || []).length >= 1) {
+        this.holidays = this.parseRowsFromSheet<HolidayRecord>(tabMap.get('Holidays_Calendar'), true);
+      }
+      if ((tabMap.get('Daily_Trips') || []).length >= 1) {
+        this.trips = this.parseRowsFromSheet<DailyTrip>(tabMap.get('Daily_Trips'), true);
+      }
+      if ((tabMap.get('Trip_Attendance') || []).length >= 1) {
+        this.attendance = this.parseRowsFromSheet<TripAttendanceRecord>(tabMap.get('Trip_Attendance'), true);
+      }
+      if ((tabMap.get('Daily_Log_Book_24H') || []).length >= 1) {
+        this.odometerLogs = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true);
+      }
+      if ((tabMap.get('Driver_Fuel_Advances') || []).length >= 1) {
+        this.fuelAdvances = this.parseRowsFromSheet<FuelAdvanceAndPurchase>(tabMap.get('Driver_Fuel_Advances'), true);
+      }
+      if ((tabMap.get('Vehicle_Maintenance') || []).length >= 1) {
+        this.maintenance = this.parseRowsFromSheet<MaintenanceRequest>(tabMap.get('Vehicle_Maintenance'), true);
+      }
+      if ((tabMap.get('Expense_Heads') || []).length >= 1) {
+        this.expenseHeads = this.parseRowsFromSheet<ExpenseHead>(tabMap.get('Expense_Heads'), true);
+      }
+      if ((tabMap.get('Expenses_Fuel_Ledger') || []).length >= 1) {
+        this.expenses = this.parseRowsFromSheet<ExpenseRecord>(tabMap.get('Expenses_Fuel_Ledger'), true);
+      }
+      if ((tabMap.get('Income_Heads') || []).length >= 1) {
+        this.incomeHeads = this.parseRowsFromSheet<IncomeHead>(tabMap.get('Income_Heads'), true);
+      }
+      if ((tabMap.get('Other_Incomes') || []).length >= 1) {
+        this.incomes = this.parseRowsFromSheet<IncomeRecord>(tabMap.get('Other_Incomes'), true);
+      }
+      if ((tabMap.get('Fee_Invoices') || []).length >= 1) {
+        this.invoices = this.parseRowsFromSheet<FeeInvoice>(tabMap.get('Fee_Invoices'), true);
+      }
+      if ((tabMap.get('Fee_Receipts') || []).length >= 1) {
+        this.receipts = this.parseRowsFromSheet<FeeReceipt>(tabMap.get('Fee_Receipts'), true);
+      }
+      if ((tabMap.get('Fee_FollowUps') || []).length >= 1) {
+        this.followUps = this.parseRowsFromSheet<FollowUpRecord>(tabMap.get('Fee_FollowUps'), true);
+      }
+      if ((tabMap.get('Warning_Letters') || []).length >= 1) {
+        this.warningLetters = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
+      }
+      if ((tabMap.get('Discipline_Records') || []).length >= 1) {
+        this.disciplineRecords = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
+      }
+      if ((tabMap.get('Chart_Of_Accounts') || []).length >= 1) {
+        const acc = this.parseRowsFromSheet<AccountHead>(tabMap.get('Chart_Of_Accounts'), true);
+        if (acc.length > 0) this.accounts = acc;
+      }
+      if ((tabMap.get('Journal_Vouchers') || []).length >= 1) {
+        this.vouchers = this.parseRowsFromSheet<JournalVoucher>(tabMap.get('Journal_Vouchers'), true);
+      }
+
+      const users = this.parseSystemUsersFromSheet(tabMap.get('System_Users'));
+      if (users.length > 0) {
+        this.systemUsers = users;
+      }
+
+      this.rebuildScheduledServices();
+      this.saveLocalSnapshot();
+      this.lastHydratedAt = Date.now();
+      this.lastError = null;
+    } catch (err: any) {
+      this.lastError = err.message;
+      console.error('Google Sheets Hydrate Error:', err.message);
+    }
+  }
+
   private async autoBootstrapGoogleSheets() {
     if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) return;
 
@@ -424,145 +688,11 @@ export class SheetsDatabaseManager {
         });
       }
 
-      // Hydrate state from existing Google Sheet tabs before any write
-      const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
-        spreadsheetId: this.sheetId,
-        ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
-      });
-
-      const valueRanges: any[] = batchRes.data?.valueRanges || [];
-      const tabMap = new Map<string, any[][]>();
-      ALL_ERP_SHEET_TABS.forEach((tab, idx) => {
-        tabMap.set(tab, valueRanges[idx]?.values || []);
-      });
-
-      // 1. Hydrate School_Masters
-      const schoolMastersRows = tabMap.get('School_Masters');
-      if (schoolMastersRows && schoolMastersRows.length >= 2 && schoolMastersRows[1]?.length > 0) {
-        const row2 = schoolMastersRows[1];
-        const rawMastersJson = row2[8];
-        if (typeof rawMastersJson === 'string' && rawMastersJson.trim().startsWith('{')) {
-          try {
-            const parsedMasters = JSON.parse(rawMastersJson);
-            if (parsedMasters.config) this.config = { ...this.config, ...parsedMasters.config };
-            if (Array.isArray(parsedMasters.campusesMaster)) this.campusesMaster = parsedMasters.campusesMaster;
-            if (Array.isArray(parsedMasters.memberTypesMaster)) this.memberTypesMaster = parsedMasters.memberTypesMaster;
-            if (Array.isArray(parsedMasters.classesMaster)) this.classesMaster = parsedMasters.classesMaster;
-            if (Array.isArray(parsedMasters.sectionsMaster)) this.sectionsMaster = parsedMasters.sectionsMaster;
-            if (Array.isArray(parsedMasters.tripsMaster)) this.tripsMaster = parsedMasters.tripsMaster;
-            if (Array.isArray(parsedMasters.designationsMaster)) this.designationsMaster = parsedMasters.designationsMaster;
-          } catch {
-            // fallback to columns
-          }
-        } else {
-          this.config = {
-            ...this.config,
-            schoolName: row2[0] || this.config.schoolName,
-            tagline: row2[1] || this.config.tagline,
-            address: row2[2] || this.config.address,
-            phone: row2[3] || this.config.phone,
-            email: row2[4] || this.config.email,
-            currentAcademicSession: row2[5] || this.config.currentAcademicSession,
-            currentFinancialYear: row2[6] || this.config.currentFinancialYear,
-            timezone: row2[7] || this.config.timezone,
-          };
-        }
-      }
-
-      // 2. Hydrate entity tabs if present in Google Sheets
-      const villages = this.parseRowsFromSheet<Village>(tabMap.get('Villages_And_Stops'), true);
-      if (villages.length > 0) this.villages = villages;
-
-      const vehicles = this.parseRowsFromSheet<Vehicle>(tabMap.get('Vehicles_Master'), true);
-      if (vehicles.length > 0) this.vehicles = vehicles;
-
-      const assignments = this.parseRowsFromSheet<VehicleAssignmentRecord>(tabMap.get('Vehicle_Assignments'), true);
-      if (assignments.length > 0) this.vehicleAssignments = assignments;
-
-      const routes = this.parseRowsFromSheet<Route>(tabMap.get('Routes_Master'), true);
-      if (routes.length > 0) this.routes = routes;
-
-      const students = this.parseRowsFromSheet<StudentMember>(tabMap.get('Members_Transport'), true);
-      if (students.length > 0) this.students = students;
-
-      const resumes = this.parseRowsFromSheet<CandidateResume>(tabMap.get('Candidate_Resumes'), true);
-      if (resumes.length > 0) this.resumes = resumes;
-
-      const employees = this.parseRowsFromSheet<Employee>(tabMap.get('Employees_Staff'), true);
-      if (employees.length > 0) this.employees = employees;
-
-      const staffAtt = this.parseRowsFromSheet<StaffAttendanceRecord>(tabMap.get('Staff_Attendance'), true);
-      if (staffAtt.length > 0) this.staffAttendance = staffAtt;
-
-      const staffAdv = this.parseRowsFromSheet<StaffAdvanceRecord>(tabMap.get('Staff_Advances'), true);
-      if (staffAdv.length > 0) this.staffAdvances = staffAdv;
-
-      const staffPay = this.parseRowsFromSheet<StaffPayrollRecord>(tabMap.get('Staff_Payroll'), true);
-      if (staffPay.length > 0) this.staffPayrolls = staffPay;
-
-      const holidays = this.parseRowsFromSheet<HolidayRecord>(tabMap.get('Holidays_Calendar'), true);
-      if (holidays.length > 0) this.holidays = holidays;
-
-      const trips = this.parseRowsFromSheet<DailyTrip>(tabMap.get('Daily_Trips'), true);
-      if (trips.length > 0) this.trips = trips;
-
-      const attendance = this.parseRowsFromSheet<TripAttendanceRecord>(tabMap.get('Trip_Attendance'), true);
-      if (attendance.length > 0) this.attendance = attendance;
-
-      const logs = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true);
-      if (logs.length > 0) this.odometerLogs = logs;
-
-      const fuelAdv = this.parseRowsFromSheet<FuelAdvanceAndPurchase>(tabMap.get('Driver_Fuel_Advances'), true);
-      if (fuelAdv.length > 0) this.fuelAdvances = fuelAdv;
-
-      const maint = this.parseRowsFromSheet<MaintenanceRequest>(tabMap.get('Vehicle_Maintenance'), true);
-      if (maint.length > 0) this.maintenance = maint;
-
-      const expHeads = this.parseRowsFromSheet<ExpenseHead>(tabMap.get('Expense_Heads'), true);
-      if (expHeads.length > 0) this.expenseHeads = expHeads;
-
-      const expenses = this.parseRowsFromSheet<ExpenseRecord>(tabMap.get('Expenses_Fuel_Ledger'), true);
-      if (expenses.length > 0) this.expenses = expenses;
-
-      const incHeads = this.parseRowsFromSheet<IncomeHead>(tabMap.get('Income_Heads'), true);
-      if (incHeads.length > 0) this.incomeHeads = incHeads;
-
-      const incomes = this.parseRowsFromSheet<IncomeRecord>(tabMap.get('Other_Incomes'), true);
-      if (incomes.length > 0) this.incomes = incomes;
-
-      const invoices = this.parseRowsFromSheet<FeeInvoice>(tabMap.get('Fee_Invoices'), true);
-      if (invoices.length > 0) this.invoices = invoices;
-
-      const receipts = this.parseRowsFromSheet<FeeReceipt>(tabMap.get('Fee_Receipts'), true);
-      if (receipts.length > 0) this.receipts = receipts;
-
-      const followUps = this.parseRowsFromSheet<FollowUpRecord>(tabMap.get('Fee_FollowUps'), true);
-      if (followUps.length > 0) this.followUps = followUps;
-
-      const warnings = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
-      if (warnings.length > 0) this.warningLetters = warnings;
-
-      const discipline = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
-      if (discipline.length > 0) this.disciplineRecords = discipline;
-
-      const accounts = this.parseRowsFromSheet<AccountHead>(tabMap.get('Chart_Of_Accounts'), true);
-      if (accounts.length > 0) this.accounts = accounts;
-
-      const vouchers = this.parseRowsFromSheet<JournalVoucher>(tabMap.get('Journal_Vouchers'), true);
-      if (vouchers.length > 0) this.vouchers = vouchers;
-
-      const users = this.parseSystemUsersFromSheet(tabMap.get('System_Users'));
-      if (users.length > 0) {
-        this.systemUsers = users;
-      }
-
-      this.rebuildScheduledServices();
-      this.saveLocalSnapshot();
+      await this.hydrateFromGoogleSheets(true);
       this.provisionedTabsList = [...ALL_ERP_SHEET_TABS];
       this.lastSyncAt = new Date().toISOString();
 
-      // If any tab was newly added or System_Users had no rows yet, sync initial headers & data
-      if (addSheetRequests.length > 0 || users.length === 0) {
+      if (addSheetRequests.length > 0) {
         await this.internalSyncToGoogleSheets();
       }
     } catch (err: any) {
@@ -575,7 +705,16 @@ export class SheetsDatabaseManager {
     this.queueCount++;
     const execution = this.writeQueue.then(async () => {
       try {
-        return await task();
+        // On serverless or before any write, ensure we have latest Google Sheets state before mutating
+        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 2000;
+        if (this.isGoogleConfigured && ((process.env.VERCEL && !recentlyWroteLocally) || this.lastHydratedAt === 0)) {
+          await this.hydrateFromGoogleSheets(true);
+        }
+        const res = await task();
+        const now = Date.now();
+        this.lastHydratedAt = now;
+        this.lastLocalWriteAt = now;
+        return res;
       } finally {
         this.queueCount = Math.max(0, this.queueCount - 1);
       }
@@ -1378,19 +1517,26 @@ export class SheetsDatabaseManager {
         },
       ];
 
-      // Clear old rows first so deletions are cleanly reflected in Google Sheets
-      await this.sheetsClient.spreadsheets.values.batchClear({
-        spreadsheetId: this.sheetId,
-        requestBody: {
-          ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
-        },
-      });
-
+      // 1. Write all current rows first so no tab is ever blank during concurrent reads
       await this.sheetsClient.spreadsheets.values.batchUpdate({
         spreadsheetId: this.sheetId,
         requestBody: {
           valueInputOption: 'USER_ENTERED',
           data: dataPayload,
+        },
+      });
+
+      // 2. Clear any trailing rows below each tab's current row count so deleted rows are permanently removed
+      const trailingClearRanges = dataPayload.map(entry => {
+        const tabName = entry.range.split('!')[0];
+        const writtenRows = Array.isArray(entry.values) ? entry.values.length : 1;
+        return `${tabName}!A${writtenRows + 1}:Z2000`;
+      });
+
+      await this.sheetsClient.spreadsheets.values.batchClear({
+        spreadsheetId: this.sheetId,
+        requestBody: {
+          ranges: trailingClearRanges,
         },
       });
 
@@ -1414,7 +1560,17 @@ export class SheetsDatabaseManager {
   public getSchoolConfig() { return this.config; }
   public async updateSchoolConfig(newConfig: Partial<SchoolConfig>) {
     return this.enqueueWrite(async () => {
-      this.config = { ...this.config, ...newConfig };
+      const updatedSession =
+        newConfig.currentAcademicSession ||
+        newConfig.academicYear ||
+        this.config.currentAcademicSession ||
+        '2026-2027';
+      this.config = {
+        ...this.config,
+        ...newConfig,
+        currentAcademicSession: updatedSession,
+        academicYear: updatedSession,
+      };
       await this.internalSyncToGoogleSheets();
       return this.config;
     });
@@ -1439,6 +1595,47 @@ export class SheetsDatabaseManager {
         address: data.address?.trim() || '',
       };
       this.campusesMaster.push(newCampus);
+      this.config.campuses = [...this.campusesMaster];
+      await this.internalSyncToGoogleSheets();
+      return this.campusesMaster;
+    });
+  }
+  public async updateCampus(id: string, data: Partial<CampusMaster>) {
+    return this.enqueueWrite(async () => {
+      const idx = this.campusesMaster.findIndex(c => c.id === id || c.code === id);
+      if (idx < 0) throw new Error('Campus not found.');
+      const oldCampus = this.campusesMaster[idx];
+      const name = (data.name ?? oldCampus.name).trim();
+      const code = (data.code ?? oldCampus.code).trim();
+      const address = (data.address ?? oldCampus.address ?? '').trim();
+      if (!name || !code) {
+        throw new Error('Campus Name and Short Code are required.');
+      }
+      const duplicate = this.campusesMaster.find(
+        (c, i) => i !== idx && (c.code.toLowerCase() === code.toLowerCase() || c.name.toLowerCase() === name.toLowerCase())
+      );
+      if (duplicate) {
+        throw new Error(`Another campus with name "${name}" or code "${code}" already exists.`);
+      }
+
+      // Cascade code updates to linked students, routes, employees, and trips
+      if (oldCampus.code !== code) {
+        this.students.forEach(s => {
+          if (s.campus === oldCampus.code) s.campus = code;
+        });
+        this.routes.forEach(r => {
+          if (r.campus === oldCampus.code) r.campus = code;
+          if (r.campusCode === oldCampus.code) r.campusCode = code;
+        });
+        this.employees.forEach(e => {
+          if (e.campus === oldCampus.code) e.campus = code;
+        });
+        this.trips.forEach(t => {
+          if (t.campus === oldCampus.code) t.campus = code;
+        });
+      }
+
+      this.campusesMaster[idx] = { ...oldCampus, name, code, address };
       this.config.campuses = [...this.campusesMaster];
       await this.internalSyncToGoogleSheets();
       return this.campusesMaster;
@@ -1493,6 +1690,24 @@ export class SheetsDatabaseManager {
       return this.memberTypesMaster;
     });
   }
+  public async updateMemberType(id: string, name: string) {
+    return this.enqueueWrite(async () => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error('Member Type name is required.');
+      const idx = this.memberTypesMaster.findIndex(m => m.id === id || m.name === id);
+      if (idx < 0) throw new Error('Member Type not found.');
+      const oldName = this.memberTypesMaster[idx].name;
+      if (this.memberTypesMaster.some((m, i) => i !== idx && m.name.toLowerCase() === trimmed.toLowerCase())) {
+        throw new Error(`Member Type "${trimmed}" already exists.`);
+      }
+      this.memberTypesMaster[idx] = { ...this.memberTypesMaster[idx], name: trimmed };
+      this.students.forEach(s => {
+        if (s.memberType === oldName) s.memberType = trimmed as any;
+      });
+      await this.internalSyncToGoogleSheets();
+      return this.memberTypesMaster;
+    });
+  }
   public async removeMemberType(id: string) {
     return this.enqueueWrite(async () => {
       const mt = this.memberTypesMaster.find(m => m.id === id || m.name === id);
@@ -1523,6 +1738,23 @@ export class SheetsDatabaseManager {
       return this.classesMaster;
     });
   }
+  public async updateClass(oldName: string, newName: string) {
+    return this.enqueueWrite(async () => {
+      const trimmed = newName.trim();
+      if (!trimmed) throw new Error('Class name cannot be empty.');
+      const idx = this.classesMaster.findIndex(c => c === oldName);
+      if (idx < 0) throw new Error(`Class "${oldName}" not found.`);
+      if (this.classesMaster.some((c, i) => i !== idx && c.toLowerCase() === trimmed.toLowerCase())) {
+        throw new Error(`Class "${trimmed}" already exists.`);
+      }
+      this.classesMaster[idx] = trimmed;
+      this.students.forEach(s => {
+        if (s.class === oldName) s.class = trimmed;
+      });
+      await this.internalSyncToGoogleSheets();
+      return this.classesMaster;
+    });
+  }
   public async removeClass(className: string) {
     return this.enqueueWrite(async () => {
       const linkedMembers = this.students.filter(s => s.class === className);
@@ -1545,6 +1777,23 @@ export class SheetsDatabaseManager {
         this.sectionsMaster.push(trimmed);
         await this.internalSyncToGoogleSheets();
       }
+      return this.sectionsMaster;
+    });
+  }
+  public async updateSection(oldName: string, newName: string) {
+    return this.enqueueWrite(async () => {
+      const trimmed = newName.trim();
+      if (!trimmed) throw new Error('Section name cannot be empty.');
+      const idx = this.sectionsMaster.findIndex(s => s === oldName);
+      if (idx < 0) throw new Error(`Section "${oldName}" not found.`);
+      if (this.sectionsMaster.some((s, i) => i !== idx && s.toLowerCase() === trimmed.toLowerCase())) {
+        throw new Error(`Section "${trimmed}" already exists.`);
+      }
+      this.sectionsMaster[idx] = trimmed;
+      this.students.forEach(s => {
+        if (s.section === oldName) s.section = trimmed;
+      });
+      await this.internalSyncToGoogleSheets();
       return this.sectionsMaster;
     });
   }
@@ -1577,6 +1826,22 @@ export class SheetsDatabaseManager {
           description: trip.description || `Trip ${num}`,
         });
       }
+      this.tripsMaster.sort((a, b) => a.tripNumber - b.tripNumber);
+      await this.internalSyncToGoogleSheets();
+      return this.tripsMaster;
+    });
+  }
+  public async updateTripMaster(id: string, data: Partial<TripMaster>) {
+    return this.enqueueWrite(async () => {
+      const idx = this.tripsMaster.findIndex(t => t.id === id);
+      if (idx < 0) throw new Error('Trip not found.');
+      const oldTrip = this.tripsMaster[idx];
+      const newNum = data.tripNumber !== undefined ? Number(data.tripNumber) : oldTrip.tripNumber;
+      const newDesc = (data.description ?? oldTrip.description).trim();
+      if (!newNum || newNum < 1) throw new Error('Valid Trip Number is required.');
+      const duplicate = this.tripsMaster.find((t, i) => i !== idx && t.tripNumber === newNum);
+      if (duplicate) throw new Error(`Trip ${newNum} already exists.`);
+      this.tripsMaster[idx] = { ...oldTrip, tripNumber: newNum, description: newDesc || `Trip ${newNum}` };
       this.tripsMaster.sort((a, b) => a.tripNumber - b.tripNumber);
       await this.internalSyncToGoogleSheets();
       return this.tripsMaster;
@@ -1759,10 +2024,26 @@ export class SheetsDatabaseManager {
   public getVillages() { return this.villages; }
   public async saveVillage(villageData: Partial<Village> & { stops?: Partial<TransportStop>[] }): Promise<Village> {
     return this.enqueueWrite(async () => {
-      const stops: TransportStop[] = (villageData.stops || []).map((s, idx) => ({
+      if (!villageData.name || !villageData.name.trim()) {
+        throw new Error('Village Name is mandatory.');
+      }
+      if (!villageData.distanceKm || Number(villageData.distanceKm) <= 0) {
+        throw new Error('Village Distance (km) is mandatory and must be greater than 0.');
+      }
+      const rawStops = (villageData.stops || []).filter(s => s && s.name && s.name.trim());
+      if (rawStops.length === 0) {
+        throw new Error('At least one Pickup/Drop Stop with a valid name and monthly fee is mandatory to save a Village.');
+      }
+      for (const s of rawStops) {
+        if (!s.fee || Number(s.fee) <= 0) {
+          throw new Error(`Monthly Transport Fee is mandatory and must be greater than ₹0 for stop "${s.name}".`);
+        }
+      }
+
+      const stops: TransportStop[] = rawStops.map((s, idx) => ({
         id: s.id || `stp-${Date.now()}-${idx}`,
-        name: s.name?.trim() || `Stop ${idx + 1}`,
-        fee: Number(s.fee) || 700,
+        name: s.name!.trim(),
+        fee: Number(s.fee),
         distanceKm: Number(s.distanceKm) || Number(villageData.distanceKm) || 5,
         landmark: s.landmark || '',
       }));
@@ -1854,7 +2135,18 @@ export class SheetsDatabaseManager {
   public getVehicles() { return this.vehicles; }
   public async saveVehicle(vehicleData: Partial<Vehicle>): Promise<Vehicle> {
     return this.enqueueWrite(async () => {
-      const reg = vehicleData.registrationNumber?.trim().toUpperCase() || 'UP 70 BT 0000';
+      const reg = vehicleData.registrationNumber?.trim().toUpperCase();
+      if (!reg) {
+        throw new Error('Vehicle Registration Number is mandatory.');
+      }
+      if (!vehicleData.capacity || Number(vehicleData.capacity) <= 0) {
+        throw new Error('Seating Capacity is mandatory and must be greater than 0.');
+      }
+      if (vehicleData.ownership === 'Rented') {
+        if (!vehicleData.ownerName?.trim() || !vehicleData.ownerMobile?.trim() || !Number(vehicleData.monthlyRentAmount)) {
+          throw new Error('For Rented vehicles, Owner Name, Owner Mobile, and Monthly Rent Amount are mandatory.');
+        }
+      }
 
       const mileageThreshold =
         Number(vehicleData.expectedMileageKmPerL) ||
@@ -2027,8 +2319,14 @@ export class SheetsDatabaseManager {
     active?: boolean;
   }): Promise<Route> {
     return this.enqueueWrite(async () => {
+      if (!routeData.campus || !String(routeData.campus).trim()) {
+        throw new Error('Campus selection is mandatory to save a Route.');
+      }
       const vehicle = this.vehicles.find(v => v.id === routeData.vehicleId);
-      if (!vehicle) throw new Error('Vehicle not found. Please select a valid vehicle from Vehicle Master.');
+      if (!vehicle) throw new Error('Vehicle not found. Please add/select a valid vehicle from Vehicle Master first.');
+      if (!Array.isArray(routeData.villageIds) || routeData.villageIds.length === 0) {
+        throw new Error('At least one Village from Village Master must be linked to create or save a Route.');
+      }
 
       // Extract last 4 digits of vehicle
       const digitsOnly = vehicle.registrationNumber.replace(/\D/g, '');
@@ -2251,9 +2549,24 @@ export class SheetsDatabaseManager {
   public getEmployees() { return this.employees; }
   public async saveEmployee(emp: Partial<Employee>): Promise<Employee> {
     return this.enqueueWrite(async () => {
+      if (!emp.name || !emp.name.trim()) {
+        throw new Error('Employee Name is mandatory.');
+      }
+      if (!emp.designation || !emp.designation.trim()) {
+        throw new Error('Designation is mandatory.');
+      }
+      if (!emp.mobile || !emp.mobile.trim()) {
+        throw new Error('Employee Mobile Number is mandatory.');
+      }
+      if (!emp.address || !emp.address.trim()) {
+        throw new Error('Employee Address is mandatory.');
+      }
+      if (!emp.monthlyBaseSalary || Number(emp.monthlyBaseSalary) <= 0) {
+        throw new Error('Monthly Base Salary is mandatory and must be greater than 0.');
+      }
       const isDriver = emp.isDriver || (emp.designation?.toLowerCase().includes('driver') ?? false);
-      if (isDriver && !emp.drivingLicenseNo) {
-        throw new Error('Driving License Number is required for employee with Driver designation.');
+      if (isDriver && !emp.drivingLicenseNo?.trim()) {
+        throw new Error('Driving License Number is mandatory for employees with Driver designation.');
       }
 
       if (emp.id) {
@@ -2352,9 +2665,118 @@ export class SheetsDatabaseManager {
     return result;
   }
 
+  private ensureAutoFeeForMember(student: StudentMember, targetMonth?: string) {
+    // Auto-calculate monthly fee for both Active and Suspended members (exclude only 'Left' or 'Needs Setup')
+    if (student.transportStatus !== 'Active' && student.transportStatus !== 'Suspended') {
+      return;
+    }
+    const baseFee = Number(student.monthlyFee) || 0;
+    if (baseFee <= 0) return;
+
+    const currentMonth = targetMonth || new Date().toISOString().slice(0, 7);
+    const hasInvoiceForCurrentMonth = this.invoices.some(
+      i =>
+        i.studentId === student.id &&
+        (i.month.toLowerCase() === currentMonth.toLowerCase() || i.idempotencyKey === `BILL-${currentMonth}-${student.id}`)
+    );
+
+    if (!hasInvoiceForCurrentMonth) {
+      const concession = Number(student.concessionAmount) || 0;
+      const net = Math.max(0, baseFee - concession);
+      const key = `BILL-${currentMonth}-${student.id}`;
+      const inv: FeeInvoice = {
+        id: `inv-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        invoiceNo: `INV-${currentMonth.replace(/\s+/g, '').replace('-', '')}-${(this.invoices.length + 1).toString().padStart(4, '0')}`,
+        studentId: student.id,
+        admissionNo: student.admissionNo,
+        studentName: student.name,
+        month: currentMonth,
+        baseFee,
+        concession,
+        netAmount: net,
+        paidAmount: 0,
+        balanceDue: net,
+        status: 'Unpaid',
+        dueDate: `${currentMonth}-10`,
+        idempotencyKey: key,
+      };
+      this.invoices.unshift(inv);
+      student.balanceDue = (Number(student.balanceDue) || 0) + net;
+    }
+  }
+
   public async saveStudent(data: Partial<StudentMember>): Promise<StudentMember> {
     return this.enqueueWrite(async () => {
-      const stopName = data.pickupDropStopName || 'Assigned Stop';
+      // Strict mandatory field & prerequisite record checks
+      if (!data.name || !data.name.trim()) {
+        throw new Error('Member Full Name is mandatory.');
+      }
+      if (!data.admissionNo || !data.admissionNo.trim()) {
+        throw new Error('Admission No. / Staff ID is mandatory.');
+      }
+      if (!data.memberType || !data.memberType.trim()) {
+        throw new Error('Member Type (Student / Teacher / Staff) is mandatory.');
+      }
+      if (!data.campus || !data.campus.trim()) {
+        throw new Error('Campus is mandatory.');
+      }
+      if (!data.class || !data.class.trim()) {
+        throw new Error('Class / Department is mandatory.');
+      }
+      if (!data.fatherName || !data.fatherName.trim()) {
+        throw new Error('Father / Guardian / Spouse Name is mandatory.');
+      }
+      if (!data.mobile || data.mobile.replace(/\D/g, '').length < 10) {
+        throw new Error('A valid 10-digit Mobile / WhatsApp Number is mandatory.');
+      }
+      if (!data.address || !data.address.trim()) {
+        throw new Error('Residential Address is mandatory.');
+      }
+      if (this.villages.length === 0 || (!data.villageId && !data.villageName?.trim())) {
+        throw new Error('Mandatory prerequisite record missing: Please select a valid Village from Village Master.');
+      }
+      if (!data.pickupDropStopName || !data.pickupDropStopName.trim() || data.pickupDropStopName === 'Assigned Stop') {
+        throw new Error('Mandatory prerequisite record missing: Please select a valid Pickup & Drop Stop.');
+      }
+      if (this.routes.length === 0 || (!data.routeId && !data.routeCode?.trim())) {
+        throw new Error('Mandatory prerequisite record missing: Please select a valid Assigned Route from Route Master.');
+      }
+      if (!data.monthlyFee || Number(data.monthlyFee) <= 0) {
+        throw new Error('Monthly Transport Fee is mandatory and must be greater than ₹0.');
+      }
+
+      // Auto-register any custom Member Type, Campus, Class, or Section typed by the user
+      if (data.memberType && data.memberType.trim()) {
+        const mtTrim = data.memberType.trim();
+        if (!this.memberTypesMaster.some(m => m.name.toLowerCase() === mtTrim.toLowerCase())) {
+          this.memberTypesMaster.push({ id: `mt-${Date.now()}`, name: mtTrim });
+        }
+      }
+      if (data.campus && data.campus.trim()) {
+        const cmpTrim = data.campus.trim();
+        if (
+          !this.campusesMaster.some(
+            c => c.code.toLowerCase() === cmpTrim.toLowerCase() || c.name.toLowerCase() === cmpTrim.toLowerCase()
+          )
+        ) {
+          this.campusesMaster.push({ id: `cmp-${Date.now()}`, name: cmpTrim, code: cmpTrim });
+          this.config.campuses = [...this.campusesMaster];
+        }
+      }
+      if (data.class && data.class.trim()) {
+        const clsTrim = data.class.trim();
+        if (!this.classesMaster.some(c => c.toLowerCase() === clsTrim.toLowerCase())) {
+          this.classesMaster.push(clsTrim);
+        }
+      }
+      if (data.section && data.section.trim()) {
+        const secTrim = data.section.trim();
+        if (!this.sectionsMaster.some(s => s.toLowerCase() === secTrim.toLowerCase())) {
+          this.sectionsMaster.push(secTrim);
+        }
+      }
+
+      const stopName = data.pickupDropStopName.trim();
       const stopId = data.pickupDropStopId || '';
 
       if (data.id) {
@@ -2364,6 +2786,8 @@ export class SheetsDatabaseManager {
           const updated: StudentMember = {
             ...existing,
             ...data,
+            name: data.name.trim(),
+            admissionNo: data.admissionNo.trim(),
             profilePhoto: data.profilePhoto || existing.profilePhoto,
             pickupDropStopId: stopId,
             pickupDropStopName: stopName,
@@ -2371,12 +2795,17 @@ export class SheetsDatabaseManager {
             morningStopName: stopName,
             eveningStopId: stopId,
             eveningStopName: stopName,
+            monthlyFee: Number(data.monthlyFee) || existing.monthlyFee,
+            concessionAmount: Number(data.concessionAmount ?? existing.concessionAmount ?? 0),
             documents: data.documents !== undefined ? data.documents : existing.documents,
             specialHistory: data.specialHistory !== undefined ? data.specialHistory : existing.specialHistory,
             activePermissionLetter: data.activePermissionLetter !== undefined ? data.activePermissionLetter : existing.activePermissionLetter,
             version: existing.version + 1,
           };
           this.students[idx] = updated;
+          // Auto-calculate monthly fee for both Active and Suspended members
+          this.ensureAutoFeeForMember(updated);
+          this.rebuildScheduledServices();
           await this.internalSyncToGoogleSheets();
           return updated;
         }
@@ -2388,18 +2817,18 @@ export class SheetsDatabaseManager {
 
       const newStudent: StudentMember = {
         id: `stu-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        admissionNo: data.admissionNo || `ADM-${Date.now().toString().slice(-4)}`,
-        name: data.name || 'New Member',
+        admissionNo: data.admissionNo.trim(),
+        name: data.name.trim(),
         profilePhoto: data.profilePhoto,
-        memberType: data.memberType || '',
-        class: data.class || '',
-        section: data.section || '',
+        memberType: data.memberType.trim(),
+        class: data.class.trim(),
+        section: data.section?.trim() || 'A',
         gender: data.gender || 'M',
-        campus: data.campus || '',
+        campus: data.campus.trim(),
         academicSession: data.academicSession || this.config.currentAcademicSession || '2026-27',
-        fatherName: data.fatherName || '',
-        mobile: data.mobile || '',
-        address: data.address || '',
+        fatherName: data.fatherName.trim(),
+        mobile: data.mobile.trim(),
+        address: data.address.trim(),
         routeId: data.routeId || '',
         routeCode: data.routeCode || '',
         villageId: data.villageId || '',
@@ -2413,8 +2842,8 @@ export class SheetsDatabaseManager {
         serviceType: 'both',
         transportStatus: data.transportStatus || 'Active',
         statusReason: data.statusReason,
-        emergencyContact: data.emergencyContact || data.mobile || '',
-        monthlyFee: Number(data.monthlyFee) || 700,
+        emergencyContact: data.emergencyContact || data.mobile.trim(),
+        monthlyFee: Number(data.monthlyFee),
         concessionAmount: Number(data.concessionAmount) || 0,
         balanceDue: Number(data.balanceDue) || 0,
         joiningDate: data.joiningDate || new Date().toISOString().split('T')[0],
@@ -2424,6 +2853,9 @@ export class SheetsDatabaseManager {
       };
 
       this.students.unshift(newStudent);
+      // Auto-calculate monthly fee for both Active and Suspended members immediately upon creation
+      this.ensureAutoFeeForMember(newStudent);
+      this.rebuildScheduledServices();
       await this.internalSyncToGoogleSheets();
       return newStudent;
     });
@@ -2580,6 +3012,8 @@ export class SheetsDatabaseManager {
         overdueAmountAtTime: student.balanceDue,
       };
       student.specialHistory = [evt, ...(student.specialHistory || [])];
+      // Ensure suspended member continues to have auto-fee calculated for the current month
+      this.ensureAutoFeeForMember(student);
       student.version += 1;
       await this.internalSyncToGoogleSheets();
       return student;
@@ -2624,6 +3058,7 @@ export class SheetsDatabaseManager {
           overdueAmountAtTime: student.balanceDue,
         };
         student.specialHistory = [evt, ...(student.specialHistory || [])];
+        this.ensureAutoFeeForMember(student);
       } else {
         const rejNote = (rejectionReason || 'Suspension request declined by Admin').trim();
         student.pendingSuspensionRequest = {
@@ -2658,12 +3093,18 @@ export class SheetsDatabaseManager {
 
   public async recordOdometerEntry(entry: Omit<OdometerLog, 'id'>): Promise<OdometerLog> {
     return this.enqueueWrite(async () => {
-      const vehicle = this.vehicles.find(v => v.id === entry.vehicleId);
-      if (!vehicle) throw new Error('Vehicle not found');
+      const vehicle = this.vehicles.find(v => v.id === entry.vehicleId || v.registrationNumber === entry.vehicleNumber);
+      if (!vehicle) throw new Error('Mandatory prerequisite missing: Please select a valid Vehicle.');
+      if (!entry.driverName || !entry.driverName.trim()) {
+        throw new Error('Driver Name is mandatory to record a 24-Hour Vehicle Log Book entry.');
+      }
 
       const startKm = Number(entry.startOdometer);
       const endKm = Number(entry.endOdometer);
 
+      if (isNaN(startKm) || isNaN(endKm) || startKm < 0) {
+        throw new Error('Valid Starting and Ending Odometer readings are mandatory.');
+      }
       if (endKm < startKm) {
         throw new Error(`Ending odometer (${endKm} km) cannot be less than starting odometer (${startKm} km).`);
       }
@@ -2673,6 +3114,9 @@ export class SheetsDatabaseManager {
       const newLog: OdometerLog = {
         ...entry,
         id: `odo-${Date.now()}`,
+        vehicleId: vehicle.id,
+        vehicleNumber: vehicle.registrationNumber,
+        driverName: entry.driverName.trim(),
         startOdometer: startKm,
         endOdometer: endKm,
         tripKm,
@@ -2685,10 +3129,13 @@ export class SheetsDatabaseManager {
       this.odometerLogs.unshift(newLog);
       vehicle.currentOdometer = endKm;
 
-      // If fuel cost is recorded in the daily log book, automatically post a fuel expense voucher
+      // If fuel cost is recorded in the daily log book, directly post fuel expense without nested enqueueWrite deadlock
       if (newLog.fuelCost && newLog.fuelCost > 0) {
-        await this.addExpense({
-          date: newLog.date,
+        const expNo = `EXP-${new Date().toISOString().slice(2, 7).replace('-', '')}-${(this.expenses.length + 1).toString().padStart(3, '0')}`;
+        const fuelExpRecord: ExpenseRecord = {
+          id: `exp-${Date.now()}`,
+          expenseNo: expNo,
+          date: newLog.date || new Date().toISOString().split('T')[0],
           category: 'Fuel (Diesel / CNG)',
           vehicleId: vehicle.id,
           vehicleNumber: vehicle.registrationNumber,
@@ -2698,8 +3145,12 @@ export class SheetsDatabaseManager {
           narration: `Daily log book fuel entry: ${newLog.fuelLitresAdded || 0}L at ${vehicle.registrationNumber}`,
           recordedBy: newLog.recordedBy,
           requiresApproval: false,
-          skipLogbookSync: true,
-        });
+          approvalStatus: 'Approved',
+          approvedBy: 'Direct Acceptance (No Approval Required)',
+          approvedAt: new Date().toISOString().split('T')[0],
+        };
+        this.expenses.unshift(fuelExpRecord);
+        this.postApprovedExpenseSideEffects(fuelExpRecord, true);
       }
 
       await this.internalSyncToGoogleSheets();
@@ -2831,6 +3282,19 @@ export class SheetsDatabaseManager {
 
   public async addExpense(data: Omit<ExpenseRecord, 'id' | 'expenseNo'> & { skipLogbookSync?: boolean }): Promise<ExpenseRecord> {
     return this.enqueueWrite(async () => {
+      if (!data.category || !data.category.trim()) {
+        throw new Error('Expense Category is mandatory.');
+      }
+      if (!data.amount || Number(data.amount) <= 0) {
+        throw new Error('Expense Amount is mandatory and must be greater than ₹0.');
+      }
+      if (!data.vendorName || !data.vendorName.trim()) {
+        throw new Error('Vendor / Payee Name is mandatory to record an expense.');
+      }
+      if (!data.paymentMode) {
+        throw new Error('Payment Mode (Cash / Bank / UPI) is mandatory.');
+      }
+
       const expNo = `EXP-${new Date().toISOString().slice(2, 7).replace('-', '')}-${(this.expenses.length + 1).toString().padStart(3, '0')}`;
       const matchedHead = this.expenseHeads.find(h => h.name.toLowerCase() === (data.category || '').toLowerCase());
       const requiresApproval = data.requiresApproval !== undefined ? data.requiresApproval : !!matchedHead?.requiresApproval;
@@ -2846,7 +3310,8 @@ export class SheetsDatabaseManager {
         expenseNo: expNo,
         vehicleId: veh?.id || data.vehicleId,
         vehicleNumber: veh?.registrationNumber || data.vehicleNumber || 'General',
-        amount: Number(data.amount) || 0,
+        vendorName: data.vendorName.trim(),
+        amount: Number(data.amount),
         recordedBy: data.recordedBy || 'Finance Officer',
         requiresApproval,
         approvalStatus,
@@ -3151,19 +3616,24 @@ export class SheetsDatabaseManager {
 
   public async runMonthlyBilling(month: string, runBy = 'Admin'): Promise<{ createdCount: number; totalBilled: number }> {
     return this.enqueueWrite(async () => {
+      if (!month || !month.trim()) {
+        throw new Error('Billing Month is mandatory.');
+      }
       let createdCount = 0;
       let totalBilled = 0;
 
       for (const student of this.students) {
-        // Generate monthly fee dues for all members except those who have left school/service
-        if (student.transportStatus === 'Left') continue;
+        // Generate monthly auto-fee dues for both Active and Suspended members (exclude only 'Left' or 'Needs Setup')
+        if (student.transportStatus !== 'Active' && student.transportStatus !== 'Suspended') continue;
         const key = `BILL-${month}-${student.id}`;
         const already = this.invoices.find(
           i => i.idempotencyKey === key || (i.studentId === student.id && i.month.toLowerCase() === month.toLowerCase())
         );
         if (already) continue;
 
-        const net = Math.max(0, student.monthlyFee - student.concessionAmount);
+        const net = Math.max(0, (Number(student.monthlyFee) || 0) - (Number(student.concessionAmount) || 0));
+        if (net <= 0) continue;
+
         const inv: FeeInvoice = {
           id: `inv-${Date.now()}-${createdCount}`,
           invoiceNo: `INV-${month.replace(/\s+/g, '').replace('-', '')}-${(this.invoices.length + 1).toString().padStart(4, '0')}`,
@@ -3171,8 +3641,8 @@ export class SheetsDatabaseManager {
           admissionNo: student.admissionNo,
           studentName: student.name,
           month,
-          baseFee: student.monthlyFee,
-          concession: student.concessionAmount,
+          baseFee: Number(student.monthlyFee) || 0,
+          concession: Number(student.concessionAmount) || 0,
           netAmount: net,
           paidAmount: 0,
           balanceDue: net,
@@ -3182,7 +3652,7 @@ export class SheetsDatabaseManager {
         };
 
         this.invoices.unshift(inv);
-        student.balanceDue += net;
+        student.balanceDue = (Number(student.balanceDue) || 0) + net;
         createdCount++;
         totalBilled += net;
       }
@@ -3208,12 +3678,19 @@ export class SheetsDatabaseManager {
     remarks?: string;
   }) {
     return this.enqueueWrite(async () => {
+      if (!data.studentId) throw new Error('Member selection is mandatory to receive fees.');
       const student = this.students.find(s => s.id === data.studentId);
-      if (!student) throw new Error('Student member not found');
+      if (!student) throw new Error('Selected member record was not found.');
 
       const totalDiscount = Number(data.discountAmount) || 0;
       const lateFineCharged = Number(data.lateFine) || 0;
       const netPaid = Number(data.amount) || 0;
+      if (netPaid <= 0 && totalDiscount <= 0) {
+        throw new Error('Received Fee Amount must be greater than ₹0.');
+      }
+      if (!data.paymentMode) {
+        throw new Error('Payment Mode (Cash / Bank / UPI) is mandatory.');
+      }
       const feePortionPaid = Math.max(0, netPaid - lateFineCharged);
 
       // Apply month-specific discounts if provided
@@ -3288,22 +3765,39 @@ export class SheetsDatabaseManager {
     });
   }
 
-  public async addFollowUp(data: Partial<FollowUpRecord>): Promise<FollowUpRecord> {
+  public async addFollowUp(data: Partial<FollowUpRecord> & { memberId?: string; personTalkedTo?: string; responseReceived?: string; promisedDate?: string; callDate?: string; loggedBy?: string }): Promise<FollowUpRecord> {
     return this.enqueueWrite(async () => {
-      const student = this.students.find(s => s.id === data.studentId);
+      const targetStudentId = data.studentId || data.memberId;
+      const student = this.students.find(s => s.id === targetStudentId);
+      if (!student && !data.studentName) {
+        throw new Error('Member selection is mandatory to log a fee follow-up.');
+      }
+      const contactPerson = (data.contactPerson || data.personTalkedTo || student?.fatherName || '').trim();
+      if (!contactPerson) {
+        throw new Error('Person Talked To / Contact Person is mandatory.');
+      }
+      const notes = (data.notes || data.responseReceived || '').trim();
+      if (!notes) {
+        throw new Error('Call Remarks / Response Received is mandatory.');
+      }
+      const promiseDate = data.promiseDate || data.promisedDate;
+      if (!promiseDate) {
+        throw new Error('Next Promise to Pay Date is mandatory.');
+      }
+
       const rec: FollowUpRecord = {
         id: `fol-${Date.now()}`,
-        date: data.date || new Date().toISOString().split('T')[0],
-        studentId: student?.id || data.studentId || '',
+        date: data.date || data.callDate || new Date().toISOString().split('T')[0],
+        studentId: student?.id || targetStudentId || '',
         admissionNo: student?.admissionNo || data.admissionNo || '',
         studentName: student?.name || data.studentName || '',
-        contactPerson: data.contactPerson || student?.fatherName || 'Parent / Guardian',
+        contactPerson,
         phone: data.phone || student?.mobile || '',
         overdueAmount: Number(data.overdueAmount ?? student?.balanceDue ?? 0),
-        promiseDate: data.promiseDate,
+        promiseDate,
         outcome: data.outcome || 'Promise to Pay',
-        notes: data.notes || '',
-        officerName: data.officerName || 'Transport Coordinator',
+        notes,
+        officerName: data.officerName || data.loggedBy || 'Transport Staff',
       };
       this.followUps.unshift(rec);
       await this.internalSyncToGoogleSheets();
@@ -3419,6 +3913,7 @@ export class SheetsDatabaseManager {
       trip.presentCount = existingAtt.filter(a => a.assistantStatus === 'Present').length;
       trip.absentCount = existingAtt.filter(a => a.assistantStatus === 'Absent').length;
 
+      await this.internalSyncToGoogleSheets();
       return { trip, attendance: existingAtt };
     });
   }
@@ -3454,6 +3949,7 @@ export class SheetsDatabaseManager {
         trip.absentCount = tripAtts.filter(a => a.assistantStatus === 'Absent').length;
       }
 
+      await this.internalSyncToGoogleSheets();
       return rec;
     });
   }
@@ -3487,6 +3983,7 @@ export class SheetsDatabaseManager {
         if (timingPayload.inStrength !== undefined) trip.inStrength = Number(timingPayload.inStrength);
         if (timingPayload.outStrength !== undefined) trip.outStrength = Number(timingPayload.outStrength);
       }
+      await this.internalSyncToGoogleSheets();
       return trip;
     });
   }
@@ -3497,6 +3994,7 @@ export class SheetsDatabaseManager {
       if (!trip) throw new Error('Trip not found');
       trip.status = 'Cancelled';
       trip.notes = `Cancelled by ${cancelledBy}: ${reason}`;
+      await this.internalSyncToGoogleSheets();
       return trip;
     });
   }
@@ -3592,25 +4090,36 @@ export class SheetsDatabaseManager {
   }
 
   public getMaintenance() { return this.maintenance; }
-  public async addMaintenance(data: Partial<MaintenanceRequest>) {
+  public getMaintenanceRequests() { return this.maintenance; }
+  public async addMaintenance(data: Partial<MaintenanceRequest> & { description?: string; reportedDate?: string; reportedBy?: string }) {
     return this.enqueueWrite(async () => {
       const veh = this.vehicles.find(
         v => v.id === data.vehicleId || v.registrationNumber === data.vehicleNumber
       );
+      if (!veh && !data.vehicleNumber) {
+        throw new Error('Mandatory prerequisite missing: Please select a valid Vehicle to raise a Work Order.');
+      }
+      const desc = (data.issueDescription || data.description || '').trim();
+      if (!desc) {
+        throw new Error('Issue / Repair Description is mandatory to raise a Work Order.');
+      }
+      if (!data.estimatedCost || Number(data.estimatedCost) <= 0) {
+        throw new Error('Estimated Cost is mandatory and must be greater than ₹0.');
+      }
       const woNo = `WO-${new Date().getFullYear()}-${(this.maintenance.length + 1).toString().padStart(3, '0')}`;
       const maint: MaintenanceRequest = {
         id: `maint-${Date.now()}`,
         workOrderNo: data.workOrderNo || woNo,
-        date: data.date || new Date().toISOString().split('T')[0],
+        date: data.date || data.reportedDate || new Date().toISOString().split('T')[0],
         vehicleId: veh?.id || data.vehicleId || '',
         vehicleNumber: veh?.registrationNumber || data.vehicleNumber || '',
-        issueDescription: data.issueDescription || '',
-        severity: data.severity || 'Medium',
-        vendorName: data.vendorName || 'Assigned Workshop',
-        estimatedCost: Number(data.estimatedCost) || 0,
+        issueDescription: desc,
+        severity: data.severity || (data.priority as any) || 'Medium',
+        vendorName: (data.vendorName || 'Assigned Workshop').trim(),
+        estimatedCost: Number(data.estimatedCost),
         actualCost: Number(data.actualCost) || 0,
         status: data.status || 'Pending Approval',
-        requestedBy: data.requestedBy || 'Transport Coordinator',
+        requestedBy: data.requestedBy || data.reportedBy || 'Transport Staff',
         workDoneDetails: data.workDoneDetails,
         approvedBy: data.approvedBy,
         approvedAt: data.approvedAt,
@@ -3795,9 +4304,12 @@ export class SheetsDatabaseManager {
     declaredBy?: string;
   }): Promise<HolidayRecord> {
     return this.enqueueWrite(async () => {
+      if (!payload.date || !payload.occasion?.trim()) {
+        throw new Error('Holiday Date and Occasion are mandatory.');
+      }
       const existing = this.holidays.find(h => h.date === payload.date);
       if (existing) {
-        existing.occasion = payload.occasion;
+        existing.occasion = payload.occasion.trim();
         existing.campus = payload.campus || 'all';
         await this.internalSyncToGoogleSheets();
         return existing;
@@ -3805,7 +4317,7 @@ export class SheetsDatabaseManager {
       const hol: HolidayRecord = {
         id: `hol-${Date.now()}`,
         date: payload.date,
-        occasion: payload.occasion,
+        occasion: payload.occasion.trim(),
         campus: payload.campus || 'all',
         declaredBy: payload.declaredBy || 'Admin',
       };
@@ -3815,12 +4327,20 @@ export class SheetsDatabaseManager {
     });
   }
 
-  public async removeHoliday(date: string) {
+  public async addHoliday(payload: { date: string; occasion: string; campus?: string; declaredBy?: string }) {
+    return this.declareHoliday(payload);
+  }
+
+  public async removeHoliday(dateOrId: string) {
     return this.enqueueWrite(async () => {
-      this.holidays = this.holidays.filter(h => h.date !== date);
+      this.holidays = this.holidays.filter(h => h.date !== dateOrId && h.id !== dateOrId);
       await this.internalSyncToGoogleSheets();
       return { success: true };
     });
+  }
+
+  public async deleteHoliday(dateOrId: string) {
+    return this.removeHoliday(dateOrId);
   }
 
   public getStaffAdvances() {

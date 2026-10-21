@@ -141,17 +141,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  // Dedicated streamlined sidebar for Transport Assistant (Gate & Field Operations)
+  // Dedicated sidebar for Transport Assistant with expanded operational & collection rights
   const assistantGroups: SidebarGroupItem[] = [
     {
       key: 'dashboard',
-      label: '1- Gate & Field Desk',
+      label: '1- Assistant Operations Desk',
       icon: <LayoutDashboard className="w-5 h-5" />,
       defaultNavKey: 'dashboard',
     },
     {
+      key: 'members_group',
+      label: '2- Members & Add Member',
+      icon: <Users className="w-5 h-5" />,
+      defaultNavKey: 'members',
+      defaultSubTab: 'all',
+      subItems: [
+        { id: 'as-mem-all', label: '1- Member Directory & Add', navKey: 'members', subTab: 'all' },
+        { id: 'as-mem-disc', label: '2- Behaviour & Discipline', navKey: 'members', subTab: 'discipline' },
+      ],
+    },
+    {
+      key: 'employees_group',
+      label: '3- Resumes & Staff Attendance',
+      icon: <UserSquare2 className="w-5 h-5" />,
+      defaultNavKey: 'resumes',
+      subItems: [
+        {
+          id: 'as-emp-resumes',
+          label: '1- Candidate Resumes (Receive)',
+          navKey: 'resumes',
+          badge: resumesCount > 0 ? resumesCount : undefined,
+          badgeColor: 'bg-amber-500/20 text-amber-300',
+        },
+        {
+          id: 'as-emp-att',
+          label: '2- Mark Staff Attendance',
+          navKey: 'staff',
+          subTab: 'attendance',
+        },
+      ],
+    },
+    {
       key: 'operations_group',
-      label: '2- Attendance & Route List',
+      label: '4- Route Attendance & List',
       icon: <Clock className="w-5 h-5" />,
       defaultNavKey: 'operations',
       defaultSubTab: 'board',
@@ -163,23 +195,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ],
     },
     {
+      key: 'fees_group',
+      label: '5- Receive Fees & Follow-Up',
+      icon: <CreditCard className="w-5 h-5" />,
+      defaultNavKey: 'fees',
+      defaultSubTab: 'collect',
+      subItems: [
+        { id: 'as-fe-collect', label: '1- Collect Fees & Receipts', navKey: 'fees', subTab: 'collect' },
+        { id: 'as-fe-invoices', label: '2- Monthly Invoices', navKey: 'fees', subTab: 'invoices' },
+        { id: 'as-fe-recovery', label: '3- Follow-Up Dues & Recovery', navKey: 'fees', subTab: 'recovery' },
+      ],
+    },
+    {
+      key: 'expenses_group',
+      label: '6- Raise Expense Entry',
+      icon: <BookOpenCheck className="w-5 h-5" />,
+      defaultNavKey: 'expenses',
+      defaultSubTab: 'expenses',
+      subItems: [
+        { id: 'as-ex-expenses', label: '1- Raise Expense Entry', navKey: 'expenses', subTab: 'expenses' },
+      ],
+    },
+    {
       key: 'assistant_vehicles_group',
-      label: '3- Vehicle Log Book & Fuel',
+      label: '7- Log Book & Work Orders',
       icon: <Truck className="w-5 h-5" />,
       defaultNavKey: 'vehicles',
       defaultSubTab: 'odometer',
       subItems: [
         { id: 'as-odo', label: '1- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
         { id: 'as-fuel', label: '2- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
-        { id: 'as-maint', label: '3- Report Maintenance Issue', navKey: 'vehicles', subTab: 'maintenance' },
+        { id: 'as-maint', label: '3- Raise Work Order Request', navKey: 'vehicles', subTab: 'maintenance' },
       ],
-    },
-    {
-      key: 'assistant_discipline',
-      label: '4- Behaviour & Discipline',
-      icon: <ShieldAlert className="w-5 h-5" />,
-      defaultNavKey: 'members',
-      defaultSubTab: 'discipline',
     },
   ];
 
@@ -363,11 +410,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'masters_group',
-      label: currentRole === 'Admin' ? '9- Masters & Users' : '9- Fleet & Route Masters',
+      label: '9- Masters & Users (Admin Only)',
       icon: <Layers className="w-5 h-5" />,
       defaultNavKey: 'masters',
-      defaultSubTab: currentRole === 'Admin' ? 'users' : 'routes',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      defaultSubTab: 'users',
+      allowedRoles: ['Admin'],
       subItems: [
         {
           id: 'm-users',

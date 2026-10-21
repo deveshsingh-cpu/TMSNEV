@@ -52,13 +52,13 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
   const todayStr = new Date().toISOString().split('T')[0];
 
   const [activeTab, setActiveTab] = useState<'fleet' | 'odometer' | 'fuel' | 'maintenance'>(
-    initialSubTab === 'fleet' || initialSubTab === 'odometer' || initialSubTab === 'maintenance'
+    initialSubTab === 'fleet' || initialSubTab === 'odometer' || initialSubTab === 'fuel' || initialSubTab === 'maintenance'
       ? initialSubTab
       : 'odometer'
   );
 
   useEffect(() => {
-    if (initialSubTab === 'fleet' || initialSubTab === 'odometer' || initialSubTab === 'maintenance') {
+    if (initialSubTab === 'fleet' || initialSubTab === 'odometer' || initialSubTab === 'fuel' || initialSubTab === 'maintenance') {
       setActiveTab(initialSubTab);
     }
   }, [initialSubTab]);

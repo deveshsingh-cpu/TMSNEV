@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { CandidateResume, DesignationMaster, DocumentAttachment, ResumeStatus } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { readFileCompressed } from '../../utils/fileCompressor.js';
 
 interface ResumesViewProps {
   resumes: CandidateResume[];
@@ -134,12 +135,11 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
     setShowModal(true);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
+    try {
+      const result = await readFileCompressed(file, 900, 0.72);
       const newDoc: DocumentAttachment = {
         id: `doc-${Date.now()}`,
         type: docTypeInput,
@@ -148,8 +148,9 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
         uploadedAt: new Date().toISOString().split('T')[0],
       };
       setDocuments(prev => [...prev, newDoc]);
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      setErrorBanner('Failed to process uploaded file.');
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {

@@ -11,6 +11,7 @@ import {
 } from '../../types/index.js';
 import { ResumesView } from './ResumesView.js';
 import { PrintExportToolbar, FilterPopover, printTableReport } from '../../utils/exportPrint.js';
+import { readFileCompressed } from '../../utils/fileCompressor.js';
 
 interface StaffViewProps {
   schoolName?: string;
@@ -98,7 +99,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
   const [attDate, setAttDate] = useState<string>(todayStr);
   const [attMonth, setAttMonth] = useState<string>(currentYearMonth);
   const [attCampusFilter, setAttCampusFilter] = useState<string>(
-    currentRole === 'Transport Assistant' ? userCampus : 'all'
+    currentRole === 'Transport Assistant' && userCampus && userCampus !== 'All Campuses' ? userCampus : 'all'
   );
   const [attViewMode, setAttViewMode] = useState<'daily' | 'register' | 'calendar'>('daily');
   const [selectedCalendarEmpId, setSelectedCalendarEmpId] = useState<string>(employees[0]?.id || '');
@@ -118,7 +119,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (currentRole === 'Transport Assistant') {
+    if (currentRole === 'Transport Assistant' && userCampus && userCampus !== 'All Campuses') {
       setAttCampusFilter(userCampus);
     }
   }, [currentRole, userCampus]);
@@ -202,24 +203,25 @@ export const StaffView: React.FC<StaffViewProps> = ({
     setDocName('');
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, targetType: DocumentAttachment['type']) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, targetType: DocumentAttachment['type']) => {
     const file = e.target.files?.[0];
     if (!file || !editingEmployee) return;
-    const reader = new FileReader();
-    reader.onload = () => {
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
       const newDoc: DocumentAttachment = {
         id: `doc-${Date.now()}`,
         type: targetType,
         name: file.name,
-        fileData: reader.result as string,
+        fileData: compressed,
         uploadedAt: todayStr,
       };
       setEditingEmployee({
         ...editingEmployee,
         documents: [...(editingEmployee.documents || []), newDoc],
       });
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      // ignore
+    }
   };
 
   const handleRemoveDocument = (docId: string) => {
@@ -272,9 +274,6 @@ export const StaffView: React.FC<StaffViewProps> = ({
   const attFilteredEmployees = employees.filter(e => {
     if (e.status !== 'Active' && e.status !== 'On Leave') return false;
     const empCampus = e.campus || 'Sr';
-    if (currentRole === 'Transport Assistant') {
-      return empCampus === userCampus;
-    }
     if (attCampusFilter !== 'all' && empCampus !== attCampusFilter) return false;
     return true;
   });
@@ -518,15 +517,14 @@ export const StaffView: React.FC<StaffViewProps> = ({
 
               <div>
                 <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">
-                  Campus {currentRole === 'Transport Assistant' && '(Locked to Your Campus)'}
+                  Campus
                 </label>
                 <select
                   value={attCampusFilter}
-                  disabled={currentRole === 'Transport Assistant'}
                   onChange={e => setAttCampusFilter(e.target.value)}
-                  className="w-full p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 disabled:opacity-70"
+                  className="w-full p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50"
                 >
-                  {currentRole !== 'Transport Assistant' && <option value="all">All Campuses</option>}
+                  <option value="all">All Campuses</option>
                   {campuses.map(c => (
                     <option key={c.id} value={c.code}>
                       {c.name} ({c.code})

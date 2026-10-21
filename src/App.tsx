@@ -145,63 +145,8 @@ export function App() {
   const loadAllData = useCallback(async () => {
     try {
       setError(null);
-      const [
-        mastersData,
-        statusData,
-        studentsList,
-        employeesList,
-        resumesList,
-        tripsList,
-        servicesList,
-        invoicesList,
-        receiptsList,
-        warningsList,
-        expensesList,
-        expenseHeadsList,
-        incomeHeadsList,
-        otherIncomesList,
-        odoList,
-        fuelList,
-        maintList,
-        accList,
-        vchList,
-        repSum,
-        followUpsList,
-        disciplineList,
-        assignmentsList,
-        staffAttList,
-        staffAdvList,
-        staffPayList,
-        holidaysList,
-      ] = await Promise.all([
-        api.getMasters(),
-        api.getStatus(),
-        api.getStudents(),
-        api.getEmployees(),
-        api.getResumes(),
-        api.getTrips(),
-        api.getServices(),
-        api.getInvoices(),
-        api.getReceipts(),
-        api.getWarningLetters(),
-        api.getExpenses(),
-        api.getExpenseHeads(),
-        api.getIncomeHeads(),
-        api.getIncomes(),
-        api.getOdometerLogs(),
-        api.getFuelAdvances(),
-        api.getMaintenance(),
-        api.getAccounts(),
-        api.getVouchers(),
-        api.getReportsSummary(),
-        api.getFollowUps(),
-        api.getDisciplineRecords(),
-        api.getVehicleAssignments(),
-        api.getStaffAttendance(),
-        api.getStaffAdvances(),
-        api.getStaffPayrolls(),
-        api.getHolidays(),
-      ]);
+      const boot = await api.getBootstrap(true);
+      const mastersData = boot?.masters;
 
       if (mastersData?.config) setConfig(mastersData.config);
       setCampuses(mastersData?.campuses || []);
@@ -213,7 +158,7 @@ export function App() {
       if (Array.isArray(mastersData?.users)) {
         setUsers(mastersData.users);
       }
-      const vills = mastersData?.villages || [];
+      const vills: Village[] = mastersData?.villages || [];
       setVillages(vills);
       setStops(
         vills.flatMap((v) =>
@@ -222,39 +167,44 @@ export function App() {
       );
       setVehicles(mastersData?.vehicles || []);
       setRoutes(mastersData?.routes || []);
-      setSheetsStatus(statusData);
+      setSheetsStatus(boot?.status || null);
 
-      setStudents(studentsList || []);
-      setEmployees(employeesList || []);
-      setResumes(resumesList || []);
-      setDailyTrips(tripsList || []);
-      setServices(servicesList || []);
-      setInvoices(invoicesList || []);
-      setReceipts(receiptsList || []);
-      setWarningLetters(warningsList || []);
-      setExpenses(expensesList || []);
-      setExpenseHeads(expenseHeadsList || []);
-      setIncomeHeads(incomeHeadsList || []);
-      setOtherIncomes(otherIncomesList || []);
-      setOdometerLogs(odoList || []);
-      setFuelRecords(fuelList || []);
-      setMaintenance(maintList || []);
-      setAccounts(accList || []);
-      setVouchers(vchList || []);
-      setReportsSummary(repSum);
-      setFeeFollowUps(followUpsList || []);
-      setDisciplineRecords(disciplineList || []);
-      setVehicleAssignments(assignmentsList || []);
-      setStaffAttendance(staffAttList || []);
-      setStaffAdvances(staffAdvList || []);
-      setStaffPayrolls(staffPayList || []);
-      setHolidays(holidaysList || []);
+      setStudents(boot?.students || []);
+      setEmployees(boot?.employees || []);
+      setResumes(boot?.resumes || []);
+      const tripsList = boot?.trips || [];
+      setDailyTrips(tripsList);
+      setServices(boot?.services || []);
+      setInvoices(boot?.invoices || []);
+      setReceipts(boot?.receipts || []);
+      setWarningLetters(boot?.warningLetters || []);
+      setExpenses(boot?.expenses || []);
+      setExpenseHeads(boot?.expenseHeads || []);
+      setIncomeHeads(boot?.incomeHeads || []);
+      setOtherIncomes(boot?.incomes || []);
+      setOdometerLogs(boot?.odometerLogs || []);
+      setFuelRecords(boot?.fuelAdvances || []);
+      setMaintenance(boot?.maintenance || []);
+      setAccounts(boot?.accounts || []);
+      setVouchers(boot?.vouchers || []);
+      setReportsSummary(boot?.reportsSummary || null);
+      setFeeFollowUps(boot?.followUps || []);
+      setDisciplineRecords(boot?.disciplineRecords || []);
+      setVehicleAssignments(boot?.vehicleAssignments || []);
+      setStaffAttendance(boot?.staffAttendance || []);
+      setStaffAdvances(boot?.staffAdvances || []);
+      setStaffPayrolls(boot?.staffPayrolls || []);
+      setHolidays(boot?.holidays || []);
 
       if (tripsList && tripsList.length > 0) {
         const tripIdToLoad = selectedTripId || tripsList[0].id;
         setSelectedTripId(tripIdToLoad);
-        const att = await api.getTripAttendance(tripIdToLoad);
-        setAttendanceRecords(att || []);
+        if (Array.isArray(boot?.attendance)) {
+          setAttendanceRecords(boot.attendance.filter((a: TripAttendanceRecord) => a.tripId === tripIdToLoad));
+        } else {
+          const att = await api.getTripAttendance(tripIdToLoad);
+          setAttendanceRecords(att || []);
+        }
       }
     } catch (err: any) {
       setError(err.message || 'Failed to load application data');
@@ -277,8 +227,7 @@ export function App() {
     const res = await api.getOrCreateTripForRoute(date, routeId);
     setSelectedTripId(res.trip.id);
     setAttendanceRecords(res.attendance || []);
-    const updatedTrips = await api.getTrips();
-    setDailyTrips(updatedTrips || []);
+    await loadAllData();
   };
 
   // --- Authentication Handlers ---
@@ -320,31 +269,43 @@ export function App() {
 
     let targetSubTab = subTab !== undefined ? subTab : '';
 
-    // Enforce role-based access boundaries
-    if (activeRole === 'Transport Assistant') {
-      const allowedAssistantNavs: NavItemKey[] = ['dashboard', 'operations', 'vehicles', 'members'];
+    // Enforce role-based access boundaries:
+    // 1. Neither Transport Coordinator nor Transport Assistant has rights to change Masters or Setup
+    if (activeRole !== 'Admin' && (normalizedKey === 'masters' || normalizedKey === 'setup')) {
+      normalizedKey = 'dashboard';
+      targetSubTab = '';
+    } else if (activeRole === 'Transport Assistant') {
+      const allowedAssistantNavs: NavItemKey[] = [
+        'dashboard',
+        'members',
+        'resumes',
+        'staff',
+        'operations',
+        'fees',
+        'expenses',
+        'vehicles',
+      ];
       if (!allowedAssistantNavs.includes(normalizedKey)) {
         normalizedKey = 'dashboard';
         targetSubTab = '';
-      } else if (normalizedKey === 'members') {
-        targetSubTab = 'discipline';
+      } else if (normalizedKey === 'staff') {
+        targetSubTab = 'attendance';
+      } else if (normalizedKey === 'expenses') {
+        targetSubTab = 'expenses';
+      } else if (normalizedKey === 'members' && !targetSubTab) {
+        targetSubTab = 'all';
       }
     } else if (activeRole === 'Transport Coordinator') {
-      if (normalizedKey === 'setup') {
-        normalizedKey = 'dashboard';
-        targetSubTab = '';
-      } else if (normalizedKey === 'staff' && targetSubTab === 'payroll') {
+      if (normalizedKey === 'staff' && targetSubTab === 'payroll') {
         targetSubTab = 'employees';
       } else if (
         normalizedKey === 'accounts' &&
-        (targetSubTab === 'vouchers' || targetSubTab === 'trial_balance' || targetSubTab === 'vehicle_ledger' || targetSubTab === 'income')
+        (targetSubTab === 'vouchers' ||
+          targetSubTab === 'trial_balance' ||
+          targetSubTab === 'vehicle_ledger' ||
+          targetSubTab === 'income')
       ) {
         targetSubTab = 'day_book';
-      } else if (
-        normalizedKey === 'masters' &&
-        (targetSubTab === 'users' || targetSubTab === 'designations' || targetSubTab === 'institute')
-      ) {
-        targetSubTab = 'routes';
       }
     }
 
@@ -366,50 +327,86 @@ export function App() {
 
   // --- Masters Handlers ---
   const handleUpdateConfig = async (cfg: Partial<SchoolConfig>) => {
-    await api.updateConfig(cfg);
+    const updated = await api.updateConfig(cfg);
     await loadAllData();
+    if (updated) setConfig(updated);
   };
 
   const handleAddCampus = async (data: Partial<CampusMaster>) => {
-    await api.addCampus(data);
+    const updated = await api.addCampus(data);
+    if (Array.isArray(updated)) setCampuses(updated);
+    await loadAllData();
+  };
+  const handleUpdateCampus = async (id: string, data: Partial<CampusMaster>) => {
+    const updated = await api.updateCampus(id, data);
+    if (Array.isArray(updated)) setCampuses(updated);
     await loadAllData();
   };
   const handleRemoveCampus = async (id: string) => {
-    await api.removeCampus(id);
+    const updated = await api.removeCampus(id);
+    if (Array.isArray(updated)) setCampuses(updated);
     await loadAllData();
   };
 
   const handleAddMemberType = async (name: string) => {
-    await api.addMemberType(name);
+    const updated = await api.addMemberType(name);
+    if (Array.isArray(updated)) setMemberTypes(updated);
+    await loadAllData();
+  };
+  const handleUpdateMemberType = async (id: string, name: string) => {
+    const updated = await api.updateMemberType(id, name);
+    if (Array.isArray(updated)) setMemberTypes(updated);
     await loadAllData();
   };
   const handleRemoveMemberType = async (id: string) => {
-    await api.removeMemberType(id);
+    const updated = await api.removeMemberType(id);
+    if (Array.isArray(updated)) setMemberTypes(updated);
     await loadAllData();
   };
 
   const handleAddClass = async (name: string) => {
-    await api.addClass(name);
+    const updated = await api.addClass(name);
+    if (Array.isArray(updated)) setClasses(updated);
+    await loadAllData();
+  };
+  const handleUpdateClass = async (oldName: string, newName: string) => {
+    const updated = await api.updateClass(oldName, newName);
+    if (Array.isArray(updated)) setClasses(updated);
     await loadAllData();
   };
   const handleRemoveClass = async (name: string) => {
-    await api.removeClass(name);
+    const updated = await api.removeClass(name);
+    if (Array.isArray(updated)) setClasses(updated);
     await loadAllData();
   };
   const handleAddSection = async (name: string) => {
-    await api.addSection(name);
+    const updated = await api.addSection(name);
+    if (Array.isArray(updated)) setSections(updated);
+    await loadAllData();
+  };
+  const handleUpdateSection = async (oldName: string, newName: string) => {
+    const updated = await api.updateSection(oldName, newName);
+    if (Array.isArray(updated)) setSections(updated);
     await loadAllData();
   };
   const handleRemoveSection = async (name: string) => {
-    await api.removeSection(name);
+    const updated = await api.removeSection(name);
+    if (Array.isArray(updated)) setSections(updated);
     await loadAllData();
   };
   const handleAddTrip = async (trip: Partial<TripMaster>) => {
-    await api.addTripMaster(trip);
+    const updated = await api.addTripMaster(trip);
+    if (Array.isArray(updated)) setTrips(updated);
+    await loadAllData();
+  };
+  const handleUpdateTrip = async (id: string, trip: Partial<TripMaster>) => {
+    const updated = await api.updateTripMaster(id, trip);
+    if (Array.isArray(updated)) setTrips(updated);
     await loadAllData();
   };
   const handleRemoveTrip = async (id: string) => {
-    await api.removeTripMaster(id);
+    const updated = await api.removeTripMaster(id);
+    if (Array.isArray(updated)) setTrips(updated);
     await loadAllData();
   };
   const handleSaveDesignation = async (des: Partial<DesignationMaster>) => {
@@ -592,8 +589,7 @@ export function App() {
       remarks,
       markedBy: activeRole,
     });
-    const list = await api.getStaffAttendance();
-    setStaffAttendance(list || []);
+    await loadAllData();
   };
   const handleDeclareHoliday = async (date: string, occasion: string, campus?: string) => {
     await api.addHoliday({ date, occasion, campus, declaredBy: activeRole });
@@ -619,22 +615,12 @@ export function App() {
     value: string
   ) => {
     await api.markAttendance(recordId, source, value);
-    if (selectedTripId) {
-      const att = await api.getTripAttendance(selectedTripId);
-      setAttendanceRecords(att || []);
-    }
-    const tripsList = await api.getTrips();
-    setDailyTrips(tripsList || []);
+    await loadAllData();
   };
 
   const handleResolveMismatch = async (recordId: string, value: string, reason: string) => {
     await api.resolveAttendanceMismatch(recordId, value, activeRole, reason);
-    if (selectedTripId) {
-      const att = await api.getTripAttendance(selectedTripId);
-      setAttendanceRecords(att || []);
-    }
-    const tripsList = await api.getTrips();
-    setDailyTrips(tripsList || []);
+    await loadAllData();
   };
 
   const handleVerifyTrip = async (
@@ -859,7 +845,7 @@ export function App() {
                   {config.schoolName}
                 </h1>
                 <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-amber-100 text-amber-900 rounded-md">
-                  {config.academicYear || config.currentAcademicSession || '2026-2027'}
+                  {config.currentAcademicSession || config.academicYear || '2026-2027'}
                 </span>
               </div>
               <p className="text-xs text-slate-500 hidden sm:block">
@@ -908,6 +894,17 @@ export function App() {
               >
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                 <span>Google Sheets Live ({sheetsStatus.totalTabs} Tabs)</span>
+              </button>
+            )}
+
+            {isAdmin && sheetsStatus && !sheetsStatus.isConnected && (
+              <button
+                onClick={() => handleNavigate('setup')}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border bg-rose-50 border-rose-300 text-rose-800 hover:bg-rose-100 transition-colors cursor-pointer"
+                title={sheetsStatus.lastError || 'Click to connect Google Sheets'}
+              >
+                <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+                <span>Google Sheets Not Connected — Setup</span>
               </button>
             )}
 
@@ -998,14 +995,19 @@ export function App() {
                   initialSubTab={activeSubTab || undefined}
                   onUpdateConfig={handleUpdateConfig}
                   onAddCampus={handleAddCampus}
+                  onUpdateCampus={handleUpdateCampus}
                   onRemoveCampus={handleRemoveCampus}
                   onAddMemberType={handleAddMemberType}
+                  onUpdateMemberType={handleUpdateMemberType}
                   onRemoveMemberType={handleRemoveMemberType}
                   onAddClass={handleAddClass}
+                  onUpdateClass={handleUpdateClass}
                   onRemoveClass={handleRemoveClass}
                   onAddSection={handleAddSection}
+                  onUpdateSection={handleUpdateSection}
                   onRemoveSection={handleRemoveSection}
                   onAddTrip={handleAddTrip}
+                  onUpdateTrip={handleUpdateTrip}
                   onRemoveTrip={handleRemoveTrip}
                   onSaveDesignation={handleSaveDesignation}
                   onRemoveDesignation={handleRemoveDesignation}
@@ -1058,6 +1060,10 @@ export function App() {
                   onDeleteDisciplineRecord={handleDeleteDisciplineRecord}
                   onQuickCollectFeeForMember={handleQuickCollectFeeForMember}
                   onNavigateToMasters={() => handleNavigate('masters')}
+                  onAddClass={handleAddClass}
+                  onAddSection={handleAddSection}
+                  onAddCampus={handleAddCampus}
+                  onAddMemberType={handleAddMemberType}
                 />
               )}
 
@@ -1065,8 +1071,9 @@ export function App() {
                 <ResumesView
                   resumes={resumes}
                   designations={designations}
+                  isAdmin={isAdmin}
                   onSaveResume={handleSaveResume}
-                  onDeleteResume={handleDeleteResume}
+                  onDeleteResume={isAdmin ? handleDeleteResume : undefined}
                   onHireResume={handleHireResume}
                   onNavigateToEmployees={() => handleNavigate('staff')}
                 />
@@ -1252,6 +1259,12 @@ export function App() {
                     const res = await api.syncSheets();
                     await loadAllData();
                     return res;
+                  }}
+                  onConfigureCredentials={async (creds) => {
+                    const status = await api.configureCredentials(creds);
+                    setSheetsStatus(status);
+                    await loadAllData();
+                    return status;
                   }}
                 />
               )}

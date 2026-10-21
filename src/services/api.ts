@@ -73,9 +73,12 @@ async function parseApiJson(res: Response, fallbackError: string) {
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
+    if (res.status === 413 || text.startsWith('Request En')) {
+      throw new Error('Uploaded photo or document is too large. Please re-select the photo so it compresses automatically.');
+    }
     throw new Error(
       res.status === 404
-        ? 'Backend API route (/api/*) not found on server. Please ensure the latest code with /api/index.ts and vercel.json is pushed to GitHub & redeployed on Vercel.'
+        ? 'Backend API route (/api/*) not found on server. Please ensure the latest code is pushed to GitHub & redeployed on Vercel.'
         : `${fallbackError} (HTTP ${res.status})`
     );
   }
@@ -86,6 +89,14 @@ async function parseApiJson(res: Response, fallbackError: string) {
 }
 
 export const api = {
+  // Unified Single-Request Bootstrap
+  getBootstrap: async (fresh = true): Promise<any> => {
+    const res = await fetch(`/api/bootstrap?fresh=${fresh ? '1' : '0'}&_t=${Date.now()}`, {
+      cache: 'no-store',
+    });
+    return parseApiJson(res, 'Failed to load application data');
+  },
+
   // Authentication & System Users
   login: async (username: string, password: string): Promise<SystemUser> => {
     const res = await fetch('/api/auth/login', {
@@ -115,22 +126,34 @@ export const api = {
   // Status & Sheets
   getStatus: async (): Promise<SheetsStatus> => {
     const res = await fetch('/api/status');
-    if (!res.ok) throw new Error('Failed to fetch status');
-    return res.json();
+    return parseApiJson(res, 'Failed to fetch status');
   },
   provisionSheets: async () => {
     const res = await fetch('/api/sheets/provision', { method: 'POST' });
-    return res.json();
+    return parseApiJson(res, 'Failed to provision sheets');
   },
   syncSheets: async () => {
     const res = await fetch('/api/sheets/sync', { method: 'POST' });
-    return res.json();
+    return parseApiJson(res, 'Failed to sync sheets');
+  },
+  configureCredentials: async (creds: {
+    sheetId?: string;
+    clientEmail?: string;
+    projectId?: string;
+    privateKey: string;
+  }): Promise<SheetsStatus> => {
+    const res = await fetch('/api/sheets/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(creds),
+    });
+    return parseApiJson(res, 'Failed to configure Google Sheets credentials');
   },
 
   // Config & Branding
   getConfig: async (): Promise<SchoolConfig> => {
     const res = await fetch('/api/config');
-    return res.json();
+    return parseApiJson(res, 'Failed to load config');
   },
   updateConfig: async (cfg: Partial<SchoolConfig>): Promise<SchoolConfig> => {
     const res = await fetch('/api/config', {
@@ -138,13 +161,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cfg),
     });
-    return res.json();
+    return parseApiJson(res, 'Failed to update institute configuration');
   },
 
   // Masters Aggregator
   getMasters: async (): Promise<MastersData> => {
     const res = await fetch('/api/masters');
-    return res.json();
+    return parseApiJson(res, 'Failed to load masters');
   },
 
   // Masters: Campuses
@@ -154,19 +177,19 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to add campus');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to add campus');
+  },
+  updateCampus: async (id: string, data: Partial<CampusMaster>): Promise<CampusMaster[]> => {
+    const res = await fetch(`/api/masters/campuses/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return parseApiJson(res, 'Failed to update campus');
   },
   removeCampus: async (id: string): Promise<CampusMaster[]> => {
     const res = await fetch(`/api/masters/campuses/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete campus: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete campus: linked dependencies exist.');
   },
 
   // Masters: Member Types
@@ -176,19 +199,19 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to add member type');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to add member type');
+  },
+  updateMemberType: async (id: string, name: string): Promise<MemberTypeMaster[]> => {
+    const res = await fetch(`/api/masters/member-types/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return parseApiJson(res, 'Failed to update member type');
   },
   removeMemberType: async (id: string): Promise<MemberTypeMaster[]> => {
     const res = await fetch(`/api/masters/member-types/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete member type: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete member type: linked dependencies exist.');
   },
 
   // Masters: Classes & Sections
@@ -198,19 +221,19 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to add class');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to add class');
+  },
+  updateClass: async (oldName: string, newName: string): Promise<string[]> => {
+    const res = await fetch('/api/masters/classes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ oldName, newName }),
+    });
+    return parseApiJson(res, 'Failed to update class');
   },
   removeClass: async (name: string): Promise<string[]> => {
     const res = await fetch(`/api/masters/classes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete class: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete class: linked dependencies exist.');
   },
 
   addSection: async (name: string): Promise<string[]> => {
@@ -219,19 +242,19 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to add section');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to add section');
+  },
+  updateSection: async (oldName: string, newName: string): Promise<string[]> => {
+    const res = await fetch('/api/masters/sections', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ oldName, newName }),
+    });
+    return parseApiJson(res, 'Failed to update section');
   },
   removeSection: async (name: string): Promise<string[]> => {
     const res = await fetch(`/api/masters/sections/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete section: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete section: linked dependencies exist.');
   },
 
   // Masters: Trips (1, 2, 3...)
@@ -241,19 +264,19 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to add trip');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to add trip');
+  },
+  updateTripMaster: async (id: string, data: Partial<TripMaster>): Promise<TripMaster[]> => {
+    const res = await fetch(`/api/masters/trips/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return parseApiJson(res, 'Failed to update trip');
   },
   removeTripMaster: async (id: string): Promise<TripMaster[]> => {
     const res = await fetch(`/api/masters/trips/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete trip: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete trip: linked dependencies exist.');
   },
 
   // Masters: Designations & Permissions
@@ -263,29 +286,21 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to save designation');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to save designation');
   },
   removeDesignation: async (id: string): Promise<DesignationMaster[]> => {
     const res = await fetch(`/api/masters/designations/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete designation: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete designation: linked dependencies exist.');
   },
 
   // Masters: Villages & Transport Stops
   getVillages: async (): Promise<Village[]> => {
     const res = await fetch('/api/villages');
-    return res.json();
+    return parseApiJson(res, 'Failed to fetch villages');
   },
   getStops: async (): Promise<TransportStop[]> => {
     const res = await fetch('/api/villages');
-    const villages: Village[] = await res.json();
+    const villages: Village[] = await parseApiJson(res, 'Failed to fetch stops');
     return villages.flatMap(v => v.stops.map(s => ({ ...s, villageName: v.name })));
   },
   saveVillage: async (data: Partial<Village>): Promise<Village> => {
@@ -294,25 +309,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to save village');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to save village');
   },
   deleteVillage: async (id: string) => {
     const res = await fetch(`/api/masters/villages/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete village: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete village: linked dependencies exist.');
   },
 
   // Masters: Vehicles
   getVehicles: async (): Promise<Vehicle[]> => {
     const res = await fetch('/api/vehicles');
-    return res.json();
+    return parseApiJson(res, 'Failed to fetch vehicles');
   },
   saveVehicle: async (data: Partial<Vehicle>): Promise<Vehicle> => {
     const res = await fetch('/api/masters/vehicles', {
@@ -320,25 +327,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to save vehicle');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to save vehicle');
   },
   deleteVehicle: async (id: string) => {
     const res = await fetch(`/api/masters/vehicles/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete vehicle: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete vehicle: linked dependencies exist.');
   },
 
   // Masters: Routes (Nomenclature: Campus/VehicleLast4/Trip e.g. Sr/7175/1)
   getRoutes: async (): Promise<Route[]> => {
     const res = await fetch('/api/routes');
-    return res.json();
+    return parseApiJson(res, 'Failed to fetch routes');
   },
   saveRoute: async (data: any): Promise<Route> => {
     const res = await fetch('/api/masters/routes', {
@@ -346,19 +345,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to save route');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to save route');
   },
   deleteRoute: async (id: string) => {
     const res = await fetch(`/api/masters/routes/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete route: linked dependencies exist.');
-    }
-    return res.json();
+    return parseApiJson(res, 'Cannot delete route: linked dependencies exist.');
   },
 
   // Members (Students & Staff)
@@ -368,7 +359,7 @@ export const api = {
     if (params?.status) sp.set('status', params.status);
     if (params?.query) sp.set('query', params.query);
     const res = await fetch(`/api/students?${sp.toString()}`);
-    return res.json();
+    return parseApiJson(res, 'Failed to fetch members');
   },
   saveStudent: async (data: Partial<StudentMember>): Promise<StudentMember> => {
     const res = await fetch('/api/students', {
@@ -376,19 +367,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to save member');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to save member');
   },
   deleteStudent: async (id: string) => {
     const res = await fetch(`/api/students/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to delete member');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to delete member');
   },
   reactivateStudent: async (id: string, authorizedBy: string, reason: string): Promise<StudentMember> => {
     const res = await fetch(`/api/students/${id}/reactivate`, {
@@ -396,11 +379,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ authorizedBy, reason }),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to reactivate member');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to reactivate member');
   },
   grantPermissionLetter: async (
     id: string,
@@ -417,11 +396,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to grant permission letter');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to grant permission letter');
   },
   suspendStudent: async (id: string, reason: string, authorizedBy: string): Promise<StudentMember> => {
     const res = await fetch(`/api/students/${id}/suspend`, {

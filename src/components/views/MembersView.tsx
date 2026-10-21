@@ -10,6 +10,7 @@ import {
   FeeFollowUpRecord, DisciplineRecord, Vehicle, UserRole
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview, FilterPopover } from '../../utils/exportPrint.js';
+import { readFileCompressed } from '../../utils/fileCompressor.js';
 
 interface MembersViewProps {
   schoolName?: string;
@@ -208,7 +209,9 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [emergencyContact, setEmergencyContact] = useState('');
   const [address, setAddress] = useState('');
   const [selectedVillageId, setSelectedVillageId] = useState('');
+  const [customVillageName, setCustomVillageName] = useState('');
   const [selectedStopId, setSelectedStopId] = useState('');
+  const [customStopName, setCustomStopName] = useState('');
   const [selectedRouteId, setSelectedRouteId] = useState('');
   const [monthlyFee, setMonthlyFee] = useState<number>(700);
   const [concessionAmount, setConcessionAmount] = useState<number>(0);
@@ -411,15 +414,16 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setShowRevokePermModal(true);
   };
 
-  const handleRevokePermFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleRevokePermFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setRevokePermFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      setRevokePermFileData(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
+      setRevokePermFileData(compressed);
+    } catch {
+      setRevokePermError('Failed to process uploaded file.');
+    }
   };
 
   const handleStandaloneRevokePermSubmit = async (e: React.FormEvent) => {
@@ -502,43 +506,46 @@ export const MembersView: React.FC<MembersViewProps> = ({
     }
   };
 
-  const handleDpUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDpUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setProfilePhoto(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await readFileCompressed(file, 320, 0.74);
+      setProfilePhoto(compressed);
+      setFormError(null);
+    } catch {
+      setFormError('Failed to process uploaded photo. Please try another image.');
+    }
   };
 
-  const handleInitialSchoolIdUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInitialSchoolIdUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
       setSchoolIdDoc({
         id: `doc-${Date.now()}`,
         type: 'School ID Card',
         name: file.name,
-        fileData: reader.result as string,
+        fileData: compressed,
         uploadedAt: todayStr,
       });
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      setFormError('Failed to process uploaded School ID document.');
+    }
   };
 
   const openNewModal = () => {
     setFormError(null);
     setEditingId(null);
-    setAdmissionNo(`ADM-${Math.floor(1000 + Math.random() * 9000)}`);
+    setAdmissionNo('');
     setName('');
     setProfilePhoto('');
-    setMemberType(memberTypes[0]?.name || '');
-    setStudentClass(classes[0] || '');
-    setSection(sections[0] || '');
+    setMemberType('');
+    setStudentClass('');
+    setSection('');
     setGender('M');
-    setCampus(campuses[0]?.code || '');
+    setCampus('');
     setFatherName('');
     setMobile('');
     setEmergencyContact('');
@@ -546,7 +553,9 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setSchoolIdDoc(null);
     const defaultVil = villages[0];
     setSelectedVillageId(defaultVil?.id || '');
+    setCustomVillageName('');
     setSelectedStopId(defaultVil?.stops[0]?.id || '');
+    setCustomStopName('');
     setMonthlyFee(defaultVil?.stops[0]?.fee || defaultVil?.monthlyRate || 700);
     setConcessionAmount(0);
     const defaultRoute = routes[0];
@@ -561,18 +570,20 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setAdmissionNo(s.admissionNo);
     setName(s.name);
     setProfilePhoto(s.profilePhoto || '');
-    setMemberType(s.memberType || memberTypes[0]?.name || '');
-    setStudentClass(s.class);
-    setSection(s.section);
+    setMemberType(s.memberType || '');
+    setStudentClass(s.class || '');
+    setSection(s.section || '');
     setGender(s.gender || 'M');
-    setCampus(s.campus);
-    setFatherName(s.fatherName);
-    setMobile(s.mobile);
-    setEmergencyContact(s.emergencyContact || s.mobile);
-    setAddress(s.address);
-    setSelectedVillageId(s.villageId);
-    setSelectedStopId(s.pickupDropStopId);
-    setSelectedRouteId(s.routeId);
+    setCampus(s.campus || '');
+    setFatherName(s.fatherName || '');
+    setMobile(s.mobile || '');
+    setEmergencyContact(s.emergencyContact || s.mobile || '');
+    setAddress(s.address || '');
+    setSelectedVillageId(s.villageId || '');
+    setCustomVillageName(s.villageName && !villages.some(v => v.id === s.villageId) ? s.villageName : '');
+    setSelectedStopId(s.pickupDropStopId || '');
+    setCustomStopName(s.pickupDropStopName && !s.pickupDropStopId ? s.pickupDropStopName : '');
+    setSelectedRouteId(s.routeId || '');
     setMonthlyFee(s.monthlyFee);
     setConcessionAmount(s.concessionAmount);
     setMemberStatusInput(s.transportStatus || 'Active');
@@ -584,54 +595,95 @@ export const MembersView: React.FC<MembersViewProps> = ({
     e.preventDefault();
     setFormError(null);
 
+    if (!admissionNo.trim()) {
+      setFormError('Admission No. / Staff ID is mandatory.');
+      return;
+    }
     if (!name.trim()) {
-      setFormError('Member Name is required.');
+      setFormError('Member Full Name is mandatory.');
       return;
     }
     if (!profilePhoto) {
       setFormError('Display Picture (DP) attachment is compulsory when adding a member.');
       return;
     }
-    if (!campus) {
-      setFormError('Please select a Campus.');
+    if (!memberType.trim()) {
+      setFormError('Please enter or select a Member Type.');
       return;
     }
-    if (!memberType) {
-      setFormError('Please select a Member Type.');
+    if (!campus.trim()) {
+      setFormError('Please enter or select a Campus.');
+      return;
+    }
+    if (!studentClass.trim()) {
+      setFormError('Class / Role / Department is mandatory.');
+      return;
+    }
+    if (!fatherName.trim()) {
+      setFormError('Father / Guardian / Spouse Name is mandatory.');
+      return;
+    }
+    if (!mobile.trim() || mobile.replace(/\D/g, '').length < 10) {
+      setFormError('A valid 10-digit Mobile / WhatsApp Number is mandatory.');
+      return;
+    }
+    if (!address.trim()) {
+      setFormError('Residential Address is mandatory.');
+      return;
+    }
+
+    const vil = villages.find(v => v.id === selectedVillageId);
+    const stp = vil?.stops.find(s => s.id === selectedStopId);
+    const rt = routes.find(r => r.id === selectedRouteId);
+
+    const resolvedVillageName = customVillageName.trim() || vil?.name || '';
+    const resolvedStopName = customStopName.trim() || stp?.name || '';
+    const resolvedRouteCode = rt?.code || '';
+
+    if (!vil && !resolvedVillageName) {
+      setFormError('Mandatory prerequisite record missing: Please select a valid Village from Village Master.');
+      return;
+    }
+    if (!stp && !resolvedStopName) {
+      setFormError('Mandatory prerequisite record missing: Please select a valid Pickup & Drop Stop.');
+      return;
+    }
+    if (!rt && !resolvedRouteCode) {
+      setFormError('Mandatory prerequisite record missing: Please select a valid Assigned Route from Route Master.');
+      return;
+    }
+    if (!monthlyFee || Number(monthlyFee) <= 0) {
+      setFormError('Monthly Transport Fee is mandatory and must be greater than ₹0.');
       return;
     }
 
     setSubmitting(true);
     try {
-      const vil = villages.find(v => v.id === selectedVillageId);
-      const stp = vil?.stops.find(s => s.id === selectedStopId);
-      const rt = routes.find(r => r.id === selectedRouteId);
-
       const existingMember = editingId ? students.find(x => x.id === editingId) : undefined;
       const existingDocs = existingMember?.documents || [];
       const updatedDocs = schoolIdDoc ? [schoolIdDoc, ...existingDocs] : existingDocs;
 
       await onSaveStudent({
         id: editingId || undefined,
-        admissionNo,
+        admissionNo: admissionNo.trim(),
         name: name.trim(),
         profilePhoto,
-        memberType,
-        class: studentClass,
-        section,
+        memberType: memberType.trim(),
+        class: studentClass.trim(),
+        section: section.trim() || 'A',
         gender,
-        campus,
-        fatherName,
-        mobile,
-        emergencyContact: emergencyContact || mobile,
-        address,
+        campus: campus.trim(),
+        fatherName: fatherName.trim(),
+        mobile: mobile.trim(),
+        emergencyContact: (emergencyContact || mobile).trim(),
+        address: address.trim(),
         villageId: vil?.id || '',
-        villageName: vil?.name || 'Unassigned Village',
+        villageName: resolvedVillageName,
         pickupDropStopId: stp?.id || '',
-        pickupDropStopName: stp?.name || 'Main Village Stop',
+        pickupDropStopName: resolvedStopName,
         routeId: rt?.id || '',
-        routeCode: rt?.code || 'Unassigned',
-        monthlyFee: Number(monthlyFee) || 700,
+        routeCode: resolvedRouteCode,
+        monthlyFee: Number(monthlyFee),
         concessionAmount: Number(concessionAmount) || 0,
         transportStatus: memberStatusInput,
         documents: updatedDocs,
@@ -680,26 +732,23 @@ export const MembersView: React.FC<MembersViewProps> = ({
     const file = e.target.files?.[0];
     if (!file || !activeProfileMember) return;
     setUploadingDoc(true);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const newDoc: DocumentAttachment = {
-          id: `doc-${Date.now()}`,
-          type: newDocType,
-          name: file.name,
-          fileData: reader.result as string,
-          uploadedAt: todayStr,
-        };
-        const updatedDocs = [...(activeProfileMember.documents || []), newDoc];
-        await onSaveStudent({
-          ...activeProfileMember,
-          documents: updatedDocs,
-        });
-      } finally {
-        setUploadingDoc(false);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
+      const newDoc: DocumentAttachment = {
+        id: `doc-${Date.now()}`,
+        type: newDocType,
+        name: file.name,
+        fileData: compressed,
+        uploadedAt: todayStr,
+      };
+      const updatedDocs = [...(activeProfileMember.documents || []), newDoc];
+      await onSaveStudent({
+        ...activeProfileMember,
+        documents: updatedDocs,
+      });
+    } finally {
+      setUploadingDoc(false);
+    }
   };
 
   const handleDeleteProfileDocument = async (docId: string) => {
@@ -712,15 +761,16 @@ export const MembersView: React.FC<MembersViewProps> = ({
   };
 
   // Handle Permission Letter File Select
-  const handlePermFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePermFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setPermFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      setPermFileData(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
+      setPermFileData(compressed);
+    } catch {
+      setFormError('Failed to process uploaded file.');
+    }
   };
 
   const handleGrantPermissionSubmit = async (e: React.FormEvent) => {
@@ -2904,46 +2954,91 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Member Type *</label>
-                  <select
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Member Type * <span className="text-[10px] font-normal text-slate-400">(Type or Select)</span>
+                  </label>
+                  <input
+                    type="text"
                     required
+                    list="erp-member-types-list"
                     value={memberType}
                     onChange={e => setMemberType(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
-                  >
-                    <option value="">-- Select Member Type --</option>
+                    placeholder="e.g. Student, Staff, Teacher"
+                    className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
+                  />
+                  <datalist id="erp-member-types-list">
                     {memberTypes.map(m => (
-                      <option key={m.id} value={m.name}>
-                        {m.name}
-                      </option>
+                      <option key={m.id} value={m.name} />
                     ))}
-                  </select>
+                  </datalist>
+                  {memberTypes.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {memberTypes.map(m => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setMemberType(m.name)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer border ${
+                            memberType === m.name
+                              ? 'bg-slate-900 text-amber-400 border-slate-900'
+                              : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                          }`}
+                        >
+                          {m.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Admission / Staff ID *</label>
                   <input
                     type="text"
                     required
+                    placeholder="e.g. NEV2026123"
                     value={admissionNo}
                     onChange={e => setAdmissionNo(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono"
+                    className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold focus:border-slate-900 focus:outline-hidden"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Campus *</label>
-                  <select
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Campus * <span className="text-[10px] font-normal text-slate-400">(Type or Select)</span>
+                  </label>
+                  <input
+                    type="text"
                     required
+                    list="erp-campuses-list"
                     value={campus}
                     onChange={e => setCampus(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
-                  >
-                    <option value="">-- Select Campus --</option>
+                    placeholder="e.g. Sr, Jr, Main Campus"
+                    className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
+                  />
+                  <datalist id="erp-campuses-list">
                     {campuses.map(c => (
                       <option key={c.id} value={c.code}>
                         {c.name} ({c.code})
                       </option>
                     ))}
-                  </select>
+                  </datalist>
+                  {campuses.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {campuses.map(c => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setCampus(c.code)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer border ${
+                            campus === c.code
+                              ? 'bg-slate-900 text-amber-400 border-slate-900'
+                              : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                          }`}
+                        >
+                          {c.name} ({c.code})
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2956,36 +3051,45 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     value={name}
                     onChange={e => setName(e.target.value)}
                     placeholder="Full Name"
-                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
+                    className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Class / Role *</label>
-                  <select
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Class / Role * <span className="text-[10px] font-normal text-slate-400">(Type or Select)</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    list="erp-classes-list"
                     value={studentClass}
                     onChange={e => setStudentClass(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
-                  >
+                    placeholder="e.g. Class X, LKG, Teacher"
+                    className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
+                  />
+                  <datalist id="erp-classes-list">
                     {classes.map(c => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
+                      <option key={c} value={c} />
                     ))}
-                  </select>
+                  </datalist>
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Section</label>
-                  <select
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Section <span className="text-[10px] font-normal text-slate-400">(Type or Select)</span>
+                  </label>
+                  <input
+                    type="text"
+                    list="erp-sections-list"
                     value={section}
                     onChange={e => setSection(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
-                  >
+                    placeholder="e.g. A, B, Science"
+                    className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
+                  />
+                  <datalist id="erp-sections-list">
                     {sections.map(sec => (
-                      <option key={sec} value={sec}>
-                        {sec}
-                      </option>
+                      <option key={sec} value={sec} />
                     ))}
-                  </select>
+                  </datalist>
                 </div>
               </div>
 
@@ -3043,42 +3147,65 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">1. Select Village *</label>
-                    <select
-                      value={selectedVillageId}
-                      onChange={e => handleVillageSelect(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                    >
-                      {villages.map(v => (
-                        <option key={v.id} value={v.id}>
-                          {v.name} (₹{v.monthlyRate}/mo)
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">1. Select or Type Village</label>
+                    {villages.length > 0 ? (
+                      <select
+                        value={selectedVillageId}
+                        onChange={e => handleVillageSelect(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                      >
+                        <option value="">-- Select Village --</option>
+                        {villages.map(v => (
+                          <option key={v.id} value={v.id}>
+                            {v.name} (₹{v.monthlyRate || v.stops?.[0]?.fee || 700}/mo)
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        placeholder="Type Village Name"
+                        value={customVillageName}
+                        onChange={e => setCustomVillageName(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                      />
+                    )}
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">2. Pickup &amp; Drop Stop *</label>
-                    <select
-                      value={selectedStopId}
-                      onChange={e => handleStopSelect(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                    >
-                      {availableStops.map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} (₹{s.fee})
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">2. Pickup &amp; Drop Stop</label>
+                    {availableStops.length > 0 ? (
+                      <select
+                        value={selectedStopId}
+                        onChange={e => handleStopSelect(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                      >
+                        <option value="">-- Select Stop --</option>
+                        {availableStops.map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} (₹{s.fee})
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        placeholder="Type Pickup / Drop Stop"
+                        value={customStopName}
+                        onChange={e => setCustomStopName(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                      />
+                    )}
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">3. Assigned Route *</label>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">3. Assigned Route</label>
                     <select
                       value={selectedRouteId}
                       onChange={e => setSelectedRouteId(e.target.value)}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
                     >
+                      <option value="">-- Unassigned / Select Route --</option>
                       {availableRoutes.map(r => (
                         <option key={r.id} value={r.id}>
                           {r.code}
@@ -3117,7 +3244,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                       <option value="Active">Active (Included in Auto-Fee)</option>
                       <option value="Left">Left School / Service (Excluded from Auto-Fee)</option>
                       <option value="Needs Setup">Needs Setup</option>
-                      {canInitiateSuspension && <option value="Suspended">Suspended</option>}
+                      {canInitiateSuspension && <option value="Suspended">Suspended (Included in Auto-Fee)</option>}
                     </select>
                   </div>
                 </div>

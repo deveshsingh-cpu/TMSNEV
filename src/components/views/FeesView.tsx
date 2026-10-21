@@ -572,8 +572,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
         type: res.createdCount > 0 ? 'success' : 'info',
         text:
           res.createdCount > 0
-            ? `Manual Auto-Due Complete: Generated ${res.createdCount} transport fee invoices for ${selectedMonth} totaling ₹${res.totalBilled.toLocaleString('en-IN')} (Left School members excluded).`
-            : `All active members already have monthly fee dues generated for ${selectedMonth}. Zero duplicates created.`,
+            ? `Monthly Auto-Fee Complete: Generated ${res.createdCount} transport fee invoices for ${selectedMonth} totaling ₹${res.totalBilled.toLocaleString('en-IN')} for Active & Suspended members (Left School members excluded).`
+            : `All Active & Suspended members already have monthly fee dues calculated for ${selectedMonth}. Zero duplicates created.`,
       });
     } finally {
       setIsRunningBilling(false);

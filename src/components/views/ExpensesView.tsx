@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { ExpenseRecord, ExpenseHead, Vehicle } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { readFileCompressed } from '../../utils/fileCompressor.js';
 
 interface ExpensesViewProps {
   schoolName?: string;
@@ -91,17 +92,16 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const selectedHeadObj = expenseHeads.find((h) => h.name === category);
   const categoryNeedsApproval = !!selectedHeadObj?.requiresApproval;
 
-  const handleBillPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleBillPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setBillFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setBillPhoto(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
+      setBillPhoto(compressed);
+    } catch {
+      // ignore
+    }
   };
 
   const filteredExpenses = expenses.filter((exp) => {

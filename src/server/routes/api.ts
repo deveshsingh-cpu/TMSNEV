@@ -3,7 +3,10 @@ import { sheetsDb } from '../sheets/sheetsService.js';
 
 export const apiRouter = Router();
 
-apiRouter.use(async (_req: Request, _res: Response, next) => {
+apiRouter.use(async (_req: Request, res: Response, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   await sheetsDb.ensureInitialized();
   next();
 });
@@ -31,6 +34,98 @@ apiRouter.post('/sheets/sync', async (_req: Request, res: Response) => {
   try {
     const result = await sheetsDb.syncToGoogleSheets();
     res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/sheets/credentials', async (req: Request, res: Response) => {
+  try {
+    const status = await sheetsDb.configureCredentialsAtRuntime(req.body || {});
+    res.json(status);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Unified Single-Request Bootstrap (Prevents multi-instance serverless race conditions)
+apiRouter.get('/bootstrap', async (req: Request, res: Response) => {
+  try {
+    if (req.query.fresh === '1') {
+      await sheetsDb.ensureInitialized(true);
+    }
+    const status = await sheetsDb.getStatus();
+    const students = sheetsDb.getStudents();
+    const trips = sheetsDb.getTrips();
+    const vehicles = sheetsDb.getVehicles();
+    const invoices = sheetsDb.getInvoices();
+    const receipts = sheetsDb.getReceipts();
+    const accounts = sheetsDb.getAccounts();
+    const expenses = sheetsDb.getExpenses();
+
+    res.json({
+      attendance: sheetsDb.getAllAttendance(),
+      masters: {
+        config: sheetsDb.getSchoolConfig(),
+        campuses: sheetsDb.getCampuses(),
+        memberTypes: sheetsDb.getMemberTypes(),
+        classes: sheetsDb.getClasses(),
+        sections: sheetsDb.getSections(),
+        trips: sheetsDb.getTripsMaster(),
+        designations: sheetsDb.getDesignationsMaster(),
+        villages: sheetsDb.getVillages(),
+        vehicles,
+        routes: sheetsDb.getRoutes(),
+        users: sheetsDb.getUsers(),
+      },
+      status,
+      students,
+      employees: sheetsDb.getEmployees(),
+      resumes: sheetsDb.getResumes(),
+      trips,
+      services: sheetsDb.getScheduledServices(),
+      invoices,
+      receipts,
+      warningLetters: sheetsDb.getWarningLetters(),
+      expenses,
+      expenseHeads: sheetsDb.getExpenseHeads(),
+      incomeHeads: sheetsDb.getIncomeHeads(),
+      incomes: sheetsDb.getIncomes(),
+      odometerLogs: sheetsDb.getOdometerLogs(),
+      fuelAdvances: sheetsDb.getFuelAdvances(),
+      maintenance: sheetsDb.getMaintenanceRequests(),
+      accounts,
+      vouchers: sheetsDb.getVouchers(),
+      reportsSummary: {
+        metrics: {
+          totalStudents: students.length,
+          activeStudents: students.filter(s => s.transportStatus === 'Active').length,
+          suspendedStudents: students.filter(s => s.transportStatus === 'Suspended').length,
+          needsSetupStudents: students.filter(s => s.transportStatus === 'Needs Setup').length,
+          totalBilled: invoices.reduce((s, i) => s + i.netAmount, 0),
+          totalCollected: receipts.reduce((s, r) => s + r.amount, 0),
+          totalOutstanding: students.reduce((s, st) => s + st.balanceDue, 0),
+          totalVehicles: vehicles.length,
+          availableVehicles: vehicles.filter(v => v.availability === 'Available').length,
+          totalTripsToday: trips.length,
+          tripsArrived: trips.filter(t => t.status === 'Arrived').length,
+          tripsPending: trips.filter(t => t.status === 'Ready' || t.status === 'Planned').length,
+          mismatchesCount: trips.reduce((s, t) => s + t.mismatchCount, 0),
+          totalFuelSpend: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected' && e.category.includes('Fuel')).reduce((s, e) => s + e.amount, 0),
+          totalRepairsSpend: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected' && e.category.includes('Repairs')).reduce((s, e) => s + e.amount, 0),
+          totalExpensesAll: expenses.filter(e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected').reduce((s, e) => s + e.amount, 0),
+          unsettledAdvances: 0,
+        },
+        accountsOverview: accounts,
+      },
+      followUps: sheetsDb.getFollowUps(),
+      disciplineRecords: sheetsDb.getDisciplineRecords(),
+      vehicleAssignments: sheetsDb.getVehicleAssignments(),
+      staffAttendance: sheetsDb.getStaffAttendance(),
+      staffAdvances: sheetsDb.getStaffAdvances(),
+      staffPayrolls: sheetsDb.getStaffPayrolls(),
+      holidays: sheetsDb.getHolidays(),
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -112,6 +207,14 @@ apiRouter.post('/masters/campuses', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.put('/masters/campuses/:id', async (req: Request, res: Response) => {
+  try {
+    const campuses = await sheetsDb.updateCampus(req.params.id, req.body);
+    res.json(campuses);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 apiRouter.delete('/masters/campuses/:id', async (req: Request, res: Response) => {
   try {
     const campuses = await sheetsDb.removeCampus(req.params.id);
@@ -128,6 +231,14 @@ apiRouter.get('/masters/member-types', (_req: Request, res: Response) => {
 apiRouter.post('/masters/member-types', async (req: Request, res: Response) => {
   try {
     const memberTypes = await sheetsDb.addMemberType(req.body.name);
+    res.json(memberTypes);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.put('/masters/member-types/:id', async (req: Request, res: Response) => {
+  try {
+    const memberTypes = await sheetsDb.updateMemberType(req.params.id, req.body.name);
     res.json(memberTypes);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -154,6 +265,14 @@ apiRouter.post('/masters/classes', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.put('/masters/classes', async (req: Request, res: Response) => {
+  try {
+    const classes = await sheetsDb.updateClass(req.body.oldName, req.body.newName);
+    res.json(classes);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 apiRouter.delete('/masters/classes/:name', async (req: Request, res: Response) => {
   try {
     const classes = await sheetsDb.removeClass(req.params.name);
@@ -175,6 +294,14 @@ apiRouter.post('/masters/sections', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.put('/masters/sections', async (req: Request, res: Response) => {
+  try {
+    const sections = await sheetsDb.updateSection(req.body.oldName, req.body.newName);
+    res.json(sections);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 apiRouter.delete('/masters/sections/:name', async (req: Request, res: Response) => {
   try {
     const sections = await sheetsDb.removeSection(req.params.name);
@@ -191,6 +318,14 @@ apiRouter.get('/masters/trips', (_req: Request, res: Response) => {
 apiRouter.post('/masters/trips', async (req: Request, res: Response) => {
   try {
     const trips = await sheetsDb.addTripMaster(req.body);
+    res.json(trips);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.put('/masters/trips/:id', async (req: Request, res: Response) => {
+  try {
+    const trips = await sheetsDb.updateTripMaster(req.params.id, req.body);
     res.json(trips);
   } catch (err: any) {
     res.status(400).json({ error: err.message });

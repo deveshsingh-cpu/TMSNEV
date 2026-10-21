@@ -10,6 +10,7 @@ import {
   OdometerLog, IncomeHead, IncomeRecord
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { readFileCompressed } from '../../utils/fileCompressor.js';
 
 interface AccountsViewProps {
   schoolName?: string;
@@ -124,15 +125,16 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   const [vchError, setVchError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleIncomeAttachmentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleIncomeAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setIncomeAttachmentName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      setIncomeAttachment(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await readFileCompressed(file, 900, 0.72);
+      setIncomeAttachment(compressed);
+    } catch {
+      // ignore
+    }
   };
 
   const handleCreateIncomeHead = async (e: React.FormEvent) => {

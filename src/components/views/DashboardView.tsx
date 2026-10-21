@@ -222,48 +222,85 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
     return (
       <div className="space-y-6">
-        {/* Assistant Gate Operations Banner */}
-        <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md border border-slate-800 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-          <div className="space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Role: Transport Assistant (Gate &amp; Field Desk)</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono">
-                <Clock className="w-3.5 h-3.5 text-amber-400" />
-                <span>{today}</span>
-              </span>
+        {/* Assistant Operations Desk Banner */}
+        <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md border border-slate-800 flex flex-col gap-5">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Role: Transport Assistant (Field, Counter &amp; Gate Desk)</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{today}</span>
+                </span>
+              </div>
+              <h2 className="text-2xl font-bold tracking-tight">
+                Transport Assistant Operations &amp; Fee Collection Desk
+              </h2>
+              <p className="text-xs text-slate-400">
+                Authorized to receive fees, follow up dues, raise work order requests, mark route &amp; staff attendance, process 24-hr log book, raise expense entries, add new members, and receive candidate resumes.
+              </p>
             </div>
-            <h2 className="text-2xl font-bold tracking-tight">
-              Gate Arrival, Log Book &amp; Route Attendance Desk
-            </h2>
-            <p className="text-xs text-slate-400">
-              Authorized for daily bus boarding attendance, 24-hour vehicle odometer readings, driver fuel bills, and student transit discipline.
-            </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5 pt-2 border-t border-slate-800">
+            <button
+              onClick={() => onNavigate('fees' as any, 'collect')}
+              className="py-2.5 px-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <IndianRupee className="w-3.5 h-3.5 shrink-0" />
+              <span>Receive Fees</span>
+            </button>
+            <button
+              onClick={() => onNavigate('fees' as any, 'recovery')}
+              className="py-2.5 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <PhoneCall className="w-3.5 h-3.5 shrink-0" />
+              <span>Follow-Up Dues</span>
+            </button>
+            <button
+              onClick={() => onNavigate('vehicles' as any, 'maintenance')}
+              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Wrench className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>Raise Work Order</span>
+            </button>
             <button
               onClick={() => onNavigate('operations' as any, 'board')}
-              className="py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
+              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <Clock className="w-4 h-4" />
-              <span>Mark Arrival / Departure</span>
+              <Clock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Mark Attendance</span>
             </button>
             <button
               onClick={() => onNavigate('vehicles' as any, 'odometer')}
-              className="py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
+              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <Bus className="w-4 h-4" />
-              <span>Log 24-Hr Odometer</span>
+              <Bus className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span>Process Log Book</span>
             </button>
             <button
-              onClick={() => onNavigate('operations' as any, 'pack')}
-              className="py-2.5 px-3.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
+              onClick={() => onNavigate('expenses' as any, 'expenses')}
+              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <span>Print Route List</span>
-              <ArrowRight className="w-3.5 h-3.5 text-amber-400" />
+              <TrendingUp className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <span>Raise Expense</span>
+            </button>
+            <button
+              onClick={() => onNavigate('members' as any, 'all')}
+              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Users className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span>Add New Member</span>
+            </button>
+            <button
+              onClick={() => onNavigate('resumes' as any)}
+              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>Receive Resume</span>
             </button>
           </div>
         </div>
