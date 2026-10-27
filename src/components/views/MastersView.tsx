@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { 
   Building2, Truck, Route as RouteIcon, MapPin, 
   Layers, UserCheck, Plus, Trash2, Edit2, CheckCircle, 
-  AlertTriangle, Save, X, Users, Landmark, FileText, Upload, Eye, Printer
+  AlertTriangle, Save, X, Users, Landmark, FileText, Upload, Eye, Printer,
+  LayoutGrid, List, Search, ArrowDownAZ, ArrowRight
 } from 'lucide-react';
 import { 
   SchoolConfig, Vehicle, Village, Route, TripMaster, 
   DesignationMaster, CampusId, CampusMaster, MemberTypeMaster,
-  Employee, VehicleAssignmentRecord, SystemUser, UserRole
+  Employee, VehicleAssignmentRecord, SystemUser, UserRole, StudentMember
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
@@ -47,6 +48,7 @@ interface MastersViewProps {
   onDeleteVehicle: (id: string) => Promise<any>;
   onSaveRoute: (data: any) => Promise<any>;
   onDeleteRoute: (id: string) => Promise<any>;
+  students?: StudentMember[];
   employees?: Employee[];
   vehicleAssignments?: VehicleAssignmentRecord[];
   onSaveVehicleAssignment?: (data: Partial<VehicleAssignmentRecord>) => Promise<any>;
@@ -92,6 +94,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
   onDeleteVehicle,
   onSaveRoute,
   onDeleteRoute,
+  students = [],
   employees = [],
   vehicleAssignments = [],
   onSaveVehicleAssignment,
@@ -230,7 +233,10 @@ export const MastersView: React.FC<MastersViewProps> = ({
   const [vehicleModalError, setVehicleModalError] = useState<string | null>(null);
   const [previewVehicleDoc, setPreviewVehicleDoc] = useState<{ title: string; url: string } | null>(null);
 
-  // --- Village & Stops Modal ---
+  // --- Village & Stops Modal & View State ---
+  const [villageViewMode, setVillageViewMode] = useState<'card' | 'list'>('card');
+  const [villageSearchQuery, setVillageSearchQuery] = useState('');
+  const [routeVillageSearch, setRouteVillageSearch] = useState('');
   const [isVillageModalOpen, setIsVillageModalOpen] = useState(false);
   const [villageName, setVillageName] = useState('');
   const [villageDistance, setVillageDistance] = useState(5);
@@ -239,12 +245,43 @@ export const MastersView: React.FC<MastersViewProps> = ({
     { name: '', fee: 700, distanceKm: 5 },
   ]);
 
+  // Alphabetically sorted villages (A–Z) and stops (A–Z)
+  const sortedVillages = [...villages]
+    .map(v => ({
+      ...v,
+      stops: [...(v.stops || [])].sort((a, b) =>
+        String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+          sensitivity: 'base',
+          numeric: true,
+        })
+      ),
+    }))
+    .sort((a, b) =>
+      String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      })
+    );
+
+  const filteredVillagesMaster = sortedVillages.filter(v => {
+    const q = villageSearchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      v.name.toLowerCase().includes(q) ||
+      v.stops.some(s => s.name.toLowerCase().includes(q))
+    );
+  });
+
   // --- Route Form Modal ---
   const [isRouteModalOpen, setIsRouteModalOpen] = useState(false);
+  const [editingRouteId, setEditingRouteId] = useState<string | null>(null);
   const [routeCampus, setRouteCampus] = useState<CampusId>(campuses[0]?.code || '');
   const [routeVehicleId, setRouteVehicleId] = useState<string>(vehicles[0]?.id || '');
   const [routeTripNumber, setRouteTripNumber] = useState<number>(trips[0]?.tripNumber || 1);
   const [selectedVillageIds, setSelectedVillageIds] = useState<string[]>([]);
+  const [selectedStopIds, setSelectedStopIds] = useState<string[]>([]);
+  const [showRouteComparisonStep, setShowRouteComparisonStep] = useState(false);
+  const [routeModalError, setRouteModalError] = useState<string | null>(null);
 
   // --- Class & Section Form ---
   const [editingClassOldName, setEditingClassOldName] = useState<string | null>(null);
@@ -631,30 +668,145 @@ export const MastersView: React.FC<MastersViewProps> = ({
   const campusCode = selectedCampusObj ? selectedCampusObj.code : (routeCampus || 'CMP');
   const previewRouteCode = `${campusCode}/${vehicleLast4 || 'XXXX'}/${routeTripNumber}`;
 
-  const handleSaveRouteSubmit = async (e: React.FormEvent) => {
+  // Active / Suspended transport members (excluding Left) for Route Member Comparison & Auto-Attachment
+  const activeTransportMembers = students.filter(s => s.transportStatus !== 'Left');
+  const editingRouteObj = editingRouteId ? routes.find(r => r.id === editingRouteId) || null : null;
+
+  // 1. Old Members currently attached to this route (before saving)
+  const oldRouteMembers = editingRouteObj
+    ? activeTransportMembers.filter(
+        s => s.routeId === editingRouteObj.id || s.routeCode === editingRouteObj.code
+      )
+    : [];
+
+  // 2. New Members who belong to the selected Villages & Stops for this route (after change)
+  const selectedStpIdSet = new Set(selectedStopIds);
+  const selectedVillagesForModal = sortedVillages.filter(
+    v =>
+      selectedVillageIds.includes(v.id) ||
+      (v.stops || []).some(st => selectedStpIdSet.has(st.id))
+  );
+  const selectedStopsForModal = selectedVillagesForModal.flatMap(v => {
+    const vilStops = v.stops || [];
+    const checkedInVil = vilStops.filter(st => selectedStpIdSet.has(st.id));
+    return checkedInVil;
+  });
+  const selectedStpNameSet = new Set(
+    selectedStopsForModal.map(st => st.name.trim().toLowerCase())
+  );
+  const selectedVilIdSet = new Set(selectedVillagesForModal.map(v => v.id));
+  const selectedVilNameSet = new Set(selectedVillagesForModal.map(v => v.name.trim().toLowerCase()));
+
+  const newRouteMembers = activeTransportMembers.filter(s => {
+    const hasMemberStop = Boolean(
+      (s.pickupDropStopId && s.pickupDropStopId.trim()) ||
+      (s.pickupDropStopName && s.pickupDropStopName.trim())
+    );
+    if (hasMemberStop) {
+      if (s.pickupDropStopId && selectedStpIdSet.has(s.pickupDropStopId)) return true;
+      if (
+        s.pickupDropStopName &&
+        selectedStpNameSet.has(s.pickupDropStopName.trim().toLowerCase()) &&
+        (!s.villageName || selectedVilNameSet.has(s.villageName.trim().toLowerCase()))
+      ) {
+        return true;
+      }
+      return false;
+    }
+    return (
+      (!!s.villageId && selectedVilIdSet.has(s.villageId)) ||
+      (!!s.villageName && selectedVilNameSet.has(s.villageName.trim().toLowerCase()))
+    );
+  });
+
+  const oldMemberIdSet = new Set(oldRouteMembers.map(m => m.id));
+  const newMemberIdSet = new Set(newRouteMembers.map(m => m.id));
+  const addedRouteMembers = newRouteMembers.filter(m => !oldMemberIdSet.has(m.id));
+  const retainedRouteMembers = newRouteMembers.filter(m => oldMemberIdSet.has(m.id));
+  const removedRouteMembers = oldRouteMembers.filter(m => !newMemberIdSet.has(m.id));
+
+  const getFallbackRouteForRemovedMember = (m: StudentMember): Route | undefined => {
+    const cleanVilName = (m.villageName || '').trim().toLowerCase();
+    const cleanStopName = (m.pickupDropStopName || '').trim().toLowerCase();
+    const otherRoutes = routes.filter(r => {
+      if (editingRouteId && r.id === editingRouteId) return false;
+      if (r.active === false) return false;
+      return true;
+    });
+    // Priority 1: Another route that explicitly covers the member's stop
+    const stopMatches = otherRoutes.filter(r => {
+      const rStopIds = r.stopIds || [];
+      const rStopNames = (r.stopNames || []).map(sn => String(sn || '').trim().toLowerCase());
+      return (
+        (!!m.pickupDropStopId && rStopIds.includes(m.pickupDropStopId)) ||
+        (!!cleanStopName && rStopNames.includes(cleanStopName))
+      );
+    });
+    if (stopMatches.length > 0) {
+      const campusMatch = stopMatches.find(
+        r =>
+          String(r.campus || '').toLowerCase() === String(m.campus || '').toLowerCase() ||
+          String(r.campusCode || '').toLowerCase() === String(m.campus || '').toLowerCase()
+      );
+      return campusMatch || stopMatches[0];
+    }
+    // Priority 2: Legacy whole-village route covering this village without restricting to other stops
+    const villageMatches = otherRoutes.filter(r => {
+      const hasExplicitStops = (r.stopIds && r.stopIds.length > 0) || (r.stopNames && r.stopNames.length > 0);
+      if (hasExplicitStops && (m.pickupDropStopId || cleanStopName)) return false;
+      const byId = !!m.villageId && (r.villageIds || []).includes(m.villageId);
+      const byName =
+        !!cleanVilName &&
+        (r.villageNames || []).some(vn => String(vn || '').trim().toLowerCase() === cleanVilName);
+      return byId || byName;
+    });
+    if (villageMatches.length === 0) return undefined;
+    const campusMatch = villageMatches.find(
+      r =>
+        String(r.campus || '').toLowerCase() === String(m.campus || '').toLowerCase() ||
+        String(r.campusCode || '').toLowerCase() === String(m.campus || '').toLowerCase()
+    );
+    return campusMatch || villageMatches[0];
+  };
+
+  const handleProceedToRouteComparison = (e: React.FormEvent) => {
     e.preventDefault();
+    setRouteModalError(null);
     if (!routeCampus) {
-      setMasterError('Please select a Campus.');
+      setRouteModalError('Please select a Campus.');
       return;
     }
     if (!routeVehicleId && vehicles.length === 0) {
-      setMasterError('Please create at least one vehicle in Vehicles Master before creating a route.');
+      setRouteModalError('Please create at least one vehicle in Vehicles Master before creating a route.');
       return;
     }
-    if (selectedVillageIds.length === 0) {
-      setMasterError('Please assign at least one village to this route.');
+    if (selectedVillagesForModal.length === 0 || selectedStopsForModal.length === 0) {
+      setRouteModalError('Please select at least one Village and Stop for this route.');
       return;
     }
+    setShowRouteComparisonStep(true);
+  };
+
+  const handleConfirmFinalizeRouteSave = async () => {
+    setRouteModalError(null);
     await runMasterAction(async () => {
       await onSaveRoute({
+        id: editingRouteId || undefined,
         campus: routeCampus,
         vehicleId: routeVehicleId || vehicles[0]?.id,
         tripNumber: Number(routeTripNumber),
-        villageIds: selectedVillageIds,
+        villageIds: selectedVillagesForModal.map(v => v.id),
+        stopIds: selectedStopsForModal.map(s => s.id),
+        stopNames: selectedStopsForModal.map(s => s.name),
+        confirmedMemberIds: newRouteMembers.map(m => m.id),
         active: true,
       });
       setIsRouteModalOpen(false);
+      setShowRouteComparisonStep(false);
+      setEditingRouteId(null);
       setSelectedVillageIds([]);
+      setSelectedStopIds([]);
+      setRouteVillageSearch('');
     });
   };
 
@@ -725,10 +877,17 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     setActiveTab('trips');
                     return;
                   }
+                  setEditingRouteId(null);
                   setRouteVehicleId(vehicles[0]?.id || '');
                   setRouteCampus(campuses[0]?.code || '');
                   setRouteTripNumber(trips[0]?.tripNumber || 1);
-                  setSelectedVillageIds(villages[0] ? [villages[0].id] : []);
+                  setSelectedVillageIds(sortedVillages[0] ? [sortedVillages[0].id] : []);
+                  setSelectedStopIds(
+                    sortedVillages[0] ? (sortedVillages[0].stops || []).map(st => st.id) : []
+                  );
+                  setRouteVillageSearch('');
+                  setRouteModalError(null);
+                  setShowRouteComparisonStep(false);
                   setIsRouteModalOpen(true);
                 }}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer flex items-center gap-2"
@@ -748,7 +907,8 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     <th className="py-3 px-3">Campus</th>
                     <th className="py-3 px-3">Vehicle (Last 4)</th>
                     <th className="py-3 px-3">Trip</th>
-                    <th className="py-3 px-3">Assigned Villages</th>
+                    <th className="py-3 px-3">Assigned Villages &amp; Stops (A–Z)</th>
+                    <th className="py-3 px-3">Attached Members</th>
                     <th className="py-3 px-3">Status</th>
                     <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
@@ -756,54 +916,142 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {routes.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-400">
+                      <td colSpan={8} className="py-8 text-center text-slate-400">
                         No routes created yet.
                       </td>
                     </tr>
                   ) : (
-                    routes.map((r) => (
-                      <tr key={r.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="py-3 px-4">
-                          <span className="font-mono font-bold text-base text-slate-900 bg-amber-100 text-amber-950 px-2 py-0.5 rounded-md">
-                            {r.code}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3">
-                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-900">
-                            {getCampusLabel(r.campus)}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 font-mono font-bold text-slate-800">
-                          {r.vehicleNumber} ({r.vehicleLast4})
-                        </td>
-                        <td className="py-3 px-3 font-semibold text-slate-700">
-                          Trip {r.tripNumber}
-                        </td>
-                        <td className="py-3 px-3 text-slate-800">
-                          <div className="flex flex-wrap gap-1">
-                            {r.villageNames.map((vName, idx) => (
-                              <span key={idx} className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-[10px]">
-                                {vName}
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3">
-                          <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-md text-[10px]">
-                            Active
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            onClick={() => runMasterAction(() => onDeleteRoute(r.id))}
-                            className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
-                            title="Delete Route"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
+                    routes.map((r) => {
+                      const routeMembersCount = activeTransportMembers.filter(
+                        s => s.routeId === r.id || s.routeCode === r.code
+                      ).length;
+                      const rStopIds = new Set(r.stopIds || []);
+                      const rStopNames = new Set((r.stopNames || []).map(sn => String(sn || '').trim().toLowerCase()));
+                      const hasExplicitStops = rStopIds.size > 0 || rStopNames.size > 0;
+                      const coveredVils = sortedVillages.filter(
+                        v =>
+                          (r.villageIds || []).includes(v.id) ||
+                          (r.villageNames || []).includes(v.name) ||
+                          (v.stops || []).some(st => rStopIds.has(st.id))
+                      );
+                      return (
+                        <tr key={r.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-3 px-4">
+                            <span className="font-mono font-bold text-base text-slate-900 bg-amber-100 text-amber-950 px-2 py-0.5 rounded-md">
+                              {r.code}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-900">
+                              {getCampusLabel(r.campus)}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-slate-800">
+                            {r.vehicleNumber} ({r.vehicleLast4})
+                          </td>
+                          <td className="py-3 px-3 font-semibold text-slate-700">
+                            Trip {r.tripNumber}
+                          </td>
+                          <td className="py-3 px-3 text-slate-800">
+                            <div className="flex flex-wrap gap-1.5">
+                              {coveredVils.length > 0 ? (
+                                coveredVils.map((vil) => {
+                                  const stopsInVil = hasExplicitStops
+                                    ? (vil.stops || []).filter(
+                                        st => rStopIds.has(st.id) || rStopNames.has(st.name.trim().toLowerCase())
+                                      )
+                                    : vil.stops || [];
+                                  return (
+                                    <span
+                                      key={vil.id}
+                                      className="bg-slate-100 border border-slate-200 text-slate-800 px-2 py-0.5 rounded-md text-[10px] font-semibold inline-flex items-center gap-1"
+                                    >
+                                      <span>{vil.name}</span>
+                                      {stopsInVil.length > 0 && (
+                                        <span className="text-indigo-700 font-normal">
+                                          ({stopsInVil.map(s => s.name).join(', ')})
+                                        </span>
+                                      )}
+                                    </span>
+                                  );
+                                })
+                              ) : (
+                                [...(r.villageNames || [])]
+                                  .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }))
+                                  .map((vName, idx) => (
+                                    <span key={idx} className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-[10px] font-medium">
+                                      {vName}
+                                    </span>
+                                  ))
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/70">
+                              <Users className="w-3 h-3" />
+                              <span>{routeMembersCount} {routeMembersCount === 1 ? 'Member' : 'Members'}</span>
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-md text-[10px]">
+                              Active
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => {
+                                  setMasterError(null);
+                                  setRouteModalError(null);
+                                  setEditingRouteId(r.id);
+                                  setRouteCampus(r.campus);
+                                  setRouteVehicleId(r.vehicleId);
+                                  setRouteTripNumber(r.tripNumber);
+                                  const resolvedVilIds =
+                                    r.villageIds && r.villageIds.length > 0
+                                      ? r.villageIds
+                                      : sortedVillages
+                                          .filter(v => (r.villageNames || []).includes(v.name))
+                                          .map(v => v.id);
+                                  setSelectedVillageIds(resolvedVilIds);
+                                  if (r.stopIds && r.stopIds.length > 0) {
+                                    setSelectedStopIds(r.stopIds);
+                                  } else if (r.stopNames && r.stopNames.length > 0) {
+                                    const snSet = new Set(r.stopNames.map(sn => sn.trim().toLowerCase()));
+                                    setSelectedStopIds(
+                                      sortedVillages
+                                        .filter(v => resolvedVilIds.includes(v.id))
+                                        .flatMap(v => (v.stops || []).filter(st => snSet.has(st.name.trim().toLowerCase())).map(st => st.id))
+                                    );
+                                  } else {
+                                    setSelectedStopIds(
+                                      sortedVillages
+                                        .filter(v => resolvedVilIds.includes(v.id))
+                                        .flatMap(v => (v.stops || []).map(st => st.id))
+                                    );
+                                  }
+                                  setRouteVillageSearch('');
+                                  setShowRouteComparisonStep(false);
+                                  setIsRouteModalOpen(true);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold cursor-pointer transition-colors"
+                                title="Edit Route, Villages & Stops"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                                <span>Edit Route</span>
+                              </button>
+                              <button
+                                onClick={() => runMasterAction(() => onDeleteRoute(r.id))}
+                                className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                                title="Delete Route"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -981,21 +1229,70 @@ export const MastersView: React.FC<MastersViewProps> = ({
       {activeTab === 'villages' && (
         <div className="space-y-5">
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
               <h2 className="text-lg font-bold text-slate-900 tracking-tight">Villages &amp; Transport Stops Master</h2>
               <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
-                {villages.length} Villages
+                {filteredVillagesMaster.length} Villages
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/70">
+                <ArrowDownAZ className="w-3.5 h-3.5" />
+                <span>Sorted A–Z</span>
               </span>
             </div>
+
             <div className="flex flex-wrap items-center gap-2">
+              <div className="relative w-48 sm:w-56">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={villageSearchQuery}
+                  onChange={(e) => setVillageSearchQuery(e.target.value)}
+                  placeholder="Search village or stop..."
+                  className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+
+              {/* Card View / List View Toggle */}
+              <div className="inline-flex items-center rounded-xl bg-slate-100 p-1 border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setVillageViewMode('card')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    villageViewMode === 'card'
+                      ? 'bg-white text-indigo-700 shadow-2xs border border-slate-200/80'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="Card View (Alphabetical A–Z)"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>Card View</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVillageViewMode('list')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    villageViewMode === 'list'
+                      ? 'bg-white text-indigo-700 shadow-2xs border border-slate-200/80'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="List View (Alphabetical A–Z)"
+                >
+                  <List className="w-3.5 h-3.5" />
+                  <span>List View</span>
+                </button>
+              </div>
+
               <PrintExportToolbar
-                title="Villages & Transport Stops Master"
+                title="Villages & Transport Stops Master (Alphabetical A–Z)"
                 filename="villages_stops_master"
                 schoolName={config.schoolName}
-                filteredData={villages}
-                allData={villages}
+                filteredData={filteredVillagesMaster}
+                allData={sortedVillages}
+                hasActiveFilters={villageSearchQuery.trim() !== ''}
+                filterSummary={villageSearchQuery.trim() ? `Search: ${villageSearchQuery.trim()}` : undefined}
                 columns={[
-                  { header: 'Village Name', accessor: (v) => v.name },
+                  { header: 'S.No', accessor: (_v, idx) => (idx ?? 0) + 1 },
+                  { header: 'Village Name (A-Z)', accessor: (v) => v.name },
                   { header: 'Distance (km)', accessor: (v) => v.distanceKm },
                   { header: 'Stops Count', accessor: (v) => v.stops.length },
                   { header: 'Stops & Fees', accessor: (v) => v.stops.map(s => `${s.name} (Rs.${s.fee})`).join('; ') },
@@ -1011,61 +1308,147 @@ export const MastersView: React.FC<MastersViewProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {villages.length === 0 ? (
-              <div className="col-span-3 py-12 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
-                No villages configured yet.
-              </div>
-            ) : (
-              villages.map((vil) => (
-                <div key={vil.id} className="bg-white rounded-2xl p-4 border border-slate-200 shadow-2xs space-y-3">
-                  <div className="flex items-center justify-between border-b pb-2.5 border-slate-100">
-                    <div>
-                      <h4 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
-                        <MapPin className="w-4 h-4 text-amber-500" />
-                        <span>{vil.name}</span>
-                      </h4>
-                      <span className="text-[10px] text-slate-500">{vil.distanceKm} km from school</span>
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => handleOpenVillageModal(vil)}
-                        className="p-1 text-slate-600 hover:bg-slate-100 rounded-md cursor-pointer"
-                        title="Edit Village"
-                      >
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => runMasterAction(() => onDeleteVillage(vil.id))}
-                        className="p-1 text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
-                        title="Delete Village"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
-                      Transport Stops ({vil.stops.length})
-                    </span>
-                    <div className="space-y-1.5">
-                      {vil.stops.map((st, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-2 bg-slate-50 rounded-xl text-xs">
-                          <span className="font-semibold text-slate-800">{st.name}</span>
-                          <div className="text-right">
-                            <span className="font-mono font-bold text-emerald-700">₹{st.fee}/mo</span>
-                            <span className="text-[10px] text-slate-400 block">{st.distanceKm} km</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+          {villageViewMode === 'card' ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredVillagesMaster.length === 0 ? (
+                <div className="col-span-3 py-12 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
+                  No villages found.
                 </div>
-              ))
-            )}
-          </div>
+              ) : (
+                filteredVillagesMaster.map((vil, vIdx) => (
+                  <div key={vil.id} className="bg-white rounded-2xl p-4 border border-slate-200 shadow-2xs space-y-3">
+                    <div className="flex items-center justify-between border-b pb-2.5 border-slate-100">
+                      <div>
+                        <h4 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+                          <span className="w-5 h-5 rounded-md bg-slate-100 text-slate-600 font-mono text-[10px] font-bold inline-flex items-center justify-center shrink-0">
+                            {vIdx + 1}
+                          </span>
+                          <MapPin className="w-4 h-4 text-amber-500 shrink-0" />
+                          <span>{vil.name}</span>
+                        </h4>
+                        <span className="text-[10px] text-slate-500">{vil.distanceKm} km from school</span>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleOpenVillageModal(vil)}
+                          className="p-1 text-slate-600 hover:bg-slate-100 rounded-md cursor-pointer"
+                          title="Edit Village"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => runMasterAction(() => onDeleteVillage(vil.id))}
+                          className="p-1 text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
+                          title="Delete Village"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                        Transport Stops ({vil.stops.length})
+                      </span>
+                      <div className="space-y-1.5">
+                        {vil.stops.map((st, idx) => (
+                          <div key={idx} className="flex items-center justify-between p-2 bg-slate-50 rounded-xl text-xs">
+                            <span className="font-semibold text-slate-800">{st.name}</span>
+                            <div className="text-right">
+                              <span className="font-mono font-bold text-emerald-700">₹{st.fee}/mo</span>
+                              <span className="text-[10px] text-slate-400 block">{st.distanceKm} km</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                      <th className="py-3.5 px-4 w-14">#</th>
+                      <th className="py-3.5 px-4">
+                        <span className="inline-flex items-center gap-1">
+                          <span>Village Name (A–Z)</span>
+                          <ArrowDownAZ className="w-3.5 h-3.5 text-emerald-600" />
+                        </span>
+                      </th>
+                      <th className="py-3.5 px-4">Distance from School</th>
+                      <th className="py-3.5 px-4">Stops Count</th>
+                      <th className="py-3.5 px-4">Transport Stops &amp; Monthly Fee (A–Z)</th>
+                      <th className="py-3.5 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200/70 text-xs">
+                    {filteredVillagesMaster.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-12 text-center text-slate-400">
+                          No villages found.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredVillagesMaster.map((vil, idx) => (
+                        <tr key={vil.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-3 px-4 font-mono font-bold text-slate-500">{idx + 1}</td>
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+                              <MapPin className="w-4 h-4 text-amber-500 shrink-0" />
+                              <span>{vil.name}</span>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 font-mono font-semibold text-slate-700">
+                            {vil.distanceKm} km
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
+                              {vil.stops.length} {vil.stops.length === 1 ? 'Stop' : 'Stops'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="flex flex-wrap gap-1.5">
+                              {vil.stops.map((st, sIdx) => (
+                                <span
+                                  key={st.id || sIdx}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-50 border border-slate-200 text-xs"
+                                >
+                                  <span className="font-semibold text-slate-800">{st.name}</span>
+                                  <span className="font-mono font-bold text-emerald-700">₹{st.fee}/mo</span>
+                                  <span className="text-[10px] text-slate-400">({st.distanceKm} km)</span>
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
+                            <button
+                              onClick={() => handleOpenVillageModal(vil)}
+                              className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
+                              title="Edit Village"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => runMasterAction(() => onDeleteVillage(vil.id))}
+                              className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                              title="Delete Village"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2411,122 +2794,555 @@ export const MastersView: React.FC<MastersViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: ADD / EDIT ROUTE IN MASTERS */}
+      {/* MODAL: ADD / EDIT ROUTE IN MASTERS (WITH BEFORE-FINALISATION OLD vs NEW MEMBERS COMPARISON) */}
       {isRouteModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div
+            className={`bg-white rounded-3xl w-full p-6 shadow-2xl border border-slate-200 space-y-4 my-6 max-h-[92vh] overflow-y-auto transition-all ${
+              showRouteComparisonStep ? 'max-w-4xl' : 'max-w-lg'
+            }`}
+          >
             <div className="flex items-center justify-between border-b pb-3 border-slate-100">
               <div className="flex items-center gap-2">
                 <RouteIcon className="w-5 h-5 text-amber-500" />
-                <h3 className="text-base font-bold text-slate-900">Create Route</h3>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    {showRouteComparisonStep
+                      ? `Before Finalisation: Compare Old vs. New Route Members`
+                      : editingRouteId
+                      ? 'Edit Route & Covered Villages'
+                      : 'Create Route'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {showRouteComparisonStep
+                      ? 'Review members automatically attached or reassigned from the selected villages & stops before saving'
+                      : 'Members linked to covered villages & stops are automatically attached to this route'}
+                  </p>
+                </div>
               </div>
-              <button onClick={() => setIsRouteModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+              <button
+                onClick={() => {
+                  setIsRouteModalOpen(false);
+                  setShowRouteComparisonStep(false);
+                  setEditingRouteId(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {routeModalError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{routeModalError}</span>
+              </div>
+            )}
 
             {/* Route Code Box */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 text-center">
               <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block">
                 Route Code
               </span>
-              <div className="font-mono text-2xl font-black text-slate-900 mt-0.5">
-                {previewRouteCode}
+              <div className="font-mono text-2xl font-black text-slate-900 mt-0.5 flex items-center justify-center gap-2">
+                {editingRouteObj && editingRouteObj.code !== previewRouteCode ? (
+                  <>
+                    <span className="text-slate-400 line-through text-lg">{editingRouteObj.code}</span>
+                    <ArrowRight className="w-4 h-4 text-amber-600" />
+                    <span className="text-indigo-700">{previewRouteCode}</span>
+                  </>
+                ) : (
+                  <span>{previewRouteCode}</span>
+                )}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                Covered Villages ({selectedVillagesForModal.length}) &amp; Stops ({selectedStopsForModal.length}):{' '}
+                <strong className="text-slate-800">
+                  {selectedStopsForModal.length > 0
+                    ? selectedStopsForModal.map(s => s.name).join(', ')
+                    : selectedVillagesForModal.map(v => v.name).join(', ') || 'None selected'}
+                </strong>
               </div>
             </div>
 
-            <form onSubmit={handleSaveRouteSubmit} className="space-y-3.5 text-xs">
-              <div className="grid grid-cols-2 gap-3">
+            {!showRouteComparisonStep ? (
+              /* STEP 1: CONFIGURE ROUTE & SELECT COVERED VILLAGES & STOPS */
+              <form onSubmit={handleProceedToRouteComparison} className="space-y-3.5 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">Campus (Master)</label>
+                    <select
+                      value={routeCampus}
+                      onChange={(e) => setRouteCampus(e.target.value as CampusId)}
+                      className="w-full p-2 border border-slate-300 rounded-xl font-bold bg-white"
+                    >
+                      {campuses.map((c) => (
+                        <option key={c.id} value={c.code}>
+                          {c.name} ({c.code})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">Trip Number (Master)</label>
+                    <select
+                      value={routeTripNumber}
+                      onChange={(e) => setRouteTripNumber(Number(e.target.value))}
+                      className="w-full p-2 border border-slate-300 rounded-xl font-bold bg-white"
+                    >
+                      {trips.map(t => (
+                        <option key={t.id} value={t.tripNumber}>Trip {t.tripNumber} ({t.description})</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Campus (Master)</label>
+                  <label className="block text-slate-700 font-semibold mb-1">Select Vehicle from Master</label>
                   <select
-                    value={routeCampus}
-                    onChange={(e) => setRouteCampus(e.target.value as CampusId)}
-                    className="w-full p-2 border border-slate-300 rounded-xl font-bold bg-white"
+                    value={routeVehicleId}
+                    onChange={(e) => setRouteVehicleId(e.target.value)}
+                    className="w-full p-2 border border-slate-300 rounded-xl font-mono font-bold bg-white"
                   >
-                    {campuses.map((c) => (
-                      <option key={c.id} value={c.code}>
-                        {c.name} ({c.code})
+                    {vehicles.map(v => (
+                      <option key={v.id} value={v.id}>
+                        {v.registrationNumber} — {v.type} ({v.ownership})
                       </option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Trip Number (Master)</label>
-                  <select
-                    value={routeTripNumber}
-                    onChange={(e) => setRouteTripNumber(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-300 rounded-xl font-bold bg-white"
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-slate-700 font-semibold">
+                      Assign Covered Villages &amp; Stops to this Route{' '}
+                      <span className="text-emerald-700 font-bold text-[10px]">(Select specific stops per village • Sorted A–Z)</span>
+                    </label>
+                    {selectedStopsForModal.length > 0 && (
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-bold">
+                        {selectedVillagesForModal.length} Village{selectedVillagesForModal.length === 1 ? '' : 's'} • {selectedStopsForModal.length} Stop{selectedStopsForModal.length === 1 ? '' : 's'} • {newRouteMembers.length} Member{newRouteMembers.length === 1 ? '' : 's'}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Always-visible Search Input with Search Icon */}
+                  <div className="relative mb-2">
+                    <Search className="w-4 h-4 text-indigo-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={routeVillageSearch}
+                      onChange={(e) => setRouteVillageSearch(e.target.value)}
+                      placeholder="Type first few alphabets to search village or stop (e.g. Bhikhpur)..."
+                      className="w-full pl-9 pr-8 py-2 bg-white border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-2xs"
+                    />
+                    {routeVillageSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setRouteVillageSearch('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        title="Clear search"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="max-h-60 overflow-y-auto border border-slate-200 rounded-xl p-2 space-y-2 bg-slate-50">
+                    {sortedVillages.length === 0 ? (
+                      <p className="text-slate-400 text-xs py-4 text-center">No villages created yet. Add villages in Villages Master.</p>
+                    ) : (
+                      (() => {
+                        const q = routeVillageSearch.trim().toLowerCase();
+                        const matchingVillages = !q
+                          ? sortedVillages
+                          : [
+                              ...sortedVillages.filter(v => v.name.toLowerCase().startsWith(q)),
+                              ...sortedVillages.filter(
+                                v =>
+                                  !v.name.toLowerCase().startsWith(q) &&
+                                  (v.name.toLowerCase().includes(q) ||
+                                    (v.stops || []).some(st => st.name.toLowerCase().includes(q)))
+                              ),
+                            ];
+
+                        if (matchingVillages.length === 0) {
+                          return (
+                            <p className="text-slate-400 text-xs py-4 text-center">
+                              No village or stop found matching &ldquo;{routeVillageSearch}&rdquo;.
+                            </p>
+                          );
+                        }
+
+                        return matchingVillages.map(v => {
+                          const vilStops = v.stops || [];
+                          const checkedStopsInVil = vilStops.filter(st => selectedStopIds.includes(st.id));
+                          const isVillageChecked =
+                            checkedStopsInVil.length > 0 ||
+                            (vilStops.length === 0 && selectedVillageIds.includes(v.id));
+                          const areAllStopsInVilChecked =
+                            vilStops.length > 0 && checkedStopsInVil.length === vilStops.length;
+
+                          return (
+                            <div
+                              key={v.id}
+                              className={`p-2.5 rounded-xl border transition-colors ${
+                                isVillageChecked
+                                  ? 'bg-white border-indigo-200 shadow-2xs'
+                                  : 'bg-white/60 hover:bg-white border-slate-200/70'
+                              }`}
+                            >
+                              {/* Village Header Row */}
+                              <label className="flex items-center justify-between gap-2 cursor-pointer">
+                                <div className="flex items-center gap-2.5">
+                                  <input
+                                    type="checkbox"
+                                    checked={isVillageChecked}
+                                    onChange={() => {
+                                      const vilStopIds = vilStops.map(st => st.id);
+                                      if (areAllStopsInVilChecked || (vilStops.length === 0 && isVillageChecked)) {
+                                        // Uncheck village and all its stops
+                                        setSelectedVillageIds(prev => prev.filter(id => id !== v.id));
+                                        setSelectedStopIds(prev => prev.filter(id => !vilStopIds.includes(id)));
+                                      } else {
+                                        // Check village and all its stops
+                                        setSelectedVillageIds(prev =>
+                                          prev.includes(v.id) ? prev : [...prev, v.id]
+                                        );
+                                        setSelectedStopIds(prev =>
+                                          Array.from(new Set([...prev, ...vilStopIds]))
+                                        );
+                                      }
+                                    }}
+                                    className="rounded text-indigo-600 focus:ring-indigo-500"
+                                  />
+                                  <span className="font-bold text-slate-900">{v.name}</span>
+                                  <span className="text-slate-500 text-[10px] font-semibold">
+                                    ({checkedStopsInVil.length}/{vilStops.length}{' '}
+                                    {vilStops.length === 1 ? 'Stop' : 'Stops'} selected)
+                                  </span>
+                                </div>
+                                <span className="text-slate-400 text-[10px] font-mono">
+                                  {v.distanceKm} km
+                                </span>
+                              </label>
+
+                              {/* Individual Stops inside this Village */}
+                              {vilStops.length > 0 && (
+                                <div className="mt-2 pl-6 grid grid-cols-1 sm:grid-cols-2 gap-1.5 border-t border-slate-100 pt-2">
+                                  {vilStops.map(st => {
+                                    const isStopChecked = selectedStopIds.includes(st.id);
+                                    const stopMembersCount = activeTransportMembers.filter(
+                                      s =>
+                                        s.pickupDropStopId === st.id ||
+                                        (!!s.pickupDropStopName &&
+                                          s.pickupDropStopName.trim().toLowerCase() === st.name.trim().toLowerCase() &&
+                                          (!s.villageName || s.villageName.trim().toLowerCase() === v.name.trim().toLowerCase()))
+                                    ).length;
+
+                                    return (
+                                      <label
+                                        key={st.id}
+                                        className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] cursor-pointer transition-colors ${
+                                          isStopChecked
+                                            ? 'bg-indigo-50/90 border-indigo-300 text-indigo-950 font-semibold'
+                                            : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <input
+                                            type="checkbox"
+                                            checked={isStopChecked}
+                                            onChange={e => {
+                                              if (e.target.checked) {
+                                                const nextStops = Array.from(new Set([...selectedStopIds, st.id]));
+                                                setSelectedStopIds(nextStops);
+                                                if (!selectedVillageIds.includes(v.id)) {
+                                                  setSelectedVillageIds([...selectedVillageIds, v.id]);
+                                                }
+                                              } else {
+                                                const nextStops = selectedStopIds.filter(id => id !== st.id);
+                                                setSelectedStopIds(nextStops);
+                                                const anyRemainingInVil = vilStops.some(
+                                                  other => other.id !== st.id && nextStops.includes(other.id)
+                                                );
+                                                if (!anyRemainingInVil) {
+                                                  setSelectedVillageIds(selectedVillageIds.filter(id => id !== v.id));
+                                                }
+                                              }
+                                            }}
+                                            className="rounded text-indigo-600 focus:ring-indigo-500 shrink-0"
+                                          />
+                                          <span className="truncate">{st.name}</span>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 shrink-0">
+                                          <span className="font-mono text-[10px] text-emerald-700 font-bold">
+                                            ₹{st.fee}
+                                          </span>
+                                          {stopMembersCount > 0 && (
+                                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                                              {stopMembersCount} {stopMembersCount === 1 ? 'Member' : 'Members'}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        });
+                      })()
+                    )}
+                  </div>
+                </div>
+
+                {/* Live Impact Preview Strip */}
+                <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <div className="font-semibold text-slate-700">
+                    Old Route Members: <strong className="text-slate-900">{oldRouteMembers.length}</strong> → New Route Members: <strong className="text-indigo-700">{newRouteMembers.length}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold">
+                      +{addedRouteMembers.length} Newly Attached
+                    </span>
+                    {removedRouteMembers.length > 0 && (
+                      <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-800 font-bold">
+                        -{removedRouteMembers.length} Removed
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsRouteModalOpen(false);
+                      setShowRouteComparisonStep(false);
+                      setEditingRouteId(null);
+                    }}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
                   >
-                    {trips.map(t => (
-                      <option key={t.id} value={t.tripNumber}>Trip {t.tripNumber} ({t.description})</option>
-                    ))}
-                  </select>
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl shadow-xs cursor-pointer inline-flex items-center gap-1.5"
+                  >
+                    <span>Compare Old vs. New Members</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </form>
+            ) : (
+              /* STEP 2: BEFORE FINALISATION — OLD vs NEW ROUTE MEMBERS COMPARISON */
+              <div className="space-y-4 text-xs">
+                {/* Summary KPI Strip */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                    <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                      Old Members (Before)
+                    </span>
+                    <span className="text-xl font-black text-slate-900 mt-0.5 block">
+                      {oldRouteMembers.length}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200">
+                    <span className="text-[10px] font-bold uppercase text-indigo-700 block">
+                      New Members (After)
+                    </span>
+                    <span className="text-xl font-black text-indigo-900 mt-0.5 block">
+                      {newRouteMembers.length}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200">
+                    <span className="text-[10px] font-bold uppercase text-emerald-700 block">
+                      Newly Attached (+)
+                    </span>
+                    <span className="text-xl font-black text-emerald-800 mt-0.5 block">
+                      +{addedRouteMembers.length}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200">
+                    <span className="text-[10px] font-bold uppercase text-rose-700 block">
+                      Detached / Moved (-)
+                    </span>
+                    <span className="text-xl font-black text-rose-800 mt-0.5 block">
+                      -{removedRouteMembers.length}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Side-by-Side Comparison: Old Members vs New Members */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* LEFT COLUMN: OLD MEMBERS OF THIS ROUTE */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                      <div>
+                        <h4 className="font-bold text-slate-900 text-xs">
+                          Old Route Members ({oldRouteMembers.length})
+                        </h4>
+                        <p className="text-[10px] text-slate-500">
+                          {editingRouteObj
+                            ? `Previously attached to ${editingRouteObj.code}`
+                            : 'New Route (No previous members)'}
+                        </p>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-800 font-mono font-bold text-[10px]">
+                        Before Change
+                      </span>
+                    </div>
+
+                    <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+                      {oldRouteMembers.length === 0 ? (
+                        <div className="py-8 text-center text-slate-400 text-xs bg-white rounded-xl border border-dashed border-slate-200">
+                          No members were previously attached to this route.
+                        </div>
+                      ) : (
+                        oldRouteMembers.map((m) => {
+                          const isRetained = newMemberIdSet.has(m.id);
+                          const fallbackRt = !isRetained ? getFallbackRouteForRemovedMember(m) : undefined;
+                          return (
+                            <div
+                              key={m.id}
+                              className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
+                                isRetained
+                                  ? 'bg-white border-slate-200'
+                                  : 'bg-rose-50/80 border-rose-200'
+                              }`}
+                            >
+                              <div>
+                                <div className="font-bold text-slate-900">
+                                  {m.name}{' '}
+                                  <span className="font-mono text-[10px] text-slate-500">
+                                    ({m.admissionNo})
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  {m.class}-{m.section} • <strong>{m.villageName}</strong> ({m.pickupDropStopName})
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                {isRetained ? (
+                                  <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold text-[10px]">
+                                    Retained
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 font-bold text-[10px] block">
+                                    {fallbackRt ? `Moved → ${fallbackRt.code}` : 'Detached (Unassigned)'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  {/* RIGHT COLUMN: NEW MEMBERS OF THIS ROUTE */}
+                  <div className="rounded-2xl border border-indigo-200 bg-indigo-50/30 p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-indigo-200/80 pb-2">
+                      <div>
+                        <h4 className="font-bold text-indigo-950 text-xs">
+                          New Route Members ({newRouteMembers.length})
+                        </h4>
+                        <p className="text-[10px] text-indigo-700">
+                          Will be attached to <strong>{previewRouteCode}</strong> from selected villages &amp; stops
+                        </p>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono font-bold text-[10px]">
+                        After Change
+                      </span>
+                    </div>
+
+                    <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+                      {newRouteMembers.length === 0 ? (
+                        <div className="py-8 text-center text-slate-400 text-xs bg-white rounded-xl border border-dashed border-slate-200">
+                          No existing members found in the selected villages/stops yet.
+                        </div>
+                      ) : (
+                        newRouteMembers.map((m) => {
+                          const isNewlyAdded = !oldMemberIdSet.has(m.id);
+                          return (
+                            <div
+                              key={m.id}
+                              className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
+                                isNewlyAdded
+                                  ? 'bg-emerald-50/90 border-emerald-300 shadow-2xs'
+                                  : 'bg-white border-slate-200'
+                              }`}
+                            >
+                              <div>
+                                <div className="font-bold text-slate-900">
+                                  {m.name}{' '}
+                                  <span className="font-mono text-[10px] text-slate-500">
+                                    ({m.admissionNo})
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-600">
+                                  {m.class}-{m.section} • <strong>{m.villageName}</strong> ({m.pickupDropStopName})
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                {isNewlyAdded ? (
+                                  <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-bold text-[10px] block">
+                                    + NEWLY ATTACHED
+                                    {m.routeCode && m.routeCode !== previewRouteCode
+                                      ? ` (from ${m.routeCode})`
+                                      : ''}
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-bold text-[10px]">
+                                    Continuing ({previewRouteCode})
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Confirmation Footer */}
+                <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowRouteComparisonStep(false)}
+                    className="px-4 py-2 border border-slate-300 hover:bg-slate-50 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                  >
+                    ← Back to Edit Villages / Route
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRouteModalOpen(false);
+                        setShowRouteComparisonStep(false);
+                        setEditingRouteId(null);
+                      }}
+                      className="px-4 py-2 border border-slate-300 rounded-xl text-slate-600 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmFinalizeRouteSave}
+                      className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5"
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                      <span>
+                        Confirm &amp; Finalize Route ({newRouteMembers.length} {newRouteMembers.length === 1 ? 'Member' : 'Members'})
+                      </span>
+                    </button>
+                  </div>
                 </div>
               </div>
-
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">Select Vehicle from Master</label>
-                <select
-                  value={routeVehicleId}
-                  onChange={(e) => setRouteVehicleId(e.target.value)}
-                  className="w-full p-2 border border-slate-300 rounded-xl font-mono font-bold bg-white"
-                >
-                  {vehicles.map(v => (
-                    <option key={v.id} value={v.id}>
-                      {v.registrationNumber} — {v.type} ({v.ownership})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">
-                  Assign Covered Villages to this Route
-                </label>
-                <div className="max-h-40 overflow-y-auto border border-slate-200 rounded-xl p-2.5 space-y-1.5 bg-slate-50">
-                  {villages.length === 0 ? (
-                    <p className="text-slate-400 text-xs">No villages created yet. Add villages in Villages Master.</p>
-                  ) : (
-                    villages.map(v => {
-                      const isChecked = selectedVillageIds.includes(v.id);
-                      return (
-                        <label key={v.id} className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-white cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={(e) => {
-                              if (e.target.checked) setSelectedVillageIds([...selectedVillageIds, v.id]);
-                              else setSelectedVillageIds(selectedVillageIds.filter(id => id !== v.id));
-                            }}
-                            className="rounded"
-                          />
-                          <span className="font-semibold text-slate-800">{v.name}</span>
-                          <span className="text-slate-400 text-[10px]">({v.stops.length} Stops)</span>
-                        </label>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsRouteModalOpen(false)}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl shadow-xs cursor-pointer"
-                >
-                  Save Route
-                </button>
-              </div>
-            </form>
+            )}
           </div>
         </div>
       )}

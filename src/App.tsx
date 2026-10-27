@@ -164,7 +164,23 @@ export function App() {
       if (Array.isArray(mastersData?.users)) {
         setUsers(mastersData.users);
       }
-      const vills: Village[] = mastersData?.villages || [];
+      const rawVills: Village[] = mastersData?.villages || [];
+      const vills: Village[] = [...rawVills]
+        .map((v) => ({
+          ...v,
+          stops: [...(v.stops || [])].sort((a, b) =>
+            String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+              sensitivity: 'base',
+              numeric: true,
+            })
+          ),
+        }))
+        .sort((a, b) =>
+          String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+            sensitivity: 'base',
+            numeric: true,
+          })
+        );
       setVillages(vills);
       setStops(
         vills.flatMap((v) =>
@@ -202,14 +218,12 @@ export function App() {
       setStaffPayrolls(boot?.staffPayrolls || []);
       setHolidays(boot?.holidays || []);
 
+      if (Array.isArray(boot?.attendance)) {
+        setAttendanceRecords(boot.attendance);
+      }
       if (tripsList && tripsList.length > 0) {
         const tripIdToLoad = selectedTripId || tripsList[0].id;
         setSelectedTripId(tripIdToLoad);
-        if (Array.isArray(boot?.attendance)) {
-          setAttendanceRecords(
-            boot.attendance.filter((a: TripAttendanceRecord) => a.tripId === tripIdToLoad)
-          );
-        }
       }
     },
     [selectedTripId]
@@ -245,13 +259,25 @@ export function App() {
   const handleSelectTrip = async (tripId: string) => {
     setSelectedTripId(tripId);
     const att = await api.getTripAttendance(tripId);
-    setAttendanceRecords(att || []);
+    if (Array.isArray(att) && att.length > 0) {
+      setAttendanceRecords((prev) => {
+        const byId = new Map(prev.map((r) => [r.id, r]));
+        att.forEach((r: TripAttendanceRecord) => byId.set(r.id, r));
+        return Array.from(byId.values());
+      });
+    }
   };
 
   const handleSelectRouteForDate = async (date: string, routeId: string) => {
     const res = await api.getOrCreateTripForRoute(date, routeId);
     setSelectedTripId(res.trip.id);
-    setAttendanceRecords(res.attendance || []);
+    if (Array.isArray(res.attendance) && res.attendance.length > 0) {
+      setAttendanceRecords((prev) => {
+        const byId = new Map(prev.map((r) => [r.id, r]));
+        res.attendance.forEach((r: TripAttendanceRecord) => byId.set(r.id, r));
+        return Array.from(byId.values());
+      });
+    }
     await loadAllData();
   };
 
@@ -981,6 +1007,7 @@ export function App() {
                   villages={villages}
                   vehicles={vehicles}
                   routes={routes}
+                  students={students}
                   employees={employees}
                   vehicleAssignments={vehicleAssignments}
                   onSaveVehicleAssignment={handleSaveVehicleAssignment}

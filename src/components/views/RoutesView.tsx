@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MapPin, Bus, Filter } from 'lucide-react';
+import { MapPin, Bus, Filter, Search, X } from 'lucide-react';
 import { Route, ScheduledService, Village, TransportStop, Vehicle, CampusMaster } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
 
@@ -43,6 +43,7 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
 
   // Village selection for dependent Transport Stops view
   const [selectedVillageId, setSelectedVillageId] = useState<string>(villages[0]?.id || '');
+  const [villageSearchQuery, setVillageSearchQuery] = useState<string>('');
   useEffect(() => {
     if (!selectedVillageId && villages.length > 0) {
       setSelectedVillageId(villages[0].id);
@@ -66,8 +67,25 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
     return true;
   });
 
+  const sortedVillages = [...villages]
+    .map((v) => ({
+      ...v,
+      stops: [...(v.stops || [])].sort((a, b) =>
+        String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+          sensitivity: 'base',
+          numeric: true,
+        })
+      ),
+    }))
+    .sort((a, b) =>
+      String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      })
+    );
+
   // Dependent stops for the clicked/selected village
-  const selectedVillageObj = villages.find((v) => v.id === selectedVillageId) || villages[0];
+  const selectedVillageObj = sortedVillages.find((v) => v.id === selectedVillageId) || sortedVillages[0];
   const dependentStops = selectedVillageObj
     ? (selectedVillageObj.stops || []).map((st) => ({
         ...st,
@@ -271,11 +289,23 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                   <p className="text-xs text-slate-400 py-4 text-center">No routes found.</p>
                 ) : (
                   filteredRoutes.map((r) => {
+                    const rStopIds = new Set(r.stopIds || []);
+                    const rStopNames = new Set((r.stopNames || []).map(sn => String(sn || '').trim().toLowerCase()));
+                    const hasExplicitStops = rStopIds.size > 0 || rStopNames.size > 0;
                     const rStops =
-                      r.stops ||
-                      villages
-                        .filter((v) => r.villageIds?.includes(v.id))
-                        .flatMap((v) => v.stops.map((s) => ({ ...s, villageName: v.name })));
+                      r.stops && r.stops.length > 0
+                        ? r.stops
+                        : villages
+                            .filter((v) => r.villageIds?.includes(v.id) || (v.stops || []).some(st => rStopIds.has(st.id)))
+                            .flatMap((v) =>
+                              (v.stops || [])
+                                .filter((s) =>
+                                  hasExplicitStops
+                                    ? rStopIds.has(s.id) || rStopNames.has(s.name.trim().toLowerCase())
+                                    : true
+                                )
+                                .map((s) => ({ ...s, villageName: v.name }))
+                            );
                     return (
                       <div
                         key={r.id}
@@ -294,7 +324,7 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                         </div>
                         <div className="font-bold text-slate-900 mt-1">{r.name || r.code}</div>
                         <div className="text-slate-500 text-[11px] mt-1">
-                          {rStops.length} Stops ({r.villageNames?.join(', ') || 'Assigned'})
+                          {rStops.length} {rStops.length === 1 ? 'Stop' : 'Stops'} ({r.villageNames?.join(', ') || 'Assigned'})
                         </div>
                       </div>
                     );
@@ -320,11 +350,23 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
 
               <div className="space-y-3">
                 {(() => {
+                  const selStopIds = new Set(selectedRoute?.stopIds || []);
+                  const selStopNames = new Set((selectedRoute?.stopNames || []).map(sn => String(sn || '').trim().toLowerCase()));
+                  const selHasExplicitStops = selStopIds.size > 0 || selStopNames.size > 0;
                   const activeStops =
-                    selectedRoute?.stops ||
-                    villages
-                      .filter((v) => selectedRoute?.villageIds?.includes(v.id))
-                      .flatMap((v) => v.stops.map((s) => ({ ...s, villageName: v.name })));
+                    selectedRoute?.stops && selectedRoute.stops.length > 0
+                      ? selectedRoute.stops
+                      : villages
+                          .filter((v) => selectedRoute?.villageIds?.includes(v.id) || (v.stops || []).some(st => selStopIds.has(st.id)))
+                          .flatMap((v) =>
+                            (v.stops || [])
+                              .filter((s) =>
+                                selHasExplicitStops
+                                  ? selStopIds.has(s.id) || selStopNames.has(s.name.trim().toLowerCase())
+                                  : true
+                              )
+                              .map((s) => ({ ...s, villageName: v.name }))
+                          );
 
                   if (activeStops.length === 0) {
                     return (
@@ -369,15 +411,45 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
       {activeTab === 'villages_stops' && (
         <div className="space-y-4">
           <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="relative w-56 sm:w-64">
+                <Search className="w-3.5 h-3.5 text-amber-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={villageSearchQuery}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setVillageSearchQuery(val);
+                    const q = val.trim().toLowerCase();
+                    if (q) {
+                      const firstMatch =
+                        sortedVillages.find((v) => v.name.toLowerCase().startsWith(q)) ||
+                        sortedVillages.find((v) => v.name.toLowerCase().includes(q));
+                      if (firstMatch) setSelectedVillageId(firstMatch.id);
+                    }
+                  }}
+                  placeholder="Search village by first letters..."
+                  className="w-full pl-8 pr-7 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+                {villageSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setVillageSearchQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
               <Filter className="w-4 h-4 text-amber-600" />
-              <span className="text-xs font-bold text-slate-700">Filter by Village:</span>
+              <span className="text-xs font-bold text-slate-700">Select Village (A–Z):</span>
               <select
                 value={selectedVillageId}
                 onChange={(e) => setSelectedVillageId(e.target.value)}
                 className="p-2 border border-slate-200 rounded-xl text-xs font-bold bg-amber-50/60 text-slate-900"
               >
-                {villages.map((v) => (
+                {sortedVillages.map((v) => (
                   <option key={v.id} value={v.id}>
                     {v.name} ({v.stops.length} Stops)
                   </option>
@@ -385,7 +457,7 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
               </select>
             </div>
             <span className="text-xs text-slate-500">
-              Click any village on the left or select from filter to view its dependent transport stops
+              Type first few alphabets or click any village below to view its dependent transport stops
             </span>
           </div>
 
@@ -393,19 +465,36 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
             {/* Villages List (Clickable) */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-base font-bold text-slate-900">Villages &amp; Distance Tariffs</h3>
-                <span className="text-xs text-slate-500">{villages.length} Villages</span>
+                <h3 className="text-base font-bold text-slate-900">Villages &amp; Distance Tariffs (A–Z)</h3>
+                <span className="text-xs text-slate-500">{sortedVillages.length} Villages</span>
               </div>
               <div className="space-y-2.5 text-xs">
-                {villages.length === 0 ? (
+                {sortedVillages.length === 0 ? (
                   <p className="py-6 text-center text-slate-400">No villages configured yet.</p>
                 ) : (
-                  villages.map((v) => {
-                    const isSelected = selectedVillageObj?.id === v.id;
-                    return (
-                      <div
-                        key={v.id}
-                        onClick={() => setSelectedVillageId(v.id)}
+                  (() => {
+                    const q = villageSearchQuery.trim().toLowerCase();
+                    const filteredList = !q
+                      ? sortedVillages
+                      : [
+                          ...sortedVillages.filter((v) => v.name.toLowerCase().startsWith(q)),
+                          ...sortedVillages.filter(
+                            (v) => !v.name.toLowerCase().startsWith(q) && v.name.toLowerCase().includes(q)
+                          ),
+                        ];
+                    if (filteredList.length === 0) {
+                      return (
+                        <p className="py-6 text-center text-slate-400">
+                          No village found matching &ldquo;{villageSearchQuery}&rdquo;.
+                        </p>
+                      );
+                    }
+                    return filteredList.map((v) => {
+                      const isSelected = selectedVillageObj?.id === v.id;
+                      return (
+                        <div
+                          key={v.id}
+                          onClick={() => setSelectedVillageId(v.id)}
                         className={`p-3.5 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
                           isSelected
                             ? 'bg-amber-50 border-amber-400 shadow-2xs ring-1 ring-amber-300'
@@ -433,7 +522,8 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                         </div>
                       </div>
                     );
-                  })
+                  });
+                })()
                 )}
               </div>
             </div>

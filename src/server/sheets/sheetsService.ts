@@ -584,6 +584,7 @@ export class SheetsDatabaseManager {
       // 2. Hydrate entity tabs (respecting empty tabs when headers exist so deletions persist)
       if ((tabMap.get('Villages_And_Stops') || []).length >= 1) {
         this.villages = this.parseRowsFromSheet<Village>(tabMap.get('Villages_And_Stops'), true);
+        this.sortVillagesAlphabetically();
       }
       if ((tabMap.get('Vehicles_Master') || []).length >= 1) {
         this.vehicles = this.parseRowsFromSheet<Vehicle>(tabMap.get('Vehicles_Master'), true);
@@ -2167,7 +2168,30 @@ export class SheetsDatabaseManager {
   }
 
   // --- Masters: Villages & Transport Stops ---
-  public getVillages() { return this.villages; }
+  private sortVillagesAlphabetically() {
+    for (const v of this.villages) {
+      if (Array.isArray(v.stops)) {
+        v.stops.sort((a, b) =>
+          String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+            sensitivity: 'base',
+            numeric: true,
+          })
+        );
+      }
+    }
+    this.villages.sort((a, b) =>
+      String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      })
+    );
+  }
+
+  public getVillages() {
+    this.sortVillagesAlphabetically();
+    return this.villages;
+  }
+
   public async saveVillage(villageData: Partial<Village> & { stops?: Partial<TransportStop>[] }): Promise<Village> {
     return this.enqueueWrite(async () => {
       if (!villageData.name || !villageData.name.trim()) {
@@ -2186,13 +2210,17 @@ export class SheetsDatabaseManager {
         }
       }
 
-      const stops: TransportStop[] = rawStops.map((s, idx) => ({
-        id: s.id || `stp-${Date.now()}-${idx}`,
-        name: s.name!.trim(),
-        fee: Number(s.fee),
-        distanceKm: Number(s.distanceKm) || Number(villageData.distanceKm) || 5,
-        landmark: s.landmark || '',
-      }));
+      const stops: TransportStop[] = rawStops
+        .map((s, idx) => ({
+          id: s.id || `stp-${Date.now()}-${idx}`,
+          name: s.name!.trim(),
+          fee: Number(s.fee),
+          distanceKm: Number(s.distanceKm) || Number(villageData.distanceKm) || 5,
+          landmark: s.landmark || '',
+        }))
+        .sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true })
+        );
 
       if (villageData.id) {
         const idx = this.villages.findIndex(v => v.id === villageData.id);
@@ -2214,14 +2242,42 @@ export class SheetsDatabaseManager {
             }
           }
 
-          this.villages[idx] = {
+          const updatedVillage: Village = {
             ...existingVillage,
             name: villageData.name?.trim() || existingVillage.name,
             distanceKm: Number(villageData.distanceKm) || existingVillage.distanceKm,
             stops,
           };
+          this.villages[idx] = updatedVillage;
 
-          // Cascade updated stop fee to all members attached to each stop (effective for upcoming months without altering past invoices)
+          // Cascade updated village name, stop fee, stop name, and route attachment to all members attached to this village/stops
+          const newVillageName = updatedVillage.name;
+          const matchingRouteForVillage = this.findBestRouteForVillageOrStop(
+            updatedVillage.id,
+            newVillageName
+          );
+          for (const member of this.students) {
+            const isLinkedToVillage =
+              member.villageId === existingVillage.id ||
+              (!!member.villageName &&
+                member.villageName.trim().toLowerCase() === existingVillage.name.trim().toLowerCase());
+            if (isLinkedToVillage) {
+              member.villageId = updatedVillage.id;
+              member.villageName = newVillageName;
+              const bestRoute =
+                this.findBestRouteForVillageOrStop(
+                  updatedVillage.id,
+                  newVillageName,
+                  member.pickupDropStopId,
+                  member.pickupDropStopName,
+                  member.campus
+                ) || matchingRouteForVillage;
+              if (bestRoute) {
+                member.routeId = bestRoute.id;
+                member.routeCode = bestRoute.code;
+              }
+            }
+          }
           for (const st of stops) {
             for (const member of this.students) {
               if (
@@ -2234,8 +2290,18 @@ export class SheetsDatabaseManager {
             }
           }
 
+          // Also update villageNames on any route that references this village
+          for (const rt of this.routes) {
+            if (rt.villageIds.includes(updatedVillage.id)) {
+              rt.villageNames = rt.villageIds
+                .map(id => this.villages.find(v => v.id === id)?.name)
+                .filter(Boolean) as string[];
+            }
+          }
+
+          this.sortVillagesAlphabetically();
           await this.internalSyncToGoogleSheets();
-          return this.villages[idx];
+          return updatedVillage;
         }
       }
 
@@ -2247,6 +2313,7 @@ export class SheetsDatabaseManager {
       };
 
       this.villages.push(newVillage);
+      this.sortVillagesAlphabetically();
       await this.internalSyncToGoogleSheets();
       return newVillage;
     });
@@ -2455,6 +2522,107 @@ export class SheetsDatabaseManager {
   }
 
   // --- Masters: Routes (Nomenclature Rule: Campus/VehicleLast4/Trip e.g. Sr/7175/1) ---
+  private doesRouteCoverStudentStopOrVillage(
+    route: Route,
+    villageId?: string,
+    villageName?: string,
+    stopId?: string,
+    stopName?: string
+  ): { matchesStopExplicitly: boolean; matchesVillageFallback: boolean } {
+    const cleanVilName = (villageName || '').trim().toLowerCase();
+    const cleanStopName = (stopName || '').trim().toLowerCase();
+
+    const routeStopIds = new Set(route.stopIds || []);
+    const routeStopNames = new Set((route.stopNames || []).map(sn => String(sn || '').trim().toLowerCase()));
+    const hasExplicitStops = routeStopIds.size > 0 || routeStopNames.size > 0;
+
+    // 1. Check explicit stop match
+    if (stopId && routeStopIds.has(stopId)) {
+      return { matchesStopExplicitly: true, matchesVillageFallback: false };
+    }
+    if (cleanStopName && routeStopNames.has(cleanStopName)) {
+      return { matchesStopExplicitly: true, matchesVillageFallback: false };
+    }
+
+    // 2. Check village match
+    const matchedVillages = this.villages.filter(v => {
+      if (villageId && v.id === villageId) return true;
+      if (cleanVilName && v.name.trim().toLowerCase() === cleanVilName) return true;
+      if (stopId && (v.stops || []).some(s => s.id === stopId)) return true;
+      if (cleanStopName && (v.stops || []).some(s => s.name.trim().toLowerCase() === cleanStopName)) return true;
+      return false;
+    });
+
+    const matchedVillageIds = new Set(matchedVillages.map(v => v.id));
+    const matchedVillageNames = new Set(matchedVillages.map(v => v.name.trim().toLowerCase()));
+    if (cleanVilName) matchedVillageNames.add(cleanVilName);
+
+    const coversVillage =
+      (route.villageIds || []).some(id => matchedVillageIds.has(id)) ||
+      (route.villageNames || []).some(vn => matchedVillageNames.has(String(vn || '').trim().toLowerCase()));
+
+    if (!coversVillage) {
+      return { matchesStopExplicitly: false, matchesVillageFallback: false };
+    }
+
+    // If the student has a specific stop AND the route has explicit stops configured for this village,
+    // do not match via village fallback if the student's stop was excluded from this route.
+    if ((stopId || cleanStopName) && hasExplicitStops) {
+      const villageStops = matchedVillages.flatMap(v => v.stops || []);
+      const routeHasSpecificStopsInThisVillage = villageStops.some(
+        st => routeStopIds.has(st.id) || routeStopNames.has(st.name.trim().toLowerCase())
+      );
+      if (routeHasSpecificStopsInThisVillage) {
+        return { matchesStopExplicitly: false, matchesVillageFallback: false };
+      }
+    }
+
+    return { matchesStopExplicitly: false, matchesVillageFallback: true };
+  }
+
+  private findBestRouteForVillageOrStop(
+    villageId?: string,
+    villageName?: string,
+    stopId?: string,
+    stopName?: string,
+    campus?: string,
+    excludeRouteId?: string
+  ): Route | undefined {
+    const activeRoutes = this.routes.filter(r => {
+      if (excludeRouteId && r.id === excludeRouteId) return false;
+      if (r.active === false) return false;
+      return true;
+    });
+
+    const pickByCampus = (list: Route[]): Route | undefined => {
+      if (list.length === 0) return undefined;
+      if (campus && campus.trim()) {
+        const cleanCampus = campus.trim().toLowerCase();
+        const campusMatch = list.find(
+          r =>
+            String(r.campus || '').trim().toLowerCase() === cleanCampus ||
+            String(r.campusCode || '').trim().toLowerCase() === cleanCampus
+        );
+        if (campusMatch) return campusMatch;
+      }
+      return list[0];
+    };
+
+    // Priority 1: Routes that explicitly include this stop
+    const explicitStopRoutes = activeRoutes.filter(
+      r => this.doesRouteCoverStudentStopOrVillage(r, villageId, villageName, stopId, stopName).matchesStopExplicitly
+    );
+    if (explicitStopRoutes.length > 0) {
+      return pickByCampus(explicitStopRoutes);
+    }
+
+    // Priority 2: Routes that cover the village without excluding this stop
+    const fallbackVillageRoutes = activeRoutes.filter(
+      r => this.doesRouteCoverStudentStopOrVillage(r, villageId, villageName, stopId, stopName).matchesVillageFallback
+    );
+    return pickByCampus(fallbackVillageRoutes);
+  }
+
   public getRoutes() { return this.routes; }
   public async saveRoute(routeData: {
     id?: string;
@@ -2462,6 +2630,9 @@ export class SheetsDatabaseManager {
     vehicleId: string;
     tripNumber: number;
     villageIds: string[];
+    stopIds?: string[];
+    stopNames?: string[];
+    confirmedMemberIds?: string[];
     active?: boolean;
   }): Promise<Route> {
     return this.enqueueWrite(async () => {
@@ -2471,7 +2642,7 @@ export class SheetsDatabaseManager {
       const vehicle = this.vehicles.find(v => v.id === routeData.vehicleId);
       if (!vehicle) throw new Error('Vehicle not found. Please add/select a valid vehicle from Vehicle Master first.');
       if (!Array.isArray(routeData.villageIds) || routeData.villageIds.length === 0) {
-        throw new Error('At least one Village from Village Master must be linked to create or save a Route.');
+        throw new Error('At least one Village and Stop from Village Master must be selected to save a Route.');
       }
 
       // Extract last 4 digits of vehicle
@@ -2490,13 +2661,69 @@ export class SheetsDatabaseManager {
       // Nomenclature formula: Campus/VehicleLast4/Trip (e.g. "Sr/7175/1")
       const routeCode = `${campusCode}/${vehicleLast4}/${tripNum}`;
 
-      const villageNames = routeData.villageIds
-        .map(id => this.villages.find(v => v.id === id)?.name)
-        .filter(Boolean) as string[];
+      // Resolve selected stops and villages (sorted A–Z)
+      const requestedStopIdSet = Array.isArray(routeData.stopIds) ? new Set(routeData.stopIds) : null;
+      const requestedStopNameSet = Array.isArray(routeData.stopNames)
+        ? new Set(routeData.stopNames.map(s => String(s || '').trim().toLowerCase()))
+        : null;
+
+      // Include any village whose ID was passed OR that owns one of the selected stopIds
+      const candidateVillages = this.villages
+        .filter(v => {
+          if (routeData.villageIds.includes(v.id)) return true;
+          if (requestedStopIdSet && (v.stops || []).some(st => requestedStopIdSet.has(st.id))) return true;
+          return false;
+        })
+        .sort((a, b) =>
+          a.name.trim().localeCompare(b.name.trim(), undefined, { sensitivity: 'base', numeric: true })
+        );
+
+      const selectedStops: TransportStop[] = [];
+      const effectiveVillages: Village[] = [];
+
+      for (const vil of candidateVillages) {
+        const vilStops = [...(vil.stops || [])].sort((a, b) =>
+          String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+            sensitivity: 'base',
+            numeric: true,
+          })
+        );
+        if (vilStops.length === 0) {
+          effectiveVillages.push(vil);
+          continue;
+        }
+        if (requestedStopIdSet || requestedStopNameSet) {
+          const matchingInVil = vilStops.filter(
+            st =>
+              (requestedStopIdSet && requestedStopIdSet.has(st.id)) ||
+              (requestedStopNameSet && requestedStopNameSet.has(st.name.trim().toLowerCase()))
+          );
+          if (matchingInVil.length > 0) {
+            effectiveVillages.push(vil);
+            matchingInVil.forEach(st => selectedStops.push({ ...st, villageName: vil.name }));
+          } else if (!requestedStopIdSet || requestedStopIdSet.size === 0) {
+            effectiveVillages.push(vil);
+            vilStops.forEach(st => selectedStops.push({ ...st, villageName: vil.name }));
+          }
+        } else {
+          effectiveVillages.push(vil);
+          vilStops.forEach(st => selectedStops.push({ ...st, villageName: vil.name }));
+        }
+      }
+
+      const finalVillages = effectiveVillages.length > 0 ? effectiveVillages : candidateVillages;
+      const sortedVillageIds = finalVillages.length > 0 ? finalVillages.map(v => v.id) : routeData.villageIds;
+      const villageNames = finalVillages.map(v => v.name);
+      const stopIds = selectedStops.map(s => s.id);
+      const stopNames = selectedStops.map(s => s.name);
+
+      let savedRoute: Route;
+      let previousRouteCode = '';
 
       if (routeData.id) {
         const idx = this.routes.findIndex(r => r.id === routeData.id);
         if (idx >= 0) {
+          previousRouteCode = this.routes[idx].code;
           this.routes[idx] = {
             ...this.routes[idx],
             code: routeCode,
@@ -2506,32 +2733,102 @@ export class SheetsDatabaseManager {
             vehicleNumber: vehicle.registrationNumber,
             vehicleLast4,
             tripNumber: tripNum,
-            villageIds: routeData.villageIds,
+            villageIds: sortedVillageIds,
             villageNames,
+            stopIds,
+            stopNames,
+            stops: selectedStops,
             active: routeData.active !== undefined ? routeData.active : true,
           };
-          await this.internalSyncToGoogleSheets();
-          return this.routes[idx];
+          savedRoute = this.routes[idx];
+        } else {
+          savedRoute = {
+            id: routeData.id,
+            code: routeCode,
+            campus: matchedCampus ? matchedCampus.code : routeData.campus,
+            campusCode,
+            vehicleId: vehicle.id,
+            vehicleNumber: vehicle.registrationNumber,
+            vehicleLast4,
+            tripNumber: tripNum,
+            villageIds: sortedVillageIds,
+            villageNames,
+            stopIds,
+            stopNames,
+            stops: selectedStops,
+            active: routeData.active !== undefined ? routeData.active : true,
+          };
+          this.routes.push(savedRoute);
+        }
+      } else {
+        savedRoute = {
+          id: `rot-${Date.now()}`,
+          code: routeCode,
+          campus: matchedCampus ? matchedCampus.code : routeData.campus,
+          campusCode,
+          vehicleId: vehicle.id,
+          vehicleNumber: vehicle.registrationNumber,
+          vehicleLast4,
+          tripNumber: tripNum,
+          villageIds: sortedVillageIds,
+          villageNames,
+          stopIds,
+          stopNames,
+          stops: selectedStops,
+          active: routeData.active !== undefined ? routeData.active : true,
+        };
+        this.routes.push(savedRoute);
+      }
+
+      // Cascade Route Assignment to Students/Members based on Covered Stops & Villages
+      const confirmedSet = Array.isArray(routeData.confirmedMemberIds)
+        ? new Set(routeData.confirmedMemberIds)
+        : null;
+
+      for (const student of this.students) {
+        if (student.transportStatus === 'Left') continue;
+
+        const coverage = this.doesRouteCoverStudentStopOrVillage(
+          savedRoute,
+          student.villageId,
+          student.villageName,
+          student.pickupDropStopId,
+          student.pickupDropStopName
+        );
+        const belongsToCoveredVillageOrStop =
+          coverage.matchesStopExplicitly || coverage.matchesVillageFallback;
+
+        const wasOnThisRoute =
+          student.routeId === savedRoute.id ||
+          (!!previousRouteCode && student.routeCode === previousRouteCode);
+
+        if (belongsToCoveredVillageOrStop) {
+          if (confirmedSet ? confirmedSet.has(student.id) : true) {
+            student.routeId = savedRoute.id;
+            student.routeCode = savedRoute.code;
+          }
+        } else if (wasOnThisRoute) {
+          // Student's stop or village was removed from this route; attach to another covering route if available, else Unassigned
+          const fallbackRoute = this.findBestRouteForVillageOrStop(
+            student.villageId,
+            student.villageName,
+            student.pickupDropStopId,
+            student.pickupDropStopName,
+            student.campus,
+            savedRoute.id
+          );
+          if (fallbackRoute) {
+            student.routeId = fallbackRoute.id;
+            student.routeCode = fallbackRoute.code;
+          } else {
+            student.routeId = '';
+            student.routeCode = 'Unassigned';
+          }
         }
       }
 
-      const newRoute: Route = {
-        id: `rot-${Date.now()}`,
-        code: routeCode,
-        campus: matchedCampus ? matchedCampus.code : routeData.campus,
-        campusCode,
-        vehicleId: vehicle.id,
-        vehicleNumber: vehicle.registrationNumber,
-        vehicleLast4,
-        tripNumber: tripNum,
-        villageIds: routeData.villageIds,
-        villageNames,
-        active: routeData.active !== undefined ? routeData.active : true,
-      };
-
-      this.routes.push(newRoute);
       await this.internalSyncToGoogleSheets();
-      return newRoute;
+      return savedRoute;
     });
   }
 
@@ -2884,7 +3181,32 @@ export class SheetsDatabaseManager {
       if (!data.pickupDropStopName || !data.pickupDropStopName.trim() || data.pickupDropStopName === 'Assigned Stop') {
         throw new Error('Mandatory prerequisite record missing: Please select a valid Pickup & Drop Stop.');
       }
-      if (this.routes.length === 0 || (!data.routeId && !data.routeCode?.trim())) {
+      const stopName = data.pickupDropStopName.trim();
+      const stopId = data.pickupDropStopId || '';
+
+      // Resolve best matching Route for the student's Village / Stop so changing village/stop auto-attaches to the new route
+      const autoMatchedRoute = this.findBestRouteForVillageOrStop(
+        data.villageId,
+        data.villageName,
+        stopId,
+        stopName,
+        data.campus
+      );
+      const explicitRoute = this.routes.find(
+        r => r.id === data.routeId || (data.routeCode && r.code === data.routeCode)
+      );
+      const explicitCoversVillage =
+        explicitRoute &&
+        ((data.villageId && explicitRoute.villageIds.includes(data.villageId)) ||
+          (data.villageName &&
+            explicitRoute.villageNames.some(
+              vn => vn.trim().toLowerCase() === data.villageName!.trim().toLowerCase()
+            )));
+      const resolvedRoute = explicitCoversVillage
+        ? explicitRoute
+        : autoMatchedRoute || explicitRoute;
+
+      if (this.routes.length === 0 || (!resolvedRoute && !data.routeId && !data.routeCode?.trim())) {
         throw new Error('Mandatory prerequisite record missing: Please select a valid Assigned Route from Route Master.');
       }
       if (!data.monthlyFee || Number(data.monthlyFee) <= 0) {
@@ -2922,19 +3244,27 @@ export class SheetsDatabaseManager {
         }
       }
 
-      const stopName = data.pickupDropStopName.trim();
-      const stopId = data.pickupDropStopId || '';
-
       if (data.id) {
         const idx = this.students.findIndex(s => s.id === data.id);
         if (idx >= 0) {
           const existing = this.students[idx];
+          const villageOrStopChanged =
+            (data.villageId && data.villageId !== existing.villageId) ||
+            (data.villageName && data.villageName !== existing.villageName) ||
+            (stopId && stopId !== existing.pickupDropStopId) ||
+            (stopName && stopName !== existing.pickupDropStopName);
+          const finalRoute = villageOrStopChanged
+            ? autoMatchedRoute || resolvedRoute
+            : resolvedRoute;
+
           const updated: StudentMember = {
             ...existing,
             ...data,
             name: data.name.trim(),
             admissionNo: data.admissionNo.trim(),
             profilePhoto: data.profilePhoto || existing.profilePhoto,
+            routeId: finalRoute ? finalRoute.id : data.routeId || existing.routeId,
+            routeCode: finalRoute ? finalRoute.code : data.routeCode || existing.routeCode,
             pickupDropStopId: stopId,
             pickupDropStopName: stopName,
             morningStopId: stopId,
@@ -2975,8 +3305,8 @@ export class SheetsDatabaseManager {
         fatherName: data.fatherName.trim(),
         mobile: data.mobile.trim(),
         address: data.address.trim(),
-        routeId: data.routeId || '',
-        routeCode: data.routeCode || '',
+        routeId: resolvedRoute ? resolvedRoute.id : data.routeId || '',
+        routeCode: resolvedRoute ? resolvedRoute.code : data.routeCode || '',
         villageId: data.villageId || '',
         villageName: data.villageName || '',
         pickupDropStopId: stopId,
@@ -3996,15 +4326,38 @@ export class SheetsDatabaseManager {
     return list;
   }
 
+  private getStudentsForRoute(route: Route): StudentMember[] {
+    return this.students
+      .filter(s => {
+        if (s.transportStatus === 'Left') return false;
+        if (s.routeId === route.id || (route.code && s.routeCode === route.code)) return true;
+        if (!s.routeId && (!s.routeCode || s.routeCode === 'Unassigned')) {
+          const cov = this.doesRouteCoverStudentStopOrVillage(
+            route,
+            s.villageId,
+            s.villageName,
+            s.pickupDropStopId,
+            s.pickupDropStopName
+          );
+          return cov.matchesStopExplicitly || cov.matchesVillageFallback;
+        }
+        return false;
+      })
+      .sort((a, b) =>
+        String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+          sensitivity: 'base',
+          numeric: true,
+        })
+      );
+  }
+
   public async getOrCreateTripForRoute(date: string, routeId: string): Promise<{ trip: DailyTrip; attendance: TripAttendanceRecord[] }> {
     return this.enqueueWrite(async () => {
-      const route = this.routes.find(r => r.id === routeId) || this.routes[0];
+      const route = this.routes.find(r => r.id === routeId || r.code === routeId) || this.routes[0];
       if (!route) throw new Error('Route not found');
 
       let trip = this.trips.find(t => t.date === date && (t.routeId === route.id || t.routeName === route.code));
-      const routeStudents = this.students.filter(
-        s => (s.routeId === route.id || s.routeCode === route.code) && s.transportStatus !== 'Left'
-      );
+      const routeStudents = this.getStudentsForRoute(route);
 
       if (!trip) {
         const veh = this.vehicles.find(v => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber);
@@ -4073,7 +4426,67 @@ export class SheetsDatabaseManager {
 
   public async updateAttendanceObservation(recordId: string, source: 'driver' | 'assistant' | 'resolve', value: string, resolverName?: string, reason?: string) {
     return this.enqueueWrite(async () => {
-      const rec = this.attendance.find(a => a.id === recordId);
+      let rec = this.attendance.find(a => a.id === recordId);
+
+      // If record doesn't exist yet (e.g. marking directly from Arrival & Departure board before trip record creation),
+      // parse deterministic ID `att-${tripId}-${studentId}` and auto-create trip + attendance record
+      if (!rec && recordId.startsWith('att-')) {
+        const matchedStu = this.students.find(s => recordId.endsWith(`-${s.id}`));
+        if (matchedStu) {
+          const tripIdPart = recordId.slice(4, recordId.length - matchedStu.id.length - 1);
+          let trip = this.trips.find(t => t.id === tripIdPart);
+          if (!trip && tripIdPart.startsWith('dt-') && tripIdPart.length > 14) {
+            const datePart = tripIdPart.slice(-10);
+            const routeIdPart = tripIdPart.slice(3, -11);
+            const route =
+              this.routes.find(r => r.id === routeIdPart || r.code === routeIdPart) ||
+              this.routes.find(r => r.id === matchedStu.routeId || r.code === matchedStu.routeCode);
+            if (route) {
+              const veh = this.vehicles.find(v => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber);
+              const routeStudents = this.getStudentsForRoute(route);
+              trip = {
+                id: `dt-${route.id}-${datePart}`,
+                date: datePart,
+                campus: route.campus,
+                routeId: route.id,
+                routeName: route.code,
+                vehicleId: route.vehicleId,
+                vehicleNumber: route.vehicleNumber,
+                driverName: veh?.assignedDriverName || 'Assigned Driver',
+                helperName: veh?.assignedHelperName,
+                tripNumber: route.tripNumber,
+                shiftName: `Trip ${route.tripNumber} — ${route.name || route.code}`,
+                status: 'Ready',
+                rosterCount: routeStudents.length,
+                presentCount: 0,
+                absentCount: 0,
+                mismatchCount: 0,
+                plannedStartTime: '06:40 AM',
+                plannedEndTime: '07:30 AM',
+              };
+              this.trips.push(trip);
+            }
+          }
+          const effectiveTripId = trip?.id || tripIdPart;
+          const effectiveDate = trip?.date || (tripIdPart.length >= 10 ? tripIdPart.slice(-10) : new Date().toISOString().split('T')[0]);
+          rec = {
+            id: `att-${effectiveTripId}-${matchedStu.id}`,
+            tripId: effectiveTripId,
+            date: effectiveDate,
+            studentId: matchedStu.id,
+            admissionNo: matchedStu.admissionNo,
+            studentName: matchedStu.name,
+            classSection: `${matchedStu.class}-${matchedStu.section}`,
+            stopName: matchedStu.pickupDropStopName,
+            transportStatus: matchedStu.transportStatus,
+            driverStatus: 'Pending',
+            assistantStatus: 'Pending',
+            reconciliationStatus: 'Assistant_Pending',
+          };
+          this.attendance.push(rec);
+        }
+      }
+
       if (!rec) throw new Error('Record not found');
 
       if (source === 'driver') rec.driverStatus = value as any;
@@ -4088,9 +4501,10 @@ export class SheetsDatabaseManager {
         rec.reconciliationStatus = 'Resolved_Exception';
       }
 
-      const trip = this.trips.find(t => t.id === rec.tripId);
+      const trip = this.trips.find(t => t.id === rec!.tripId);
       if (trip) {
         const tripAtts = this.attendance.filter(a => a.tripId === trip.id);
+        trip.rosterCount = Math.max(trip.rosterCount || 0, tripAtts.length);
         trip.presentCount = tripAtts.filter(a => a.assistantStatus === 'Present').length;
         trip.absentCount = tripAtts.filter(a => a.assistantStatus === 'Absent').length;
       }
@@ -4108,7 +4522,37 @@ export class SheetsDatabaseManager {
     timingPayload?: { inTime?: string; outTime?: string; inStrength?: number; outStrength?: number }
   ) {
     return this.enqueueWrite(async () => {
-      const trip = this.trips.find(t => t.id === tripId);
+      let trip = this.trips.find(t => t.id === tripId);
+      if (!trip && tripId.startsWith('dt-') && tripId.length > 14) {
+        const datePart = tripId.slice(-10);
+        const routeIdPart = tripId.slice(3, -11);
+        const route = this.routes.find(r => r.id === routeIdPart || r.code === routeIdPart);
+        if (route) {
+          const veh = this.vehicles.find(v => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber);
+          const routeStudents = this.getStudentsForRoute(route);
+          trip = {
+            id: `dt-${route.id}-${datePart}`,
+            date: datePart,
+            campus: route.campus,
+            routeId: route.id,
+            routeName: route.code,
+            vehicleId: route.vehicleId,
+            vehicleNumber: route.vehicleNumber,
+            driverName: veh?.assignedDriverName || 'Assigned Driver',
+            helperName: veh?.assignedHelperName,
+            tripNumber: route.tripNumber,
+            shiftName: `Trip ${route.tripNumber} — ${route.name || route.code}`,
+            status: 'Ready',
+            rosterCount: routeStudents.length,
+            presentCount: 0,
+            absentCount: 0,
+            mismatchCount: 0,
+            plannedStartTime: '06:40 AM',
+            plannedEndTime: '07:30 AM',
+          };
+          this.trips.push(trip);
+        }
+      }
       if (!trip) throw new Error('Trip not found');
       trip.verifiedBy = verifiedBy;
       trip.verifiedAt = new Date().toISOString();

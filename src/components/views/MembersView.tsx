@@ -209,6 +209,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [emergencyContact, setEmergencyContact] = useState('');
   const [address, setAddress] = useState('');
   const [selectedVillageId, setSelectedVillageId] = useState('');
+  const [memberVillageSearch, setMemberVillageSearch] = useState('');
   const [customVillageName, setCustomVillageName] = useState('');
   const [selectedStopId, setSelectedStopId] = useState('');
   const [customStopName, setCustomStopName] = useState('');
@@ -231,14 +232,68 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [revokePermFileName, setRevokePermFileName] = useState<string>('');
   const [revokePermError, setRevokePermError] = useState<string | null>(null);
 
-  const selectedVillage = villages.find(v => v.id === selectedVillageId);
+  const sortedVillages = [...villages]
+    .map(v => ({
+      ...v,
+      stops: [...(v.stops || [])].sort((a, b) =>
+        String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+          sensitivity: 'base',
+          numeric: true,
+        })
+      ),
+    }))
+    .sort((a, b) =>
+      String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      })
+    );
+
+  const selectedVillage = sortedVillages.find(v => v.id === selectedVillageId);
   const availableStops = selectedVillage?.stops || [];
+  const selectedStopObj = availableStops.find(s => s.id === selectedStopId);
+
+  const doesRouteMatchVillageAndStop = (r: Route, vilId: string, stpId?: string): { explicitStop: boolean; villageFallback: boolean } => {
+    const vil = sortedVillages.find(v => v.id === vilId);
+    const stp = vil?.stops?.find(s => s.id === stpId);
+    const rStopIds = new Set(r.stopIds || []);
+    const rStopNames = new Set((r.stopNames || []).map(sn => String(sn || '').trim().toLowerCase()));
+    const hasExplicitStops = rStopIds.size > 0 || rStopNames.size > 0;
+
+    if (stpId && rStopIds.has(stpId)) return { explicitStop: true, villageFallback: false };
+    if (stp && rStopNames.has(stp.name.trim().toLowerCase())) return { explicitStop: true, villageFallback: false };
+
+    const coversVillage =
+      (r.villageIds || []).includes(vilId) ||
+      Boolean(vil && (r.villageNames || []).some(vn => vn.trim().toLowerCase() === vil.name.trim().toLowerCase()));
+    if (!coversVillage) return { explicitStop: false, villageFallback: false };
+
+    if (stpId && hasExplicitStops && vil) {
+      const routeHasSpecificStopsInVil = (vil.stops || []).some(
+        s => rStopIds.has(s.id) || rStopNames.has(s.name.trim().toLowerCase())
+      );
+      if (routeHasSpecificStopsInVil) {
+        return { explicitStop: false, villageFallback: false };
+      }
+    }
+    return { explicitStop: false, villageFallback: true };
+  };
+
   const availableRoutes = selectedVillageId
-    ? routes.filter(r => r.villageIds.includes(selectedVillageId))
+    ? (() => {
+        const stopSpecific = selectedStopId
+          ? routes.filter(r => doesRouteMatchVillageAndStop(r, selectedVillageId, selectedStopId).explicitStop)
+          : [];
+        if (stopSpecific.length > 0) return stopSpecific;
+        return routes.filter(r => {
+          const m = doesRouteMatchVillageAndStop(r, selectedVillageId, selectedStopId);
+          return m.explicitStop || m.villageFallback;
+        });
+      })()
     : routes;
 
   // Village-dependent stops for Directory Filter
-  const activeFilterVillageObj = villages.find(
+  const activeFilterVillageObj = sortedVillages.find(
     v => v.id === villageFilter || v.name === villageFilter
   );
   const filterVillageStops = activeFilterVillageObj?.stops || [];
@@ -480,29 +535,67 @@ export const MembersView: React.FC<MembersViewProps> = ({
     return true;
   });
 
+  const resolveBestRouteForVillage = (vilId: string, stpId?: string, campusVal?: string) => {
+    const pickBest = (list: Route[]) => {
+      if (list.length === 0) return undefined;
+      if (campusVal) {
+        const campusMatch = list.find(
+          r =>
+            ((r.campus || '').toLowerCase() === campusVal.toLowerCase() ||
+              (r.campusCode || '').toLowerCase() === campusVal.toLowerCase()) &&
+            r.active !== false
+        );
+        if (campusMatch) return campusMatch;
+      }
+      return list.find(r => r.active !== false) || list[0];
+    };
+
+    // Priority 1: Routes that explicitly include the selected stop
+    if (stpId) {
+      const explicitStopMatches = routes.filter(
+        r => doesRouteMatchVillageAndStop(r, vilId, stpId).explicitStop
+      );
+      if (explicitStopMatches.length > 0) {
+        return pickBest(explicitStopMatches);
+      }
+    }
+
+    // Priority 2: Routes covering the village without excluding the selected stop
+    const fallbackMatches = routes.filter(r => {
+      const m = doesRouteMatchVillageAndStop(r, vilId, stpId);
+      return m.explicitStop || m.villageFallback;
+    });
+    return pickBest(fallbackMatches);
+  };
+
   const handleVillageSelect = (vilId: string) => {
     setSelectedVillageId(vilId);
-    const vil = villages.find(v => v.id === vilId);
+    setCustomVillageName('');
+    setCustomStopName('');
+    const vil = sortedVillages.find(v => v.id === vilId);
     if (vil) {
-      setMonthlyFee(vil.monthlyRate || 700);
-      if (vil.stops.length > 0) {
-        setSelectedStopId(vil.stops[0].id);
-        setMonthlyFee(vil.stops[0].fee || vil.monthlyRate || 700);
-      } else {
-        setSelectedStopId('');
-      }
-      const matchingRoute = routes.find(r => r.villageIds.includes(vilId));
-      if (matchingRoute) {
-        setSelectedRouteId(matchingRoute.id);
-      }
+      const defaultStop = vil.stops.length > 0 ? vil.stops[0] : undefined;
+      const nextStopId = defaultStop ? defaultStop.id : '';
+      setSelectedStopId(nextStopId);
+      setMonthlyFee(defaultStop?.fee || vil.monthlyRate || 700);
+      const matchingRoute = resolveBestRouteForVillage(vilId, nextStopId, campus);
+      setSelectedRouteId(matchingRoute ? matchingRoute.id : '');
+    } else {
+      setSelectedStopId('');
+      setSelectedRouteId('');
     }
   };
 
   const handleStopSelect = (stpId: string) => {
     setSelectedStopId(stpId);
+    setCustomStopName('');
     const stp = availableStops.find(s => s.id === stpId);
     if (stp && stp.fee) {
       setMonthlyFee(stp.fee);
+    }
+    if (selectedVillageId) {
+      const matchingRoute = resolveBestRouteForVillage(selectedVillageId, stpId, campus);
+      setSelectedRouteId(matchingRoute ? matchingRoute.id : '');
     }
   };
 
@@ -551,8 +644,9 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setEmergencyContact('');
     setAddress('');
     setSchoolIdDoc(null);
-    const defaultVil = villages[0];
+    const defaultVil = sortedVillages[0];
     setSelectedVillageId(defaultVil?.id || '');
+    setMemberVillageSearch('');
     setCustomVillageName('');
     setSelectedStopId(defaultVil?.stops[0]?.id || '');
     setCustomStopName('');
@@ -580,6 +674,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setEmergencyContact(s.emergencyContact || s.mobile || '');
     setAddress(s.address || '');
     setSelectedVillageId(s.villageId || '');
+    setMemberVillageSearch('');
     setCustomVillageName(s.villageName && !villages.some(v => v.id === s.villageId) ? s.villageName : '');
     setSelectedStopId(s.pickupDropStopId || '');
     setCustomStopName(s.pickupDropStopName && !s.pickupDropStopId ? s.pickupDropStopName : '');
@@ -1220,7 +1315,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Village</label>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Village (A–Z)</label>
                   <select
                     value={villageFilter}
                     onChange={e => {
@@ -1230,7 +1325,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
                   >
                     <option value="all">All Villages</option>
-                    {villages.map(v => (
+                    {sortedVillages.map(v => (
                       <option key={v.id} value={v.id}>
                         {v.name}
                       </option>
@@ -1566,7 +1661,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Village</label>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Village (A–Z)</label>
                   <select
                     value={villageFilter}
                     onChange={e => {
@@ -1576,7 +1671,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
                   >
                     <option value="all">All Villages</option>
-                    {villages.map(v => (
+                    {sortedVillages.map(v => (
                       <option key={v.id} value={v.id}>
                         {v.name}
                       </option>
@@ -1958,7 +2053,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 { key: 'fee_structure', label: '2- Fee Structure' },
                 { key: 'followups', label: `Fee Follow-Ups (${memberFollowUps.length})` },
                 { key: 'discipline', label: `Discipline & Behaviour (${memberDisciplines.length})` },
-                { key: 'attendance', label: '3- Attendance' },
+                { key: 'attendance', label: `3- Attendance (${memberAttendance.length})` },
                 { key: 'documents', label: `4- Documents (${(activeProfileMember.documents || []).length})` },
                 { key: 'special', label: '5- Special (Suspension & Permission)' },
               ].map(t => (
@@ -2014,7 +2109,13 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     </div>
                     <div>
                       <span className="text-slate-400 block">Gender</span>
-                      <span className="font-semibold text-slate-800">{activeProfileMember.gender}</span>
+                      <span className="font-semibold text-slate-800">
+                        {activeProfileMember.gender === 'F'
+                          ? 'Female (F)'
+                          : activeProfileMember.gender === 'M'
+                          ? 'Male (M)'
+                          : activeProfileMember.gender || '—'}
+                      </span>
                     </div>
                     <div>
                       <span className="text-slate-400 block">Campus</span>
@@ -2434,67 +2535,144 @@ export const MembersView: React.FC<MembersViewProps> = ({
               )}
 
               {/* TAB 3: ATTENDANCE */}
-              {profileTab === 'attendance' && (
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <h4 className="text-sm font-bold text-slate-900">Transport Attendance Summary</h4>
-                    <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
-                      {(['Daily', 'Weekly', 'Monthly', 'Annual'] as const).map(p => (
-                        <button
-                          key={p}
-                          onClick={() => setAttendancePeriod(p)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
-                            attendancePeriod === p
-                              ? 'bg-slate-900 text-amber-400 shadow-2xs'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          {p}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+              {profileTab === 'attendance' && (() => {
+                const sevenDaysAgoStr = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+                const currentMonthPrefix = todayStr.slice(0, 7);
+                const periodRecords = memberAttendance.filter(a => {
+                  const recDate = a.date || '';
+                  if (attendancePeriod === 'Daily') return recDate === todayStr;
+                  if (attendancePeriod === 'Weekly') return recDate >= sevenDaysAgoStr && recDate <= todayStr;
+                  if (attendancePeriod === 'Monthly') return recDate.startsWith(currentMonthPrefix);
+                  return true; // Annual
+                });
 
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                    <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                      <span className="text-xs text-slate-500">{attendancePeriod} Working Days</span>
-                      <div className="text-xl font-bold text-slate-900 mt-1">
-                        {attendancePeriod === 'Daily' ? 1 : attendancePeriod === 'Weekly' ? 6 : attendancePeriod === 'Monthly' ? 25 : 210}
+                const getEffectiveAttendanceStatus = (a: TripAttendanceRecord) => {
+                  if (a.resolvedStatus && a.resolvedStatus !== 'Pending') return a.resolvedStatus;
+                  if (a.assistantStatus && a.assistantStatus !== 'Pending') return a.assistantStatus;
+                  if (a.driverStatus && a.driverStatus !== 'Pending') return a.driverStatus;
+                  if (a.reconciliationStatus === 'Matched_Present') return 'Present';
+                  if (a.reconciliationStatus === 'Matched_Absent') return 'Absent';
+                  return 'Pending';
+                };
+
+                const presentTrips = periodRecords.filter(
+                  a => getEffectiveAttendanceStatus(a) === 'Present'
+                ).length;
+                const absentOrLeaveTrips = periodRecords.filter(a => {
+                  const st = getEffectiveAttendanceStatus(a);
+                  return st === 'Absent' || st === 'Leave';
+                }).length;
+                const totalRecordedTrips = presentTrips + absentOrLeaveTrips;
+                const attendanceRateStr =
+                  totalRecordedTrips > 0
+                    ? `${((presentTrips / totalRecordedTrips) * 100).toFixed(1)}%`
+                    : '0% (No Records)';
+
+                return (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-900">Transport Attendance Summary</h4>
+                        <p className="text-[11px] text-slate-500">
+                          Calculated strictly from recorded daily trip attendance logs
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                        {(['Daily', 'Weekly', 'Monthly', 'Annual'] as const).map(p => (
+                          <button
+                            key={p}
+                            onClick={() => setAttendancePeriod(p)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+                              attendancePeriod === p
+                                ? 'bg-slate-900 text-amber-400 shadow-2xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                    <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
-                      <span className="text-xs text-emerald-800">Present Trips</span>
-                      <div className="text-xl font-bold text-emerald-700 mt-1">
-                        {attendancePeriod === 'Daily'
-                          ? memberAttendance.filter(a => a.assistantStatus === 'Present').length || 1
-                          : attendancePeriod === 'Weekly'
-                          ? 5
-                          : attendancePeriod === 'Monthly'
-                          ? 23
-                          : 194}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                        <span className="text-xs text-slate-500">{attendancePeriod} Recorded Trips</span>
+                        <div className="text-xl font-bold text-slate-900 mt-1">
+                          {totalRecordedTrips}
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
+                        <span className="text-xs text-emerald-800">Present Trips</span>
+                        <div className="text-xl font-bold text-emerald-700 mt-1">
+                          {presentTrips}
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-xl bg-rose-50 border border-rose-200">
+                        <span className="text-xs text-rose-800">Absent / Leave</span>
+                        <div className="text-xl font-bold text-rose-700 mt-1">
+                          {absentOrLeaveTrips}
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-xl bg-blue-50 border border-blue-200">
+                        <span className="text-xs text-blue-800">Attendance Rate</span>
+                        <div className="text-xl font-bold text-blue-700 mt-1">
+                          {attendanceRateStr}
+                        </div>
                       </div>
                     </div>
-                    <div className="p-4 rounded-xl bg-rose-50 border border-rose-200">
-                      <span className="text-xs text-rose-800">Absent / Leave</span>
-                      <div className="text-xl font-bold text-rose-700 mt-1">
-                        {attendancePeriod === 'Daily'
-                          ? memberAttendance.filter(a => a.assistantStatus === 'Absent').length
-                          : attendancePeriod === 'Weekly'
-                          ? 1
-                          : attendancePeriod === 'Monthly'
-                          ? 2
-                          : 16}
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-xl bg-blue-50 border border-blue-200">
-                      <span className="text-xs text-blue-800">Attendance Rate</span>
-                      <div className="text-xl font-bold text-blue-700 mt-1">
-                        {attendancePeriod === 'Daily' ? '100%' : attendancePeriod === 'Weekly' ? '83.3%' : attendancePeriod === 'Monthly' ? '92.0%' : '92.4%'}
-                      </div>
+
+                    <div className="border border-slate-200 rounded-xl overflow-hidden">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
+                            <th className="py-2.5 px-4">Date</th>
+                            <th className="py-2.5 px-3">Stop</th>
+                            <th className="py-2.5 px-3">Driver Sheet</th>
+                            <th className="py-2.5 px-3">Assistant App</th>
+                            <th className="py-2.5 px-3">Final Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {periodRecords.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="py-8 text-center text-slate-400">
+                                No transport attendance has been recorded for this member in the selected period yet.
+                              </td>
+                            </tr>
+                          ) : (
+                            periodRecords.map(rec => {
+                              const effStatus = getEffectiveAttendanceStatus(rec);
+                              return (
+                                <tr key={rec.id}>
+                                  <td className="py-2.5 px-4 font-mono font-semibold text-slate-900">
+                                    {rec.date}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-slate-700">{rec.stopName || activeProfileMember.pickupDropStopName}</td>
+                                  <td className="py-2.5 px-3 font-medium text-slate-600">{rec.driverStatus}</td>
+                                  <td className="py-2.5 px-3 font-medium text-slate-600">{rec.assistantStatus}</td>
+                                  <td className="py-2.5 px-3">
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                        effStatus === 'Present'
+                                          ? 'bg-emerald-100 text-emerald-800'
+                                          : effStatus === 'Absent' || effStatus === 'Leave'
+                                          ? 'bg-rose-100 text-rose-800'
+                                          : 'bg-slate-100 text-slate-600'
+                                      }`}
+                                    >
+                                      {effStatus}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* TAB 4: DOCUMENTS */}
               {profileTab === 'documents' && (
@@ -3042,7 +3220,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div className="sm:col-span-1">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Full Name *</label>
                   <input
@@ -3053,6 +3231,19 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     placeholder="Full Name"
                     className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
                   />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Gender *</label>
+                  <select
+                    required
+                    value={gender}
+                    onChange={e => setGender(e.target.value as 'M' | 'F' | 'Other')}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden cursor-pointer"
+                  >
+                    <option value="M">Male (M)</option>
+                    <option value="F">Female (F)</option>
+                    <option value="Other">Other</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -3147,73 +3338,104 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">1. Select or Type Village</label>
-                    {villages.length > 0 ? (
-                      <select
-                        value={selectedVillageId}
-                        onChange={e => handleVillageSelect(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                      >
-                        <option value="">-- Select Village --</option>
-                        {villages.map(v => (
-                          <option key={v.id} value={v.id}>
-                            {v.name} (₹{v.monthlyRate || v.stops?.[0]?.fee || 700}/mo)
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        placeholder="Type Village Name"
-                        value={customVillageName}
-                        onChange={e => setCustomVillageName(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                      />
-                    )}
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      1. Select Village (A–Z) *
+                    </label>
+                    <select
+                      required
+                      value={selectedVillageId}
+                      onChange={e => handleVillageSelect(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
+                    >
+                      <option value="">-- Select Village (A–Z) --</option>
+                      {sortedVillages.map(v => (
+                        <option key={v.id} value={v.id}>
+                          {v.name} (₹{v.monthlyRate || v.stops?.[0]?.fee || 700}/mo)
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">2. Pickup &amp; Drop Stop</label>
-                    {availableStops.length > 0 ? (
-                      <select
-                        value={selectedStopId}
-                        onChange={e => handleStopSelect(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                      >
-                        <option value="">-- Select Stop --</option>
-                        {availableStops.map(s => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} (₹{s.fee})
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        placeholder="Type Pickup / Drop Stop"
-                        value={customStopName}
-                        onChange={e => setCustomStopName(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                      />
-                    )}
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      2. Pickup &amp; Drop Stop (A–Z) *
+                    </label>
+                    <select
+                      required={availableStops.length > 0}
+                      value={selectedStopId}
+                      onChange={e => handleStopSelect(e.target.value)}
+                      disabled={!selectedVillageId}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold disabled:bg-slate-100 disabled:text-slate-400 focus:border-slate-900 focus:outline-hidden"
+                    >
+                      <option value="">
+                        {selectedVillageId ? '-- Select Stop (A–Z) --' : '-- Select Village First --'}
+                      </option>
+                      {availableStops.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} (₹{s.fee})
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">3. Assigned Route</label>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      3. Assigned Route (Auto-Attached by Stop)
+                    </label>
                     <select
                       value={selectedRouteId}
                       onChange={e => setSelectedRouteId(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold"
                     >
                       <option value="">-- Unassigned / Select Route --</option>
-                      {availableRoutes.map(r => (
+                      {(availableRoutes.length > 0 ? availableRoutes : routes).map(r => (
                         <option key={r.id} value={r.id}>
-                          {r.code}
+                          {r.code} ({r.vehicleNumber || 'No Vehicle'})
                         </option>
                       ))}
                     </select>
                   </div>
                 </div>
+
+                {editingId && (() => {
+                  const prevMember = students.find(s => s.id === editingId);
+                  if (!prevMember) return null;
+                  const newRouteObj = routes.find(r => r.id === selectedRouteId);
+                  const newRouteCode = newRouteObj?.code || 'Unassigned';
+                  const oldRouteCode = prevMember.routeCode || 'Unassigned';
+                  const newVilName = selectedVillage?.name || customVillageName || prevMember.villageName;
+                  const newStopName =
+                    availableStops.find(s => s.id === selectedStopId)?.name ||
+                    customStopName ||
+                    prevMember.pickupDropStopName ||
+                    prevMember.pickupStopName;
+                  const oldStopName = prevMember.pickupDropStopName || prevMember.pickupStopName;
+                  if (
+                    oldRouteCode === newRouteCode &&
+                    prevMember.villageName === newVilName &&
+                    oldStopName === newStopName
+                  ) {
+                    return null;
+                  }
+                  return (
+                    <div className="p-2.5 rounded-xl bg-indigo-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="font-bold text-indigo-950">
+                        Village / Stop Route Re-Attachment Preview:
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-600">
+                          Old: <strong>{prevMember.villageName}</strong> ({oldStopName}) →{' '}
+                          <span className="font-mono font-bold">{oldRouteCode}</span>
+                        </span>
+                        <span className="text-indigo-600 font-bold">→</span>
+                        <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 text-emerald-900">
+                          New: <strong>{newVilName}</strong> ({newStopName}) →{' '}
+                          <span className="font-mono font-bold">{newRouteCode}</span>
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
                   <div>

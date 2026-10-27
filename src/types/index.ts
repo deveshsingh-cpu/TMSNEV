@@ -264,6 +264,8 @@ export interface Route {
   tripNumber: number;
   villageIds: string[];
   villageNames: string[];
+  stopIds?: string[];
+  stopNames?: string[];
   active: boolean;
   name?: string;
   stops?: TransportStop[];

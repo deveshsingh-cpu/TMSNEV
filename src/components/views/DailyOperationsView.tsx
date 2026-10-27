@@ -6,7 +6,7 @@ import {
 import {
   DailyTrip, TripAttendanceRecord, Route, StudentMember, CampusMaster, Vehicle
 } from '../../types/index.js';
-import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview, exportToCsv } from '../../utils/exportPrint.js';
 
 interface DailyOperationsViewProps {
   schoolName?: string;
@@ -108,6 +108,47 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     return true;
   });
 
+  const [calendarMonth, setCalendarMonth] = useState<string>(todayStr.slice(0, 7));
+
+  const getMembersForRoute = (route: Route | undefined): StudentMember[] => {
+    if (!route) return [];
+    return students
+      .filter((s) => {
+        if (s.transportStatus === 'Left') return false;
+        if (s.routeId === route.id || (route.code && s.routeCode === route.code)) return true;
+        if (!s.routeId && (!s.routeCode || s.routeCode === 'Unassigned')) {
+          const hasStopMatch =
+            (Array.isArray(route.stopIds) && s.pickupDropStopId && route.stopIds.includes(s.pickupDropStopId)) ||
+            (Array.isArray(route.stopNames) &&
+              s.pickupDropStopName &&
+              route.stopNames.some(
+                (sn) => sn.trim().toLowerCase() === s.pickupDropStopName.trim().toLowerCase()
+              ));
+          if (hasStopMatch) return true;
+          const routeHasSpecificStops =
+            (Array.isArray(route.stopIds) && route.stopIds.length > 0) ||
+            (Array.isArray(route.stopNames) && route.stopNames.length > 0);
+          if (!routeHasSpecificStops) {
+            const hasVillageMatch =
+              (s.villageId && Array.isArray(route.villageIds) && route.villageIds.includes(s.villageId)) ||
+              (s.villageName &&
+                Array.isArray(route.villageNames) &&
+                route.villageNames.some(
+                  (vn) => vn.trim().toLowerCase() === s.villageName.trim().toLowerCase()
+                ));
+            if (hasVillageMatch) return true;
+          }
+        }
+        return false;
+      })
+      .sort((a, b) =>
+        String(a.name || '').trim().localeCompare(String(b.name || '').trim(), undefined, {
+          sensitivity: 'base',
+          numeric: true,
+        })
+      );
+  };
+
   useEffect(() => {
     if (
       availableRoutesForDropdown.length > 0 &&
@@ -123,25 +164,56 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   const selectedRouteObj =
     routes.find((r) => r.id === selectedRouteId) || availableRoutesForDropdown[0] || routes[0];
-  const currentTrip =
-    trips.find(
-      (t) =>
-        t.date === selectedDate &&
-        (t.routeId === selectedRouteObj?.id || t.routeName === selectedRouteObj?.code)
-    ) ||
-    trips.find((t) => t.id === selectedTripId) ||
-    trips[0];
+
+  const matchedTripForRouteAndDate = trips.find(
+    (t) =>
+      t.date === selectedDate &&
+      selectedRouteObj &&
+      (t.routeId === selectedRouteObj.id || t.routeName === selectedRouteObj.code)
+  );
+
+  const currentTrip: DailyTrip | undefined =
+    matchedTripForRouteAndDate ||
+    (selectedRouteObj
+      ? {
+          id: `dt-${selectedRouteObj.id}-${selectedDate}`,
+          date: selectedDate,
+          campus: selectedRouteObj.campus,
+          routeId: selectedRouteObj.id,
+          routeName: selectedRouteObj.code,
+          vehicleId: selectedRouteObj.vehicleId,
+          vehicleNumber: selectedRouteObj.vehicleNumber,
+          driverName:
+            selectedRouteObj.driverName ||
+            vehicles.find(
+              (v) =>
+                v.id === selectedRouteObj.vehicleId ||
+                v.registrationNumber === selectedRouteObj.vehicleNumber
+            )?.assignedDriverName ||
+            'Assigned Driver',
+          helperName: selectedRouteObj.assistantName,
+          tripNumber: selectedRouteObj.tripNumber || 1,
+          shiftName: `Trip ${selectedRouteObj.tripNumber || 1} — ${selectedRouteObj.name || selectedRouteObj.code}`,
+          status: 'Ready',
+          rosterCount: 0,
+          presentCount: 0,
+          absentCount: 0,
+          mismatchCount: 0,
+          plannedStartTime: '06:40 AM',
+          plannedEndTime: '07:30 AM',
+        }
+      : undefined);
 
   useEffect(() => {
-    if (currentTrip) {
-      if (currentTrip.id !== selectedTripId) {
-        setSelectedTripId(currentTrip.id);
-        onSelectTrip(currentTrip.id);
+    if (matchedTripForRouteAndDate) {
+      if (matchedTripForRouteAndDate.id !== selectedTripId) {
+        setSelectedTripId(matchedTripForRouteAndDate.id);
+        onSelectTrip(matchedTripForRouteAndDate.id);
       }
-      if (currentTrip.inTime) setTripInTime(currentTrip.inTime);
-      if (currentTrip.outTime) setTripOutTime(currentTrip.outTime);
+      if (matchedTripForRouteAndDate.inTime) setTripInTime(matchedTripForRouteAndDate.inTime);
+      if (matchedTripForRouteAndDate.outTime) setTripOutTime(matchedTripForRouteAndDate.outTime);
     }
-  }, [currentTrip?.id]);
+  }, [matchedTripForRouteAndDate?.id]);
 
   const handleRouteDropdownChange = async (newRouteId: string) => {
     setSelectedRouteId(newRouteId);
@@ -163,19 +235,59 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   const handleDateChange = async (newDate: string) => {
     setSelectedDate(newDate);
-    if (selectedRouteId && onSelectRouteForDate) {
+    if (selectedRouteObj?.id && onSelectRouteForDate) {
       setIsLoadingRouteTrip(true);
       try {
-        await onSelectRouteForDate(newDate, selectedRouteId);
+        await onSelectRouteForDate(newDate, selectedRouteObj.id);
       } finally {
         setIsLoadingRouteTrip(false);
       }
     }
   };
 
-  const tripAttendanceList = currentTrip
-    ? attendanceRecords.filter((a) => a.tripId === currentTrip.id)
-    : attendanceRecords;
+  const boardRouteMembers = getMembersForRoute(selectedRouteObj);
+  const effectiveTripId = currentTrip?.id || (selectedRouteObj ? `dt-${selectedRouteObj.id}-${selectedDate}` : '');
+
+  const tripAttendanceList: TripAttendanceRecord[] = boardRouteMembers.map((stu) => {
+    const existingRec = attendanceRecords.find(
+      (a) =>
+        a.studentId === stu.id &&
+        (a.tripId === effectiveTripId ||
+          (a.date === selectedDate &&
+            (!matchedTripForRouteAndDate || a.tripId === matchedTripForRouteAndDate.id)))
+    );
+    const stopLabel = stu.pickupDropStopName
+      ? stu.villageName && !stu.pickupDropStopName.toLowerCase().includes(stu.villageName.toLowerCase())
+        ? `${stu.pickupDropStopName} (${stu.villageName})`
+        : stu.pickupDropStopName
+      : stu.villageName || '—';
+
+    if (existingRec) {
+      return {
+        ...existingRec,
+        studentName: stu.name,
+        admissionNo: stu.admissionNo,
+        classSection: `${stu.class}-${stu.section}`,
+        stopName: stopLabel,
+        transportStatus: stu.transportStatus,
+      };
+    }
+
+    return {
+      id: `att-${effectiveTripId}-${stu.id}`,
+      tripId: effectiveTripId,
+      date: selectedDate,
+      studentId: stu.id,
+      admissionNo: stu.admissionNo,
+      studentName: stu.name,
+      classSection: `${stu.class}-${stu.section}`,
+      stopName: stopLabel,
+      transportStatus: stu.transportStatus,
+      driverStatus: 'Pending',
+      assistantStatus: 'Pending',
+      reconciliationStatus: 'Assistant_Pending',
+    };
+  });
 
   const presentCount = tripAttendanceList.filter((a) => a.assistantStatus === 'Present').length;
   const absentCount = tripAttendanceList.filter((a) => a.assistantStatus === 'Absent').length;
@@ -273,11 +385,267 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   const weekDates = getSelectedWeekDates();
   const selectedPackRoute = routes.find((r) => r.id === packRouteId) || routes[0];
-  const routeRosterMembers = students.filter(
-    (s) =>
-      (s.routeId === selectedPackRoute?.id || s.routeCode === selectedPackRoute?.code) &&
-      s.transportStatus !== 'Left'
-  );
+  const routeRosterMembers = getMembersForRoute(selectedPackRoute);
+
+  const handlePrintRouteList = () => {
+    if (selectedPackRoute) {
+      onOpenPrintPack(
+        selectedPackRoute.id,
+        `Trip ${selectedPackRoute.tripNumber || 1}`,
+        packWeekStart,
+        packWeekEnd
+      ).catch(() => {});
+    }
+
+    const escapeHtml = (val: string | number | undefined | null): string => {
+      if (val === undefined || val === null) return '';
+      return String(val)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    };
+
+    const routeTitle = selectedPackRoute
+      ? `Route Member List: ${selectedPackRoute.code} — ${selectedPackRoute.name}`
+      : 'Route Member List';
+
+    const subtitleText = selectedPackRoute
+      ? `Vehicle: ${selectedPackRoute.vehicleNumber || '—'} • Trip ${selectedPackRoute.tripNumber || 1} • Campus: ${getCampusLabel(selectedPackRoute.campus || '')}`
+      : '';
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(routeTitle)}</title>
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #0f172a;
+      margin: 0;
+      padding: 14px;
+      font-size: 11px;
+      background: #fff;
+    }
+    .header {
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .school-name {
+      font-size: 16px;
+      font-weight: 800;
+      text-transform: uppercase;
+      color: #334155;
+      margin-bottom: 2px;
+    }
+    .report-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: #0f172a;
+      margin: 0 0 4px 0;
+    }
+    .sub-meta {
+      font-size: 11px;
+      color: #475569;
+    }
+    .right-meta {
+      text-align: right;
+      font-size: 11px;
+      color: #334155;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      border: 1px solid #cbd5e1;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: middle;
+    }
+    th {
+      background-color: #f1f5f9;
+      font-weight: 700;
+      font-size: 10px;
+      color: #334155;
+    }
+    .suspended-row td {
+      background-color: #fff1f2;
+      color: #dc2626;
+    }
+    .dp-img {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      border: 1px solid #cbd5e1;
+      display: block;
+      margin: 0 auto;
+    }
+    .dp-fallback {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: #e2e8f0;
+      color: #334155;
+      font-weight: 700;
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto;
+      text-align: center;
+      line-height: 28px;
+    }
+    .badge-active {
+      background: #d1fae5;
+      color: #065f46;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 700;
+      font-size: 9px;
+      display: inline-block;
+    }
+    .badge-suspended {
+      background: #fee2e2;
+      color: #b91c1c;
+      border: 1px solid #fca5a5;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 700;
+      font-size: 9px;
+      display: inline-block;
+    }
+    .footer {
+      margin-top: 18px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #475569;
+      border-top: 1px solid #cbd5e1;
+      padding-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      ${schoolName ? `<div class="school-name">${escapeHtml(schoolName)}</div>` : ''}
+      <div class="report-title">${escapeHtml(routeTitle)}</div>
+      <div class="sub-meta">
+        Vehicle: <strong>${escapeHtml(selectedPackRoute?.vehicleNumber || '—')}</strong> •
+        Trip: <strong>Trip ${escapeHtml(selectedPackRoute?.tripNumber || 1)}</strong> •
+        Campus: <strong>${escapeHtml(getCampusLabel(selectedPackRoute?.campus || ''))}</strong>
+        ${selectedPackRoute?.driverName ? ` • Driver: <strong>${escapeHtml(selectedPackRoute.driverName)}</strong>` : ''}
+        ${selectedPackRoute?.assistantName ? ` • Assistant: <strong>${escapeHtml(selectedPackRoute.assistantName)}</strong>` : ''}
+      </div>
+    </div>
+    <div class="right-meta">
+      <div>Period: <strong>${escapeHtml(packWeekStart)}</strong> to <strong>${escapeHtml(packWeekEnd)}</strong></div>
+      <div style="margin-top:3px;font-weight:700;">Total Members: ${routeRosterMembers.length}</div>
+      <div style="font-size:9px;color:#64748b;margin-top:2px;">Printed: ${new Date().toLocaleString()}</div>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:28px;text-align:center;">#</th>
+        <th style="width:38px;text-align:center;">DP</th>
+        <th>Member Name &amp; ID</th>
+        <th>Type / Class</th>
+        <th>Pickup &amp; Drop Stop</th>
+        <th>Status</th>
+        ${weekDates
+          .map(
+            (dt) =>
+              `<th style="text-align:center;font-family:monospace;font-size:10px;">
+                <div>${escapeHtml(dt)}</div>
+                <div style="font-size:8px;color:#64748b;font-weight:normal;">IN / OUT</div>
+              </th>`
+          )
+          .join('')}
+      </tr>
+    </thead>
+    <tbody>
+      ${
+        routeRosterMembers.length === 0
+          ? `<tr><td colspan="${6 + weekDates.length}" style="text-align:center;padding:24px;color:#94a3b8;">No active or suspended members on this route.</td></tr>`
+          : routeRosterMembers
+              .map((m, idx) => {
+                const isSuspended = m.transportStatus === 'Suspended';
+                const dpCell = m.profilePhoto
+                  ? `<img src="${escapeHtml(m.profilePhoto)}" alt="${escapeHtml(m.name)}" class="dp-img" />`
+                  : `<div class="dp-fallback">${escapeHtml(m.name.slice(0, 2).toUpperCase())}</div>`;
+                return `<tr class="${isSuspended ? 'suspended-row' : ''}">
+                  <td style="text-align:center;font-family:monospace;">${idx + 1}</td>
+                  <td style="text-align:center;">${dpCell}</td>
+                  <td>
+                    <div style="font-weight:700;">${escapeHtml(m.name)}</div>
+                    <div style="font-size:9px;font-family:monospace;color:${isSuspended ? '#ef4444' : '#64748b'};">${escapeHtml(m.admissionNo)}</div>
+                  </td>
+                  <td>${escapeHtml(m.memberType)} (${escapeHtml(m.class)}-${escapeHtml(m.section)})</td>
+                  <td>${escapeHtml(m.pickupDropStopName)} (${escapeHtml(m.villageName)})</td>
+                  <td>
+                    <span class="${isSuspended ? 'badge-suspended' : 'badge-active'}">${escapeHtml(m.transportStatus)}</span>
+                  </td>
+                  ${weekDates
+                    .map(
+                      () =>
+                        `<td style="text-align:center;font-size:11px;color:${isSuspended ? '#dc2626' : '#64748b'};font-weight:${isSuspended ? '700' : '400'};">
+                          ${isSuspended ? 'SUSPENDED' : '☐ / ☐'}
+                        </td>`
+                    )
+                    .join('')}
+                </tr>`;
+              })
+              .join('')
+      }
+    </tbody>
+  </table>
+  <div class="footer">
+    <div>Driver Signature: _______________________</div>
+    <div>Bus Assistant Signature: _______________________</div>
+    <div>Transport Incharge: _______________________</div>
+  </div>
+</body>
+</html>`;
+
+    openHtmlPrintPreview({
+      title: routeTitle,
+      subtitle: `${subtitleText} • Period: ${packWeekStart} to ${packWeekEnd} (${routeRosterMembers.length} members)`,
+      html,
+      filename: `route_list_${selectedPackRoute?.code || 'route'}_${packWeekStart}`,
+    });
+  };
+
+  const handleExportRouteListCsv = () => {
+    const cols = [
+      { header: 'S.No', accessor: (_: StudentMember, i: number) => i + 1 },
+      { header: 'Member Name', accessor: (m: StudentMember) => m.name },
+      { header: 'Admission / Staff ID', accessor: (m: StudentMember) => m.admissionNo },
+      { header: 'Gender', accessor: (m: StudentMember) => m.gender },
+      { header: 'Type / Class', accessor: (m: StudentMember) => `${m.memberType} (${m.class}-${m.section})` },
+      { header: 'Pickup & Drop Stop', accessor: (m: StudentMember) => `${m.pickupDropStopName} (${m.villageName})` },
+      { header: 'Mobile', accessor: (m: StudentMember) => m.mobile },
+      { header: 'Status', accessor: (m: StudentMember) => m.transportStatus },
+      ...weekDates.map((dt) => ({
+        header: `${dt} (IN / OUT)`,
+        accessor: (m: StudentMember) => (m.transportStatus === 'Suspended' ? 'SUSPENDED' : '[ ] / [ ]'),
+      })),
+    ];
+    exportToCsv(
+      `route_member_list_${selectedPackRoute?.code || 'route'}_${packWeekStart}`,
+      cols,
+      routeRosterMembers
+    );
+  };
 
   // --- Transport Timings & Attendance Summary Sheet Rows (per Vehicle, 1st & 2nd Trip) ---
   const summaryRows = vehicles.map((veh, idx) => {
@@ -523,6 +891,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
           {activeSubView === 'calendar' && (
             <>
+              <input
+                type="month"
+                value={calendarMonth}
+                onChange={(e) => setCalendarMonth(e.target.value)}
+                className="p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800"
+                title="Select Attendance Month"
+              />
               <select
                 value={selectedRouteObj?.id || ''}
                 onChange={(e) => handleRouteDropdownChange(e.target.value)}
@@ -536,14 +911,10 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               </select>
 
               <PrintExportToolbar
-                title={`Monthly Attendance Register — ${selectedRouteObj?.code || 'Route'}`}
-                filename="monthly_attendance_calendar"
+                title={`Monthly Attendance Register (${calendarMonth}) — ${selectedRouteObj?.code || 'Route'}`}
+                filename={`monthly_attendance_${calendarMonth}`}
                 schoolName={schoolName}
-                filteredData={students.filter(
-                  (s) =>
-                    s.transportStatus !== 'Left' &&
-                    (!selectedRouteObj || s.routeId === selectedRouteObj.id || s.routeCode === selectedRouteObj.code)
-                )}
+                filteredData={boardRouteMembers}
                 allData={students}
                 columns={[
                   { header: 'Admission No', accessor: (s) => s.admissionNo },
@@ -927,101 +1298,135 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       {/* ===================================================================== */}
       {/* SUB-VIEW 1B: MONTHLY CALENDAR VIEW WITH P, A, L, H SHOWN              */}
       {/* ===================================================================== */}
-      {activeSubView === 'calendar' && (
-        <div className="space-y-4">
+      {activeSubView === 'calendar' && (() => {
+        const [calYear, calMon] = (calendarMonth || todayStr.slice(0, 7)).split('-').map(Number);
+        const daysInMonth = new Date(calYear || 2026, calMon || 10, 0).getDate() || 30;
+        const dayNumbers = Array.from({ length: daysInMonth }, (_, idx) => idx + 1);
 
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-[11px]">
-                <thead>
-                  <tr className="bg-slate-900 text-white font-bold">
-                    <th className="py-2.5 px-3 sticky left-0 bg-slate-900 z-10">Member Name</th>
-                    <th className="py-2.5 px-2">Stop</th>
-                    {Array.from({ length: 15 }, (_, idx) => idx + 1).map((dayNum) => (
-                      <th key={dayNum} className="py-2.5 px-1.5 text-center font-mono">
-                        {String(dayNum).padStart(2, '0')}
-                      </th>
-                    ))}
-                    <th className="py-2.5 px-2 text-center bg-emerald-950 text-emerald-300">P</th>
-                    <th className="py-2.5 px-2 text-center bg-rose-950 text-rose-300">A</th>
-                    <th className="py-2.5 px-2 text-center bg-amber-950 text-amber-300">L</th>
-                    <th className="py-2.5 px-2 text-center bg-indigo-950 text-indigo-300">H</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {students
-                    .filter(
-                      (s) =>
-                        s.transportStatus !== 'Left' &&
-                        (!selectedRouteObj || s.routeId === selectedRouteObj.id || s.routeCode === selectedRouteObj.code)
-                    )
-                    .map((stu, sIdx) => {
-                      let pCnt = 0;
-                      let aCnt = 0;
-                      let lCnt = 0;
-                      let hCnt = 0;
-                      const todayDay = Number(selectedDate.split('-')[2] || 15);
-                      const recToday = tripAttendanceList.find((r) => r.studentId === stu.id);
+        return (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-[11px]">
+                  <thead>
+                    <tr className="bg-slate-900 text-white font-bold">
+                      <th className="py-2.5 px-3 sticky left-0 bg-slate-900 z-10">Member Name</th>
+                      <th className="py-2.5 px-2">Stop</th>
+                      {dayNumbers.map((dayNum) => (
+                        <th key={dayNum} className="py-2.5 px-1.5 text-center font-mono">
+                          {String(dayNum).padStart(2, '0')}
+                        </th>
+                      ))}
+                      <th className="py-2.5 px-2 text-center bg-emerald-950 text-emerald-300">P</th>
+                      <th className="py-2.5 px-2 text-center bg-rose-950 text-rose-300">A</th>
+                      <th className="py-2.5 px-2 text-center bg-amber-950 text-amber-300">L</th>
+                      <th className="py-2.5 px-2 text-center bg-indigo-950 text-indigo-300">H</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {boardRouteMembers.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={6 + dayNumbers.length}
+                          className="py-8 text-center text-slate-400"
+                        >
+                          No members assigned to this route.
+                        </td>
+                      </tr>
+                    ) : (
+                      boardRouteMembers.map((stu) => {
+                        let pCnt = 0;
+                        let aCnt = 0;
+                        let lCnt = 0;
+                        let hCnt = 0;
 
-                      const cells = Array.from({ length: 15 }, (_, idx) => {
-                        const d = idx + 1;
-                        let code: 'P' | 'A' | 'L' | 'H' = 'P';
-                        if (d === todayDay && recToday) {
-                          if (recToday.assistantStatus === 'Absent') code = 'A';
-                          else if (recToday.assistantStatus === 'Leave') code = 'L';
-                          else if (recToday.assistantStatus === 'Holiday') code = 'H';
-                          else code = 'P';
-                        } else if (d % 7 === 0) {
-                          code = 'H';
-                        } else if ((sIdx + d) % 13 === 0) {
-                          code = 'L';
-                        } else if ((sIdx + d) % 19 === 0) {
-                          code = 'A';
-                        }
-                        if (code === 'P') pCnt++;
-                        if (code === 'A') aCnt++;
-                        if (code === 'L') lCnt++;
-                        if (code === 'H') hCnt++;
-                        return { d, code };
-                      });
+                        const cells = dayNumbers.map((d) => {
+                          const dateStr = `${calendarMonth}-${String(d).padStart(2, '0')}`;
+                          const recForDay = attendanceRecords.find(
+                            (r) =>
+                              r.studentId === stu.id &&
+                              (r.date === dateStr || (r.tripId && r.tripId.endsWith(`-${dateStr}`)))
+                          );
+                          const markedStatus =
+                            recForDay?.resolvedStatus ||
+                            (recForDay?.assistantStatus && recForDay.assistantStatus !== 'Pending'
+                              ? recForDay.assistantStatus
+                              : recForDay?.driverStatus && recForDay.driverStatus !== 'Pending'
+                              ? recForDay.driverStatus
+                              : undefined);
 
-                      return (
-                        <tr key={stu.id} className="hover:bg-slate-50">
-                          <td className="py-2 px-3 font-bold text-slate-900 sticky left-0 bg-white">
-                            {stu.name}
-                            <span className="block text-[9px] font-mono text-slate-400">{stu.admissionNo}</span>
-                          </td>
-                          <td className="py-2 px-2 text-slate-600">{stu.pickupDropStopName || stu.morningStopName}</td>
-                          {cells.map(({ d, code }) => (
-                            <td key={d} className="py-2 px-1 text-center font-mono font-bold">
-                              <span
-                                className={`inline-flex items-center justify-center w-5 h-5 rounded text-[10px] ${
-                                  code === 'P'
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : code === 'A'
-                                    ? 'bg-rose-100 text-rose-800'
-                                    : code === 'L'
-                                    ? 'bg-amber-100 text-amber-900'
-                                    : 'bg-indigo-100 text-indigo-800'
-                                }`}
-                              >
-                                {code}
+                          let code: 'P' | 'A' | 'L' | 'H' | null = null;
+                          if (markedStatus === 'Present') {
+                            code = 'P';
+                            pCnt++;
+                          } else if (markedStatus === 'Absent') {
+                            code = 'A';
+                            aCnt++;
+                          } else if (markedStatus === 'Leave') {
+                            code = 'L';
+                            lCnt++;
+                          } else if (markedStatus === 'Holiday') {
+                            code = 'H';
+                            hCnt++;
+                          }
+                          return { d, code };
+                        });
+
+                        return (
+                          <tr key={stu.id} className="hover:bg-slate-50">
+                            <td className="py-2 px-3 font-bold text-slate-900 sticky left-0 bg-white">
+                              {stu.name}
+                              <span className="block text-[9px] font-mono text-slate-400">
+                                {stu.admissionNo}
                               </span>
                             </td>
-                          ))}
-                          <td className="py-2 px-2 text-center font-mono font-bold text-emerald-700 bg-emerald-50/50">{pCnt}</td>
-                          <td className="py-2 px-2 text-center font-mono font-bold text-rose-700 bg-rose-50/50">{aCnt}</td>
-                          <td className="py-2 px-2 text-center font-mono font-bold text-amber-700 bg-amber-50/50">{lCnt}</td>
-                          <td className="py-2 px-2 text-center font-mono font-bold text-indigo-700 bg-indigo-50/50">{hCnt}</td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
+                            <td className="py-2 px-2 text-slate-600 whitespace-nowrap">
+                              {stu.pickupDropStopName || stu.morningStopName || stu.villageName}
+                            </td>
+                            {cells.map(({ d, code }) => (
+                              <td key={d} className="py-2 px-1 text-center font-mono font-bold">
+                                {code ? (
+                                  <span
+                                    className={`inline-flex items-center justify-center w-5 h-5 rounded text-[10px] ${
+                                      code === 'P'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : code === 'A'
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : code === 'L'
+                                        ? 'bg-amber-100 text-amber-900'
+                                        : 'bg-indigo-100 text-indigo-800'
+                                    }`}
+                                  >
+                                    {code}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300 font-normal">—</span>
+                                )}
+                              </td>
+                            ))}
+                            <td className="py-2 px-2 text-center font-mono font-bold text-emerald-700 bg-emerald-50/50">
+                              {pCnt}
+                            </td>
+                            <td className="py-2 px-2 text-center font-mono font-bold text-rose-700 bg-rose-50/50">
+                              {aCnt}
+                            </td>
+                            <td className="py-2 px-2 text-center font-mono font-bold text-amber-700 bg-amber-50/50">
+                              {lCnt}
+                            </td>
+                            <td className="py-2 px-2 text-center font-mono font-bold text-indigo-700 bg-indigo-50/50">
+                              {hCnt}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ===================================================================== */}
       {/* SUB-VIEW 2: ATTENDANCE SUMMARY SHEET (TRANSPORT TIMINGS FORMAT)       */}
@@ -1349,21 +1754,23 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 />
               </div>
 
-              <div>
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    onOpenPrintPack(
-                      selectedPackRoute?.id || '',
-                      `Trip ${selectedPackRoute?.tripNumber || 1}`,
-                      packWeekStart,
-                      packWeekEnd
-                    )
-                  }
-                  className="w-full py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-2 cursor-pointer"
+                  onClick={handlePrintRouteList}
+                  className="flex-1 py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Printer className="w-4 h-4" />
                   <span>Print Route List</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportRouteListCsv}
+                  className="py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                  title="Export Route Member List to CSV"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-amber-400" />
+                  <span>CSV</span>
                 </button>
               </div>
             </div>
