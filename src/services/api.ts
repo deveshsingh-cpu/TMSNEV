@@ -392,6 +392,17 @@ export const api = {
     const res = await fetch(`/api/masters/routes/${id}`, { method: 'DELETE' });
     return parseApiJson(res, 'Cannot delete route: linked dependencies exist.');
   },
+  updateRouteTimings: async (
+    id: string,
+    payload: { departureTime?: string; arrivalTime?: string }
+  ): Promise<Route> => {
+    const res = await fetch(`/api/routes/${encodeURIComponent(id)}/timings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return parseApiJson(res, 'Failed to update route schedule timings');
+  },
 
   // Members (Students & Staff)
   getStudents: async (params?: { campus?: string; status?: string; query?: string }): Promise<StudentMember[]> => {
@@ -467,6 +478,28 @@ export const api = {
       throw new Error(err.error || 'Failed to review suspension request');
     }
     return res.json();
+  },
+  setStudentPreviousDues: async (
+    id: string,
+    amount: number,
+    remarks?: string
+  ): Promise<StudentMember> => {
+    const res = await fetch(`/api/students/${encodeURIComponent(id)}/previous-dues`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount, remarks }),
+    });
+    return parseApiJson(res, 'Failed to save previous dues');
+  },
+  bulkSetPreviousDues: async (
+    entries: { studentId: string; amount: number; remarks?: string }[]
+  ): Promise<{ updatedCount: number; totalPreviousDuesAdded: number }> => {
+    const res = await fetch('/api/students/previous-dues/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries }),
+    });
+    return parseApiJson(res, 'Failed to save bulk previous dues');
   },
 
   // Candidate Resumes & Employees
@@ -990,11 +1023,16 @@ export const api = {
     const res = await fetch(`/api/trips/${tripId}/attendance`);
     return res.json();
   },
-  markAttendance: async (recordId: string, source: 'driver' | 'assistant', value: string): Promise<TripAttendanceRecord> => {
+  markAttendance: async (
+    recordId: string,
+    source: 'driver' | 'assistant',
+    value: string,
+    reason?: string
+  ): Promise<TripAttendanceRecord> => {
     const res = await fetch(`/api/attendance/${recordId}/mark`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source, value }),
+      body: JSON.stringify({ source, value, reason }),
     });
     return res.json();
   },

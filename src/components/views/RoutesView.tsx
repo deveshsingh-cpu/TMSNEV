@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { MapPin, Bus, Filter, Search, X } from 'lucide-react';
-import { Route, ScheduledService, Village, TransportStop, Vehicle, CampusMaster } from '../../types/index.js';
+import { MapPin, Bus, Filter, Search, X, ChevronDown, ChevronUp, Users, Clock, Edit2, Check } from 'lucide-react';
+import { Route, ScheduledService, Village, TransportStop, Vehicle, CampusMaster, StudentMember } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { api } from '../../services/api.js';
 
 interface RoutesViewProps {
   schoolName?: string;
@@ -11,6 +12,7 @@ interface RoutesViewProps {
   villages: Village[];
   stops: TransportStop[];
   vehicles: Vehicle[];
+  students?: StudentMember[];
   initialSubTab?: string;
 }
 
@@ -22,6 +24,7 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
   villages,
   stops,
   vehicles,
+  students = [],
   initialSubTab = 'routes',
 }) => {
   const [activeTab, setActiveTab] = useState<'routes' | 'multi_trips' | 'villages_stops'>(
@@ -40,6 +43,40 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
 
   const [selectedRoute, setSelectedRoute] = useState<Route | null>(routes[0] || null);
   const [campusFilter, setCampusFilter] = useState<string>('all');
+  const [routeVehicleFilter, setRouteVehicleFilter] = useState<string>('all');
+
+  // Expand / collapse state for village member lists under any route (key: `${routeId}__${villageName}`)
+  const [expandedRouteVillages, setExpandedRouteVillages] = useState<Record<string, boolean>>({});
+
+  // Expand / collapse state for member lists in Vehicle Schedule (key: service.id)
+  const [expandedServiceMembers, setExpandedServiceMembers] = useState<Record<string, boolean>>({});
+
+  // Editable timings state in Vehicle Schedule
+  const [editingTimingServiceId, setEditingTimingServiceId] = useState<string | null>(null);
+  const [editDepartureTime, setEditDepartureTime] = useState<string>('');
+  const [editArrivalTime, setEditArrivalTime] = useState<string>('');
+  const [savingTiming, setSavingTiming] = useState<boolean>(false);
+
+  const toggleRouteVillageExpand = (routeId: string, villageName: string) => {
+    const key = `${routeId}__${villageName.trim().toLowerCase()}`;
+    setExpandedRouteVillages(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const isRouteVillageExpanded = (routeId: string, villageName: string) => {
+    const key = `${routeId}__${villageName.trim().toLowerCase()}`;
+    return Boolean(expandedRouteVillages[key]);
+  };
+
+  const getMembersForRouteAndVillage = (route: Route, villageName?: string) => {
+    const vNorm = (villageName || '').trim().toLowerCase();
+    return students.filter(s => {
+      if (s.transportStatus === 'Left') return false;
+      const matchesRoute = s.routeId === route.id || s.routeCode === route.code;
+      if (!matchesRoute) return false;
+      if (!vNorm) return true;
+      return (s.villageName || '').trim().toLowerCase() === vNorm;
+    });
+  };
 
   // Village selection for dependent Transport Stops view
   const [selectedVillageId, setSelectedVillageId] = useState<string>(villages[0]?.id || '');
@@ -64,8 +101,26 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
 
   const filteredRoutes = routes.filter((r) => {
     if (campusFilter !== 'all' && r.campus !== campusFilter) return false;
+    if (
+      routeVehicleFilter !== 'all' &&
+      r.vehicleId !== routeVehicleFilter &&
+      r.vehicleNumber !== routeVehicleFilter
+    ) {
+      return false;
+    }
     return true;
   });
+
+  useEffect(() => {
+    if (filteredRoutes.length > 0 && (!selectedRoute || !filteredRoutes.some(r => r.id === selectedRoute.id))) {
+      setSelectedRoute(filteredRoutes[0]);
+    } else if (filteredRoutes.length === 0) {
+      setSelectedRoute(null);
+    } else if (selectedRoute) {
+      const updated = filteredRoutes.find(r => r.id === selectedRoute.id);
+      if (updated && updated !== selectedRoute) setSelectedRoute(updated);
+    }
+  }, [routes, campusFilter, routeVehicleFilter]);
 
   const sortedVillages = [...villages]
     .map((v) => ({
@@ -133,9 +188,38 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           {activeTab === 'routes' && (
             <>
+              <select
+                value={campusFilter}
+                onChange={(e) => setCampusFilter(e.target.value)}
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 text-slate-800"
+              >
+                <option value="all">Campus: All</option>
+                {campuses.map((c) => (
+                  <option key={c.id} value={c.code}>
+                    {c.name} ({c.code})
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={routeVehicleFilter}
+                onChange={(e) => setRouteVehicleFilter(e.target.value)}
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 text-slate-800"
+              >
+                <option value="all">Vehicle: All</option>
+                {vehicles.map((v) => (
+                  <option key={v.id} value={v.registrationNumber}>
+                    {v.registrationNumber} {v.vehicleCode ? `(${v.vehicleCode})` : ''}
+                  </option>
+                ))}
+              </select>
+
               <FilterPopover
-                activeCount={campusFilter !== 'all' ? 1 : 0}
-                onReset={() => setCampusFilter('all')}
+                activeCount={(campusFilter !== 'all' ? 1 : 0) + (routeVehicleFilter !== 'all' ? 1 : 0)}
+                onReset={() => {
+                  setCampusFilter('all');
+                  setRouteVehicleFilter('all');
+                }}
               >
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
@@ -154,6 +238,23 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                     ))}
                   </select>
                 </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                    Vehicle
+                  </label>
+                  <select
+                    value={routeVehicleFilter}
+                    onChange={(e) => setRouteVehicleFilter(e.target.value)}
+                    className="w-full p-2 border border-slate-200 rounded-xl text-xs font-medium bg-slate-50"
+                  >
+                    <option value="all">All Vehicles</option>
+                    {vehicles.map((v) => (
+                      <option key={v.id} value={v.registrationNumber}>
+                        {v.registrationNumber}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </FilterPopover>
 
               <PrintExportToolbar
@@ -162,8 +263,15 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                 schoolName={schoolName}
                 filteredData={filteredRoutes}
                 allData={routes}
-                hasActiveFilters={campusFilter !== 'all'}
-                filterSummary={campusFilter !== 'all' ? `Campus: ${getCampusLabel(campusFilter)}` : undefined}
+                hasActiveFilters={campusFilter !== 'all' || routeVehicleFilter !== 'all'}
+                filterSummary={
+                  [
+                    campusFilter !== 'all' ? `Campus: ${getCampusLabel(campusFilter)}` : '',
+                    routeVehicleFilter !== 'all' ? `Vehicle: ${routeVehicleFilter}` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' | ') || undefined
+                }
                 columns={[
                   { header: 'Route Code', accessor: (r) => r.code },
                   { header: 'Route Name', accessor: (r) => r.name || r.code },
@@ -322,10 +430,78 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                             {getCampusLabel(r.campus)}
                           </span>
                         </div>
-                        <div className="font-bold text-slate-900 mt-1">{r.name || r.code}</div>
-                        <div className="text-slate-500 text-[11px] mt-1">
-                          {rStops.length} {rStops.length === 1 ? 'Stop' : 'Stops'} ({r.villageNames?.join(', ') || 'Assigned'})
+                        <div className="font-bold text-slate-900 mt-1 flex items-center justify-between">
+                          <span>{r.name || r.code}</span>
+                          <span className="font-mono text-[10px] text-slate-500">{r.vehicleNumber}</span>
                         </div>
+                        <div className="text-slate-500 text-[11px] mt-1.5 flex flex-wrap items-center gap-1">
+                          <span className="font-semibold text-slate-600">{rStops.length} Stop(s):</span>
+                          {(r.villageNames || []).map((vName) => {
+                            const vilMembers = getMembersForRouteAndVillage(r, vName);
+                            const isExp = isRouteVillageExpanded(r.id, vName);
+                            return (
+                              <button
+                                key={vName}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedRoute(r);
+                                  toggleRouteVillageExpand(r.id, vName);
+                                }}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border cursor-pointer transition-colors ${
+                                  isExp
+                                    ? 'bg-slate-900 text-amber-400 border-slate-900'
+                                    : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50'
+                                }`}
+                                title="Click to expand/collapse members in this village"
+                              >
+                                <span>{vName} ({vilMembers.length})</span>
+                                {isExp ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Inline Expandable Village Member Lists on Left Route Card */}
+                        {(r.villageNames || []).map((vName) => {
+                          if (!isRouteVillageExpanded(r.id, vName)) return null;
+                          const vilMembers = getMembersForRouteAndVillage(r, vName);
+                          return (
+                            <div
+                              key={vName}
+                              onClick={(e) => e.stopPropagation()}
+                              className="mt-2 p-2.5 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-1.5"
+                            >
+                              <div className="flex items-center justify-between border-b border-slate-100 pb-1">
+                                <span className="text-[11px] font-bold text-slate-900">
+                                  {vName} — {vilMembers.length} Member(s)
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleRouteVillageExpand(r.id, vName)}
+                                  className="text-[10px] font-bold text-slate-400 hover:text-slate-700 cursor-pointer"
+                                >
+                                  Collapse
+                                </button>
+                              </div>
+                              {vilMembers.length === 0 ? (
+                                <div className="text-[11px] text-slate-400 py-1">No active members in {vName} on {r.code}.</div>
+                              ) : (
+                                <div className="max-h-44 overflow-y-auto divide-y divide-slate-100">
+                                  {vilMembers.map((m, mIdx) => (
+                                    <div key={m.id} className="py-1 flex items-center justify-between gap-2 text-[11px]">
+                                      <div>
+                                        <span className="font-bold text-slate-900">{mIdx + 1}. {m.name}</span>
+                                        <span className="text-slate-500 font-mono text-[10px] ml-1">({m.admissionNo})</span>
+                                      </div>
+                                      <span className="text-slate-600 font-semibold shrink-0">{m.class}-{m.section}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     );
                   })
@@ -333,22 +509,107 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
               </div>
             </div>
 
-            {/* Right: Ordered Stops Sequence */}
+            {/* Right: Ordered Stops Sequence & Expandable Villages */}
             <div className="md:col-span-2 bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
                     {selectedRoute ? `${selectedRoute.code} — ${selectedRoute.name || ''}` : 'Select a Route'}
                   </h3>
                   {selectedRoute && (
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Vehicle: <strong>{selectedRoute.vehicleNumber}</strong> • Trip {selectedRoute.tripNumber} • Villages: {selectedRoute.villageNames.join(', ')}
+                      Vehicle: <strong>{selectedRoute.vehicleNumber}</strong> • Campus: <strong>{getCampusLabel(selectedRoute.campus)}</strong> • Trip {selectedRoute.tripNumber}
                     </p>
                   )}
                 </div>
+                {selectedRoute && (
+                  <span className="px-3 py-1 rounded-xl bg-indigo-50 text-indigo-800 border border-indigo-200 text-xs font-bold">
+                    Total Route Members: {getMembersForRouteAndVillage(selectedRoute).length}
+                  </span>
+                )}
               </div>
 
-              <div className="space-y-3">
+              {/* Clickable Villages under Selected Route (Expand / Collapse Members) */}
+              {selectedRoute && (selectedRoute.villageNames || []).length > 0 && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Villages Under {selectedRoute.code} (Click Village Name to Expand / Collapse Members)
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {(selectedRoute.villageNames || []).map((vName) => {
+                      const isExp = isRouteVillageExpanded(selectedRoute.id, vName);
+                      const vilMembers = getMembersForRouteAndVillage(selectedRoute, vName);
+                      return (
+                        <div key={vName} className="rounded-xl border border-slate-200 overflow-hidden bg-slate-50/60">
+                          <button
+                            type="button"
+                            onClick={() => toggleRouteVillageExpand(selectedRoute.id, vName)}
+                            className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-amber-50/60 transition-colors cursor-pointer"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <MapPin className="w-4 h-4 text-amber-600 shrink-0" />
+                              <span className="font-bold text-slate-900 text-sm">{vName}</span>
+                              <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-bold text-[11px]">
+                                {vilMembers.length} {vilMembers.length === 1 ? 'Member' : 'Members'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-700">
+                              <span>{isExp ? 'Hide Members' : 'Show Members'}</span>
+                              {isExp ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                            </div>
+                          </button>
+
+                          {isExp && (
+                            <div className="bg-white border-t border-slate-200 p-3">
+                              {vilMembers.length === 0 ? (
+                                <p className="text-xs text-slate-400 text-center py-3">
+                                  No active members assigned to {vName} under {selectedRoute.code}.
+                                </p>
+                              ) : (
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-left border-collapse text-xs">
+                                    <thead>
+                                      <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase">
+                                        <th className="py-2 px-2.5">#</th>
+                                        <th className="py-2 px-2.5">Admission No</th>
+                                        <th className="py-2 px-2.5">Member Name</th>
+                                        <th className="py-2 px-2.5">Class &amp; Sec</th>
+                                        <th className="py-2 px-2.5">Father / Guardian</th>
+                                        <th className="py-2 px-2.5">Stop</th>
+                                        <th className="py-2 px-2.5">Mobile</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                      {vilMembers.map((m, idx) => (
+                                        <tr key={m.id} className="hover:bg-slate-50">
+                                          <td className="py-2 px-2.5 font-mono text-slate-400">{idx + 1}</td>
+                                          <td className="py-2 px-2.5 font-mono font-bold text-slate-700">{m.admissionNo}</td>
+                                          <td className="py-2 px-2.5 font-bold text-slate-900">{m.name}</td>
+                                          <td className="py-2 px-2.5 font-semibold text-slate-700">{m.class}-{m.section}</td>
+                                          <td className="py-2 px-2.5 text-slate-600">{m.fatherName || '—'}</td>
+                                          <td className="py-2 px-2.5 text-emerald-700 font-semibold">{m.pickupDropStopName || m.villageName}</td>
+                                          <td className="py-2 px-2.5 font-mono text-slate-600">{m.mobile || '—'}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-3 pt-2">
+                <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Ordered Transport Stops Sequence
+                </h4>
                 {(() => {
                   const selStopIds = new Set(selectedRoute?.stopIds || []);
                   const selStopNames = new Set((selectedRoute?.stopNames || []).map(sn => String(sn || '').trim().toLowerCase()));
@@ -388,7 +649,15 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                         <div>
                           <div className="font-bold text-slate-900 text-sm">{stop.name || stop.stopName}</div>
                           <div className="text-slate-500 text-[11px]">
-                            Village: {stop.villageName || 'Assigned'} • ₹{stop.fee || 700}/mo
+                            Village:{' '}
+                            <button
+                              type="button"
+                              onClick={() => selectedRoute && stop.villageName && toggleRouteVillageExpand(selectedRoute.id, stop.villageName)}
+                              className="font-bold text-indigo-700 hover:underline cursor-pointer"
+                            >
+                              {stop.villageName || 'Assigned'}
+                            </button>{' '}
+                            • ₹{stop.fee || 700}/mo
                           </div>
                         </div>
                       </div>
@@ -673,33 +942,190 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                   <div className="divide-y divide-slate-100">
                     {svcList
                       .sort((a, b) => a.tripNumber - b.tripNumber)
-                      .map((svc) => (
-                        <div key={svc.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs">
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-slate-900 text-sm">
-                                Trip {svc.tripNumber} — {svc.shiftName}
-                              </span>
-                              <span className="text-slate-400">•</span>
-                              <span className="text-slate-700 font-semibold">{svc.routeName}</span>
-                            </div>
-                            <div className="flex items-center gap-4 text-slate-500">
-                              <span>
-                                Campus: <strong className="text-slate-700">{getCampusLabel(svc.campus || '')}</strong>
-                              </span>
-                              <span>
-                                Assigned: <strong className="text-slate-900">{svc.assignedCount} members</strong>
-                              </span>
-                            </div>
-                          </div>
+                      .map((svc) => {
+                        const svcMembers = students.filter(
+                          st =>
+                            st.transportStatus !== 'Left' &&
+                            (st.routeId === svc.routeId || st.routeCode === svc.routeName)
+                        );
+                        const isMembersExpanded = Boolean(expandedServiceMembers[svc.id]);
+                        const isEditingTime = editingTimingServiceId === svc.id;
+                        const currentDep = svc.departureTime || svc.plannedStartTime || '06:30 AM';
+                        const currentArr = svc.arrivalTime || svc.plannedEndTime || '07:35 AM';
 
-                          <div className="flex items-center gap-3">
-                            <div className="px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 font-mono text-slate-800 font-semibold">
-                              {svc.departureTime || svc.plannedStartTime} &rarr; {svc.arrivalTime || svc.plannedEndTime}
+                        return (
+                          <div key={svc.id} className="p-4 space-y-3 text-xs">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-slate-900 text-sm">
+                                    Trip {svc.tripNumber} — {svc.shiftName}
+                                  </span>
+                                  <span className="text-slate-400">•</span>
+                                  <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-950 font-mono font-bold">
+                                    {svc.routeName}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-3 text-slate-500">
+                                  <span>
+                                    Campus: <strong className="text-slate-700">{getCampusLabel(svc.campus || '')}</strong>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedServiceMembers(prev => ({
+                                        ...prev,
+                                        [svc.id]: !prev[svc.id],
+                                      }))
+                                    }
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 font-bold cursor-pointer transition-colors"
+                                    title="Click to expand/collapse assigned members list"
+                                  >
+                                    <Users className="w-3.5 h-3.5 text-indigo-600" />
+                                    <span>Assigned: {svcMembers.length} members</span>
+                                    {isMembersExpanded ? (
+                                      <ChevronUp className="w-3.5 h-3.5" />
+                                    ) : (
+                                      <ChevronDown className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2">
+                                {isEditingTime ? (
+                                  <div className="flex flex-wrap items-center gap-2 bg-amber-50 p-2 rounded-xl border border-amber-300">
+                                    <div>
+                                      <label className="block text-[10px] font-bold text-slate-600">Departure</label>
+                                      <input
+                                        type="text"
+                                        value={editDepartureTime}
+                                        onChange={e => setEditDepartureTime(e.target.value)}
+                                        placeholder="e.g. 06:30 AM"
+                                        className="w-24 px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold"
+                                      />
+                                    </div>
+                                    <span className="text-slate-400 font-bold mt-3">&rarr;</span>
+                                    <div>
+                                      <label className="block text-[10px] font-bold text-slate-600">Arrival</label>
+                                      <input
+                                        type="text"
+                                        value={editArrivalTime}
+                                        onChange={e => setEditArrivalTime(e.target.value)}
+                                        placeholder="e.g. 07:35 AM"
+                                        className="w-24 px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold"
+                                      />
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={savingTiming}
+                                      onClick={async () => {
+                                        setSavingTiming(true);
+                                        try {
+                                          await api.updateRouteTimings(svc.routeId || svc.routeName, {
+                                            departureTime: editDepartureTime.trim() || currentDep,
+                                            arrivalTime: editArrivalTime.trim() || currentArr,
+                                          });
+                                          setEditingTimingServiceId(null);
+                                        } finally {
+                                          setSavingTiming(false);
+                                        }
+                                      }}
+                                      className="mt-3 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
+                                    >
+                                      <Check className="w-3.5 h-3.5" />
+                                      <span>{savingTiming ? 'Saving...' : 'Save'}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingTimingServiceId(null)}
+                                      className="mt-3 p-1.5 text-slate-500 hover:text-slate-800 rounded-lg cursor-pointer"
+                                    >
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 font-mono text-slate-800 font-semibold flex items-center gap-1.5">
+                                      <Clock className="w-3.5 h-3.5 text-amber-600" />
+                                      <span>{currentDep} &rarr; {currentArr}</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingTimingServiceId(svc.id);
+                                        setEditDepartureTime(currentDep);
+                                        setEditArrivalTime(currentArr);
+                                      }}
+                                      className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
+                                      title="Change Route / Trip Timings"
+                                    >
+                                      <Edit2 className="w-3 h-3 text-amber-600" />
+                                      <span>Change Timing</span>
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
+
+                            {/* Expandable Member List when clicking "Assigned: X members" */}
+                            {isMembersExpanded && (
+                              <div className="bg-slate-50 rounded-xl border border-slate-200 p-3 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold text-slate-800">
+                                    Members Assigned to {svc.routeName} ({svcMembers.length})
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedServiceMembers(prev => ({ ...prev, [svc.id]: false }))
+                                    }
+                                    className="text-[11px] font-bold text-slate-500 hover:text-slate-800 cursor-pointer"
+                                  >
+                                    Collapse List
+                                  </button>
+                                </div>
+                                {svcMembers.length === 0 ? (
+                                  <p className="text-xs text-slate-400 py-2 text-center">
+                                    No active members assigned to {svc.routeName}.
+                                  </p>
+                                ) : (
+                                  <div className="overflow-x-auto bg-white rounded-lg border border-slate-200">
+                                    <table className="w-full text-left border-collapse text-xs">
+                                      <thead>
+                                        <tr className="bg-slate-100 border-b border-slate-200 text-[10px] font-bold text-slate-600 uppercase">
+                                          <th className="py-2 px-3">#</th>
+                                          <th className="py-2 px-3">Admission No</th>
+                                          <th className="py-2 px-3">Member Name</th>
+                                          <th className="py-2 px-3">Class &amp; Sec</th>
+                                          <th className="py-2 px-3">Father / Guardian</th>
+                                          <th className="py-2 px-3">Village &amp; Stop</th>
+                                          <th className="py-2 px-3">Mobile</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-100">
+                                        {svcMembers.map((m, idx) => (
+                                          <tr key={m.id} className="hover:bg-slate-50">
+                                            <td className="py-2 px-3 font-mono text-slate-400">{idx + 1}</td>
+                                            <td className="py-2 px-3 font-mono font-bold text-slate-700">{m.admissionNo}</td>
+                                            <td className="py-2 px-3 font-bold text-slate-900">{m.name}</td>
+                                            <td className="py-2 px-3 font-semibold text-slate-700">{m.class}-{m.section}</td>
+                                            <td className="py-2 px-3 text-slate-600">{m.fatherName || '—'}</td>
+                                            <td className="py-2 px-3 text-emerald-700 font-semibold">
+                                              {m.villageName} ({m.pickupDropStopName || m.villageName})
+                                            </td>
+                                            <td className="py-2 px-3 font-mono text-slate-600">{m.mobile || '—'}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                   </div>
                 </div>
               );

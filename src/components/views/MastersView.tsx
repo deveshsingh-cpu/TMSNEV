@@ -237,6 +237,9 @@ export const MastersView: React.FC<MastersViewProps> = ({
   const [villageViewMode, setVillageViewMode] = useState<'card' | 'list'>('card');
   const [villageSearchQuery, setVillageSearchQuery] = useState('');
   const [routeVillageSearch, setRouteVillageSearch] = useState('');
+  const [masterRouteVehicleFilter, setMasterRouteVehicleFilter] = useState<string>('all');
+  const [masterRouteCampusFilter, setMasterRouteCampusFilter] = useState<string>('all');
+  const [masterRouteSearch, setMasterRouteSearch] = useState<string>('');
   const [isVillageModalOpen, setIsVillageModalOpen] = useState(false);
   const [villageName, setVillageName] = useState('');
   const [villageDistance, setVillageDistance] = useState(5);
@@ -280,6 +283,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
   const [routeTripNumber, setRouteTripNumber] = useState<number>(trips[0]?.tripNumber || 1);
   const [selectedVillageIds, setSelectedVillageIds] = useState<string[]>([]);
   const [selectedStopIds, setSelectedStopIds] = useState<string[]>([]);
+  const [deselectedNewMemberIds, setDeselectedNewMemberIds] = useState<string[]>([]);
   const [showRouteComparisonStep, setShowRouteComparisonStep] = useState(false);
   const [routeModalError, setRouteModalError] = useState<string | null>(null);
 
@@ -650,7 +654,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
         stops: villageStops.map((s, idx) => ({
           id: s.id || `stp-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
           name: s.name.trim() || `Stop ${idx + 1}`,
-          fee: Number(s.fee) || 700,
+          fee: s.fee !== undefined && s.fee !== null && !isNaN(Number(s.fee)) ? Math.max(0, Number(s.fee)) : 0,
           distanceKm: Number(s.distanceKm) || Number(villageDistance),
         })),
       });
@@ -720,10 +724,13 @@ export const MastersView: React.FC<MastersViewProps> = ({
   });
 
   const oldMemberIdSet = new Set(oldRouteMembers.map(m => m.id));
-  const newMemberIdSet = new Set(newRouteMembers.map(m => m.id));
-  const addedRouteMembers = newRouteMembers.filter(m => !oldMemberIdSet.has(m.id));
-  const retainedRouteMembers = newRouteMembers.filter(m => oldMemberIdSet.has(m.id));
+  const deselectedMemberIdSet = new Set(deselectedNewMemberIds);
+  const selectedNewRouteMembers = newRouteMembers.filter(m => !deselectedMemberIdSet.has(m.id));
+  const newMemberIdSet = new Set(selectedNewRouteMembers.map(m => m.id));
+  const addedRouteMembers = selectedNewRouteMembers.filter(m => !oldMemberIdSet.has(m.id));
+  const retainedRouteMembers = selectedNewRouteMembers.filter(m => oldMemberIdSet.has(m.id));
   const removedRouteMembers = oldRouteMembers.filter(m => !newMemberIdSet.has(m.id));
+  const skippedSuggestedMembersCount = newRouteMembers.length - selectedNewRouteMembers.length;
 
   const getFallbackRouteForRemovedMember = (m: StudentMember): Route | undefined => {
     const cleanVilName = (m.villageName || '').trim().toLowerCase();
@@ -798,7 +805,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
         villageIds: selectedVillagesForModal.map(v => v.id),
         stopIds: selectedStopsForModal.map(s => s.id),
         stopNames: selectedStopsForModal.map(s => s.name),
-        confirmedMemberIds: newRouteMembers.map(m => m.id),
+        confirmedMemberIds: selectedNewRouteMembers.map(m => m.id),
         active: true,
       });
       setIsRouteModalOpen(false);
@@ -806,6 +813,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
       setEditingRouteId(null);
       setSelectedVillageIds([]);
       setSelectedStopIds([]);
+      setDeselectedNewMemberIds([]);
       setRouteVillageSearch('');
     });
   };
@@ -834,21 +842,72 @@ export const MastersView: React.FC<MastersViewProps> = ({
       )}
 
       {/* TAB 1: ROUTES MASTER */}
-      {activeTab === 'routes' && (
+      {activeTab === 'routes' && (() => {
+        const filteredMasterRoutes = routes.filter(r => {
+          if (masterRouteVehicleFilter !== 'all' && r.vehicleId !== masterRouteVehicleFilter && r.vehicleNumber !== masterRouteVehicleFilter) {
+            return false;
+          }
+          if (masterRouteCampusFilter !== 'all' && r.campus !== masterRouteCampusFilter) {
+            return false;
+          }
+          if (masterRouteSearch.trim()) {
+            const q = masterRouteSearch.toLowerCase();
+            return (
+              r.code.toLowerCase().includes(q) ||
+              (r.vehicleNumber || '').toLowerCase().includes(q) ||
+              (r.villageNames || []).some(vn => vn.toLowerCase().includes(q)) ||
+              (r.stopNames || []).some(sn => sn.toLowerCase().includes(q))
+            );
+          }
+          return true;
+        });
+
+        return (
         <div className="space-y-5">
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <h2 className="text-lg font-bold text-slate-900 tracking-tight">Routes Master</h2>
               <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
-                {routes.length} Routes
+                {filteredMasterRoutes.length} / {routes.length} Routes
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={masterRouteSearch}
+                onChange={e => setMasterRouteSearch(e.target.value)}
+                placeholder="Search route, vehicle, village..."
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs w-44 sm:w-52"
+              />
+              <select
+                value={masterRouteCampusFilter}
+                onChange={e => setMasterRouteCampusFilter(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Campus: All</option>
+                {campuses.map(c => (
+                  <option key={c.id} value={c.code}>
+                    {c.name} ({c.code})
+                  </option>
+                ))}
+              </select>
+              <select
+                value={masterRouteVehicleFilter}
+                onChange={e => setMasterRouteVehicleFilter(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Vehicle: All</option>
+                {vehicles.map(v => (
+                  <option key={v.id} value={v.registrationNumber}>
+                    {v.registrationNumber} {v.vehicleCode ? `(${v.vehicleCode})` : ''}
+                  </option>
+                ))}
+              </select>
               <PrintExportToolbar
                 title="Routes Master"
                 filename="routes_master"
                 schoolName={config.schoolName}
-                filteredData={routes}
+                filteredData={filteredMasterRoutes}
                 allData={routes}
                 columns={[
                   { header: 'Route Code', accessor: (r) => r.code },
@@ -886,6 +945,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     sortedVillages[0] ? (sortedVillages[0].stops || []).map(st => st.id) : []
                   );
                   setRouteVillageSearch('');
+                  setDeselectedNewMemberIds([]);
                   setRouteModalError(null);
                   setShowRouteComparisonStep(false);
                   setIsRouteModalOpen(true);
@@ -914,14 +974,14 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {routes.length === 0 ? (
+                  {filteredMasterRoutes.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="py-8 text-center text-slate-400">
-                        No routes created yet.
+                        No routes match the selected filters.
                       </td>
                     </tr>
                   ) : (
-                    routes.map((r) => {
+                    filteredMasterRoutes.map((r) => {
                       const routeMembersCount = activeTransportMembers.filter(
                         s => s.routeId === r.id || s.routeCode === r.code
                       ).length;
@@ -1031,6 +1091,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                                     );
                                   }
                                   setRouteVillageSearch('');
+                                  setDeselectedNewMemberIds([]);
                                   setShowRouteComparisonStep(false);
                                   setIsRouteModalOpen(true);
                                 }}
@@ -1058,7 +1119,8 @@ export const MastersView: React.FC<MastersViewProps> = ({
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* TAB 2: VEHICLES MASTER */}
       {activeTab === 'vehicles' && (
@@ -3151,26 +3213,31 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   </div>
                   <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200">
                     <span className="text-[10px] font-bold uppercase text-indigo-700 block">
-                      New Members (After)
+                      Selected for Route (After)
                     </span>
                     <span className="text-xl font-black text-indigo-900 mt-0.5 block">
-                      {newRouteMembers.length}
+                      {selectedNewRouteMembers.length}
+                      {newRouteMembers.length > 0 && (
+                        <span className="text-xs font-semibold text-indigo-600 ml-1">
+                          / {newRouteMembers.length}
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200">
                     <span className="text-[10px] font-bold uppercase text-emerald-700 block">
-                      Newly Attached (+)
+                      Shifting / Attached (+)
                     </span>
                     <span className="text-xl font-black text-emerald-800 mt-0.5 block">
                       +{addedRouteMembers.length}
                     </span>
                   </div>
-                  <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200">
-                    <span className="text-[10px] font-bold uppercase text-rose-700 block">
-                      Detached / Moved (-)
+                  <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200">
+                    <span className="text-[10px] font-bold uppercase text-amber-800 block">
+                      Kept in Old Route (Deselected)
                     </span>
-                    <span className="text-xl font-black text-rose-800 mt-0.5 block">
-                      -{removedRouteMembers.length}
+                    <span className="text-xl font-black text-amber-900 mt-0.5 block">
+                      {skippedSuggestedMembersCount}
                     </span>
                   </div>
                 </div>
@@ -3217,7 +3284,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                                 <div className="font-bold text-slate-900">
                                   {m.name}{' '}
                                   <span className="font-mono text-[10px] text-slate-500">
-                                    ({m.admissionNo})
+                                    ({m.admissionNo || 'No Adm#'})
                                   </span>
                                 </div>
                                 <div className="text-[10px] text-slate-500">
@@ -3242,20 +3309,85 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     </div>
                   </div>
 
-                  {/* RIGHT COLUMN: NEW MEMBERS OF THIS ROUTE */}
+                  {/* RIGHT COLUMN: NEW MEMBERS OF THIS ROUTE (WITH SELECT / DESELECT CHECKBOXES) */}
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50/30 p-3.5 space-y-2.5">
-                    <div className="flex items-center justify-between border-b border-indigo-200/80 pb-2">
-                      <div>
-                        <h4 className="font-bold text-indigo-950 text-xs">
-                          New Route Members ({newRouteMembers.length})
-                        </h4>
-                        <p className="text-[10px] text-indigo-700">
-                          Will be attached to <strong>{previewRouteCode}</strong> from selected villages &amp; stops
-                        </p>
+                    <div className="flex flex-col gap-2 border-b border-indigo-200/80 pb-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <h4 className="font-bold text-indigo-950 text-xs">
+                            Suggested Route Members ({selectedNewRouteMembers.length} of {newRouteMembers.length} Selected)
+                          </h4>
+                          <p className="text-[10px] text-indigo-700">
+                            Uncheck any student to keep them in their already assigned route instead of shifting to{' '}
+                            <strong>{previewRouteCode}</strong>
+                          </p>
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono font-bold text-[10px] shrink-0">
+                          After Change
+                        </span>
                       </div>
-                      <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono font-bold text-[10px]">
-                        After Change
-                      </span>
+
+                      {newRouteMembers.length > 0 && (
+                        <div className="flex flex-wrap items-center justify-between gap-1.5 bg-white/80 px-2.5 py-1.5 rounded-xl border border-indigo-100">
+                          <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-800 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedNewRouteMembers.length === newRouteMembers.length && newRouteMembers.length > 0}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setDeselectedNewMemberIds([]);
+                                } else {
+                                  setDeselectedNewMemberIds(newRouteMembers.map(m => m.id));
+                                }
+                              }}
+                              className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <span>
+                              {selectedNewRouteMembers.length === newRouteMembers.length
+                                ? 'All Suggested Selected'
+                                : `${selectedNewRouteMembers.length} Selected`}
+                            </span>
+                          </label>
+
+                          <div className="flex flex-wrap items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setDeselectedNewMemberIds([])}
+                              className="px-2 py-0.5 rounded-md bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[10px] cursor-pointer"
+                            >
+                              Select All ({newRouteMembers.length})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDeselectedNewMemberIds(newRouteMembers.map(m => m.id))}
+                              className="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 font-bold text-[10px] cursor-pointer"
+                            >
+                              Deselect All
+                            </button>
+                            {newRouteMembers.some(
+                              m => String(m.campus || '').toLowerCase() !== String(campusCode || '').toLowerCase()
+                            ) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nonMatchingIds = newRouteMembers
+                                    .filter(
+                                      m =>
+                                        String(m.campus || '').toLowerCase() !==
+                                        String(campusCode || '').toLowerCase()
+                                    )
+                                    .map(m => m.id);
+                                  setDeselectedNewMemberIds(nonMatchingIds);
+                                }}
+                                className="px-2 py-0.5 rounded-md bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 font-bold text-[10px] cursor-pointer"
+                                title={`Select only ${campusCode} campus students and keep other campus students in their existing routes`}
+                              >
+                                Only {campusCode} Campus
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
@@ -3265,31 +3397,54 @@ export const MastersView: React.FC<MastersViewProps> = ({
                         </div>
                       ) : (
                         newRouteMembers.map((m) => {
+                          const isSelected = !deselectedMemberIdSet.has(m.id);
                           const isNewlyAdded = !oldMemberIdSet.has(m.id);
+                          const toggleMemberSelection = () => {
+                            setDeselectedNewMemberIds(prev =>
+                              prev.includes(m.id)
+                                ? prev.filter(id => id !== m.id)
+                                : [...prev, m.id]
+                            );
+                          };
                           return (
-                            <div
+                            <label
                               key={m.id}
-                              className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
-                                isNewlyAdded
+                              className={`p-2.5 rounded-xl border flex items-center justify-between gap-2.5 cursor-pointer transition-colors ${
+                                !isSelected
+                                  ? 'bg-slate-100/80 border-slate-300 opacity-85'
+                                  : isNewlyAdded
                                   ? 'bg-emerald-50/90 border-emerald-300 shadow-2xs'
                                   : 'bg-white border-slate-200'
                               }`}
                             >
-                              <div>
-                                <div className="font-bold text-slate-900">
-                                  {m.name}{' '}
-                                  <span className="font-mono text-[10px] text-slate-500">
-                                    ({m.admissionNo})
-                                  </span>
-                                </div>
-                                <div className="text-[10px] text-slate-600">
-                                  {m.class}-{m.section} • <strong>{m.villageName}</strong> ({m.pickupDropStopName})
+                              <div className="flex items-start gap-2.5 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={toggleMemberSelection}
+                                  className="mt-0.5 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer shrink-0"
+                                />
+                                <div className="min-w-0">
+                                  <div className={`font-bold ${isSelected ? 'text-slate-900' : 'text-slate-600 line-through'}`}>
+                                    {m.name}{' '}
+                                    <span className="font-mono text-[10px] text-slate-500 no-underline">
+                                      ({m.admissionNo || 'No Adm#'})
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] text-slate-600">
+                                    <span className="font-semibold text-indigo-700">{m.campus}</span> • {m.class}-{m.section} •{' '}
+                                    <strong>{m.villageName}</strong> ({m.pickupDropStopName})
+                                  </div>
                                 </div>
                               </div>
                               <div className="text-right shrink-0">
-                                {isNewlyAdded ? (
+                                {!isSelected ? (
+                                  <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[10px] block">
+                                    Kept in {m.routeCode || 'Current Route'}
+                                  </span>
+                                ) : isNewlyAdded ? (
                                   <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-bold text-[10px] block">
-                                    + NEWLY ATTACHED
+                                    + SHIFT TO {previewRouteCode}
                                     {m.routeCode && m.routeCode !== previewRouteCode
                                       ? ` (from ${m.routeCode})`
                                       : ''}
@@ -3300,7 +3455,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                                   </span>
                                 )}
                               </div>
-                            </div>
+                            </label>
                           );
                         })
                       )}
@@ -3336,7 +3491,8 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     >
                       <CheckCircle className="w-4 h-4" />
                       <span>
-                        Confirm &amp; Finalize Route ({newRouteMembers.length} {newRouteMembers.length === 1 ? 'Member' : 'Members'})
+                        Confirm &amp; Finalize Route ({selectedNewRouteMembers.length}{' '}
+                        {selectedNewRouteMembers.length === 1 ? 'Member' : 'Members'})
                       </span>
                     </button>
                   </div>

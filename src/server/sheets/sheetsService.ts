@@ -242,7 +242,10 @@ export class SheetsDatabaseManager {
           if (Array.isArray(parsed.disciplineRecords)) this.disciplineRecords = parsed.disciplineRecords;
           if (Array.isArray(parsed.accounts)) this.accounts = parsed.accounts;
           if (Array.isArray(parsed.vouchers)) this.vouchers = parsed.vouchers;
+          this.ensureSeededRouteMembers();
         }
+      } else {
+        this.ensureSeededRouteMembers();
       }
     } catch (err) {
       console.error('Failed to load local snapshot:', err);
@@ -304,6 +307,8 @@ export class SheetsDatabaseManager {
       const assignedStudents = this.students.filter(
         (s) => (s.routeId === r.id || s.routeCode === r.code) && s.transportStatus !== 'Left'
       ).length;
+      const defaultDep = r.tripNumber === 1 ? '06:40 AM' : r.tripNumber === 2 ? '07:45 AM' : '08:30 AM';
+      const defaultArr = r.tripNumber === 1 ? '07:30 AM' : r.tripNumber === 2 ? '08:30 AM' : '09:15 AM';
       return {
         id: `svc-${r.id}`,
         vehicleNumber: r.vehicleNumber,
@@ -317,8 +322,8 @@ export class SheetsDatabaseManager {
         campus: r.campus,
         assignedCount: assignedStudents,
         capacity: veh?.capacity || 40,
-        departureTime: r.tripNumber === 1 ? '06:40 AM' : '07:45 AM',
-        arrivalTime: r.tripNumber === 1 ? '07:30 AM' : '08:30 AM',
+        departureTime: r.departureTime || defaultDep,
+        arrivalTime: r.arrivalTime || defaultArr,
       };
     });
   }
@@ -671,12 +676,16 @@ export class SheetsDatabaseManager {
         this.systemUsers = users;
       }
 
+          const seededNew = this.ensureSeededRouteMembers();
           this.rebuildScheduledServices();
           this.saveLocalSnapshot();
           this.hasHydratedFromSheets = true;
           this.lastConnectedState = true;
           this.lastHydratedAt = Date.now();
           this.lastError = null;
+          if (seededNew) {
+            await this.internalSyncToGoogleSheets().catch(() => {});
+          }
           return;
         } catch (err: any) {
           lastErr = err;
@@ -2205,8 +2214,8 @@ export class SheetsDatabaseManager {
         throw new Error('At least one Pickup/Drop Stop with a valid name and monthly fee is mandatory to save a Village.');
       }
       for (const s of rawStops) {
-        if (!s.fee || Number(s.fee) <= 0) {
-          throw new Error(`Monthly Transport Fee is mandatory and must be greater than ₹0 for stop "${s.name}".`);
+        if (s.fee === undefined || s.fee === null || isNaN(Number(s.fee)) || Number(s.fee) < 0) {
+          throw new Error(`Monthly Transport Fee is mandatory and must be ₹0 or greater for stop "${s.name}".`);
         }
       }
 
@@ -2214,7 +2223,7 @@ export class SheetsDatabaseManager {
         .map((s, idx) => ({
           id: s.id || `stp-${Date.now()}-${idx}`,
           name: s.name!.trim(),
-          fee: Number(s.fee),
+          fee: Math.max(0, Number(s.fee) || 0),
           distanceKm: Number(s.distanceKm) || Number(villageData.distanceKm) || 5,
           landmark: s.landmark || '',
         }))
@@ -2284,8 +2293,17 @@ export class SheetsDatabaseManager {
                 member.pickupDropStopId === st.id ||
                 (member.villageId === existingVillage.id && member.pickupDropStopName === st.name)
               ) {
-                member.monthlyFee = Number(st.fee) || member.monthlyFee;
+                const nextFee = st.fee !== undefined && st.fee !== null ? Math.max(0, Number(st.fee) || 0) : member.monthlyFee;
+                member.monthlyFee = nextFee;
                 member.pickupDropStopName = st.name;
+                if (nextFee === 0) {
+                  this.invoices = this.invoices.filter(
+                    inv => !(inv.studentId === member.id && (Number(inv.paidAmount) || 0) === 0)
+                  );
+                  member.balanceDue = this.invoices
+                    .filter(inv => inv.studentId === member.id)
+                    .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+                }
               }
             }
           }
@@ -2806,7 +2824,26 @@ export class SheetsDatabaseManager {
           if (confirmedSet ? confirmedSet.has(student.id) : true) {
             student.routeId = savedRoute.id;
             student.routeCode = savedRoute.code;
+          } else if (wasOnThisRoute) {
+            // Existing member of this route was explicitly deselected; reassign to another covering route if available
+            const fallbackRoute = this.findBestRouteForVillageOrStop(
+              student.villageId,
+              student.villageName,
+              student.pickupDropStopId,
+              student.pickupDropStopName,
+              student.campus,
+              savedRoute.id
+            );
+            if (fallbackRoute) {
+              student.routeId = fallbackRoute.id;
+              student.routeCode = fallbackRoute.code;
+            } else {
+              student.routeId = '';
+              student.routeCode = 'Unassigned';
+            }
           }
+          // Note: If student was NOT on this route and was deselected (!confirmedSet.has(student.id)),
+          // we intentionally leave student.routeId and student.routeCode unchanged so they remain in their already assigned route.
         } else if (wasOnThisRoute) {
           // Student's stop or village was removed from this route; attach to another covering route if available, else Unassigned
           const fallbackRoute = this.findBestRouteForVillageOrStop(
@@ -2827,6 +2864,7 @@ export class SheetsDatabaseManager {
         }
       }
 
+      this.rebuildScheduledServices();
       await this.internalSyncToGoogleSheets();
       return savedRoute;
     });
@@ -2858,6 +2896,30 @@ export class SheetsDatabaseManager {
   // --- Scheduled Services (Routes & Trips Demo Mechanism) ---
   public getScheduledServices(): ScheduledService[] {
     return this.scheduledServices;
+  }
+
+  public async updateRouteTimings(
+    routeIdOrCode: string,
+    payload: { departureTime?: string; arrivalTime?: string }
+  ): Promise<Route> {
+    return this.enqueueWrite(async () => {
+      const cleanId = routeIdOrCode.replace(/^svc-/, '');
+      const route = this.routes.find(
+        r => r.id === cleanId || r.id === routeIdOrCode || r.code === routeIdOrCode
+      );
+      if (!route) {
+        throw new Error('Route not found for updating schedule timings.');
+      }
+      if (payload.departureTime !== undefined) {
+        route.departureTime = payload.departureTime.trim();
+      }
+      if (payload.arrivalTime !== undefined) {
+        route.arrivalTime = payload.arrivalTime.trim();
+      }
+      this.rebuildScheduledServices();
+      await this.internalSyncToGoogleSheets();
+      return route;
+    });
   }
 
   // --- Candidate Resumes (Entry Point for Employees) ---
@@ -3148,46 +3210,4858 @@ export class SheetsDatabaseManager {
     }
   }
 
+  public inferCampusFromClass(className: string, fallback = 'Sr'): string {
+    const c = String(className || '').trim().toUpperCase();
+    if (!c) return fallback;
+    if (
+      c.includes('PLAY') ||
+      c.includes('NURSERY') ||
+      c.includes('LKG') ||
+      c.includes('UKG') ||
+      c.includes('PREP')
+    ) {
+      return 'Jr';
+    }
+    const tokens = c
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .trim()
+      .split(/\s+/);
+    for (const tok of tokens) {
+      if (
+        tok === 'I' ||
+        tok === 'II' ||
+        tok === 'III' ||
+        tok === 'IV' ||
+        tok === '1' ||
+        tok === '2' ||
+        tok === '3' ||
+        tok === '4'
+      ) {
+        return 'Jr';
+      }
+      if (
+        tok === 'V' ||
+        tok === 'VI' ||
+        tok === 'VII' ||
+        tok === 'VIII' ||
+        tok === 'IX' ||
+        tok === 'X' ||
+        tok === 'XI' ||
+        tok === 'XII' ||
+        tok === '5' ||
+        tok === '6' ||
+        tok === '7' ||
+        tok === '8' ||
+        tok === '9' ||
+        tok === '10' ||
+        tok === '11' ||
+        tok === '12'
+      ) {
+        return 'Sr';
+      }
+    }
+    return fallback;
+  }
+
+  public ensureSeededRouteMembers(): boolean {
+    const normalizeCode = (c: string) => c.replace(/[\s/]+/g, '').toLowerCase();
+    const normalizeVillage = (v: string) =>
+      v.replace(/[()]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+    const findMatchingVillage = (rawName: string): Village | undefined => {
+      const target = normalizeVillage(rawName);
+      const targetCompact = rawName.replace(/[\s()]+/g, '').toLowerCase();
+      if (!target) return undefined;
+      return (
+        this.villages.find(v => normalizeVillage(v.name) === target) ||
+        this.villages.find(v => v.name.replace(/[\s()]+/g, '').toLowerCase() === targetCompact) ||
+        this.villages.find(v => normalizeVillage(v.name).startsWith(target)) ||
+        this.villages.find(v => {
+          const vn = normalizeVillage(v.name);
+          if (target === 'mubarakpur' && vn.includes('mubarak')) return true;
+          if (target === 'sarut' && vn === 'saraut') return true;
+          if (target.includes('trenwa') && vn.includes('tarenwa')) return true;
+          if (target.includes('madhopur') && vn.includes('madhopur')) return true;
+          if (
+            (target.includes('banpura ke tola') || target.includes('pandey tola')) &&
+            vn.includes('pandey tola')
+          ) {
+            return true;
+          }
+          return false;
+        })
+      );
+    };
+
+    const srWb1Route = this.routes.find(
+      r => normalizeCode(r.code) === 'srwb1' || r.id === 'rot-1793104201627'
+    );
+    const sr71751Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'sr71751' ||
+        r.id === 'rot-1793104335828' ||
+        r.id === 'rot-1793104679480'
+    );
+    const srMarco1Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'sroplo1' ||
+        normalizeCode(r.code).includes('marco') ||
+        (r.vehicleNumber && r.vehicleNumber.toLowerCase().includes('marco') && r.tripNumber === 1) ||
+        r.id === 'rot-1793104522784'
+    );
+    const sr06261Route = this.routes.find(
+      r => normalizeCode(r.code) === 'sr06261' || r.id === 'rot-1793104600020'
+    );
+    const sr71782Route = this.routes.find(
+      r => normalizeCode(r.code) === 'sr71782' || r.id === 'rot-1793104626097'
+    );
+    const sr37941Route = this.routes.find(
+      r => normalizeCode(r.code) === 'sr37941' || r.id === 'rot-1793104681947'
+    );
+    const sr71752Route = this.routes.find(
+      r => normalizeCode(r.code) === 'sr71752' || r.id === 'rot-1793104791279'
+    );
+    const srXylo1Route = this.routes.find(
+      r => normalizeCode(r.code) === 'srxylo1' || r.id === 'rot-1793104832357'
+    );
+    const jr87071Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jr87071' || r.id === 'rot-1793009826681'
+    );
+    const jrWb2Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jrwb2' || r.id === 'rot-1793010310199'
+    );
+    const jr06262Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jr06262' || r.id === 'rot-1793010433329'
+    );
+    const jrInod1Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jrinod1' || r.id === 'rot-1793117488462'
+    );
+    const jrInod2Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jrinod2' || r.id === 'rot-1793117542005'
+    );
+    let jr37942Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jr37942' || r.id === 'rot-jr37942'
+    );
+    if (!jr37942Route) {
+      const veh3794 = this.vehicles.find(
+        v => v.id === 'veh-1793009414958' || v.registrationNumber === '3794'
+      );
+      const targetVilNames = ['Baliya Kothi', 'Devpura', 'Devpura Mathiya', 'Jamanpura', 'Tesuwar Mathiya'];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jr37942Route = {
+        id: 'rot-jr37942',
+        code: 'Jr/3794/2',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: veh3794?.id || 'veh-1793009414958',
+        vehicleNumber: veh3794?.registrationNumber || '3794',
+        vehicleLast4: '3794',
+        tripNumber: 2,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jr37942Route);
+    }
+    let jr37931Route = this.routes.find(
+      r => normalizeCode(r.code) === 'jr37931' || r.id === 'rot-jr37931'
+    );
+    if (!jr37931Route) {
+      const veh3793 = this.vehicles.find(
+        v => v.id === 'veh-1793009457043' || v.registrationNumber === '3793'
+      );
+      const targetVilNames = ['Bangare Ke Bari', 'Bhar Ke Mathiya', 'Chainpur', 'Chiraiya Mathiya', 'Khajuwan'];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jr37931Route = {
+        id: 'rot-jr37931',
+        code: 'Jr/3793/1',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: veh3793?.id || 'veh-1793009457043',
+        vehicleNumber: veh3793?.registrationNumber || '3793',
+        vehicleLast4: '3793',
+        tripNumber: 1,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jr37931Route);
+    }
+
+    let jr37932Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jr37932' ||
+        r.id === 'rot-jr37932'
+    );
+    if (!jr37932Route) {
+      const veh3793 = this.vehicles.find(v =>
+        v.registrationNumber.includes('3793')
+      );
+      const targetVilNames = ['Chainpur'];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jr37932Route = {
+        id: 'rot-jr37932',
+        code: 'Jr/3793/2',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: veh3793?.id || 'veh-1793009457043',
+        vehicleNumber: veh3793?.registrationNumber || '3793',
+        vehicleLast4: '3793',
+        tripNumber: 2,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jr37932Route);
+    }
+
+    let jrXimo1Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jrximo1' ||
+        r.id === 'rot-1793120194793' ||
+        r.id === 'rot-jrximo1'
+    );
+    if (!jrXimo1Route) {
+      const vehMaximo = this.vehicles.find(
+        v =>
+          v.id === 'veh-1793009480244' ||
+          v.registrationNumber.toUpperCase().includes('MAXIMO') ||
+          v.registrationNumber.toUpperCase().includes('XIMO')
+      );
+      const targetVilNames = ['Baghauna', 'Nonya Patti', 'Suwahi'];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jrXimo1Route = {
+        id: 'rot-1793120194793',
+        code: 'Jr/XIMO/1',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: vehMaximo?.id || 'veh-1793009480244',
+        vehicleNumber: vehMaximo?.registrationNumber || 'MAXIMO',
+        vehicleLast4: 'XIMO',
+        tripNumber: 1,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jrXimo1Route);
+    }
+
+    let jrXimo2Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jrximo2' ||
+        r.id === 'rot-jrximo2'
+    );
+    if (!jrXimo2Route) {
+      const vehMaximo = this.vehicles.find(
+        v =>
+          v.id === 'veh-1793009480244' ||
+          v.registrationNumber.toUpperCase().includes('MAXIMO') ||
+          v.registrationNumber.toUpperCase().includes('XIMO')
+      );
+      const targetVilNames = ['Bawandih', 'Baliya Kothi'];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jrXimo2Route = {
+        id: 'rot-jrximo2',
+        code: 'Jr/XIMO/2',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: vehMaximo?.id || 'veh-1793009480244',
+        vehicleNumber: vehMaximo?.registrationNumber || 'MAXIMO',
+        vehicleLast4: 'XIMO',
+        tripNumber: 2,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jrXimo2Route);
+    }
+
+    let jrXylo2Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jrxylo2' ||
+        r.id === 'rot-jrxylo2'
+    );
+    if (!jrXylo2Route) {
+      const vehXylo = this.vehicles.find(
+        v =>
+          v.id === 'veh-1793009497184' ||
+          v.registrationNumber.toUpperCase().includes('XYLO')
+      );
+      const targetVilNames = [
+        'Chainpur',
+        'Ghurghat',
+        'Ghurghat Mathiya',
+        'Morwan',
+        'Mubarakhpur',
+      ];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jrXylo2Route = {
+        id: 'rot-jrxylo2',
+        code: 'Jr/XYLO/2',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: vehXylo?.id || 'veh-1793009497184',
+        vehicleNumber: vehXylo?.registrationNumber || 'XYLO',
+        vehicleLast4: 'XYLO',
+        tripNumber: 2,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jrXylo2Route);
+    }
+
+    if (!this.tripsMaster.some(t => Number(t.tripNumber) === 3)) {
+      this.tripsMaster.push({
+        id: 'trp-3',
+        tripNumber: 3,
+        description: 'Trip 3 — Third Shift',
+      });
+    }
+
+    let jr71753Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jr71753' ||
+        r.id === 'rot-jr71753'
+    );
+    if (!jr71753Route) {
+      const veh7175 = this.vehicles.find(
+        v =>
+          v.id === 'veh-1793009507193' ||
+          v.registrationNumber.includes('7175')
+      );
+      const targetVilNames = ['Birti'];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jr71753Route = {
+        id: 'rot-jr71753',
+        code: 'Jr/7175/3',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: veh7175?.id || 'veh-1793009507193',
+        vehicleNumber: veh7175?.registrationNumber || '7175',
+        vehicleLast4: '7175',
+        tripNumber: 3,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jr71753Route);
+    }
+
+    let jr71783Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jr71783' ||
+        r.id === 'rot-jr71783'
+    );
+    if (!jr71783Route) {
+      const veh7178 = this.vehicles.find(
+        v =>
+          v.id === 'veh-1793009518747' ||
+          v.registrationNumber.includes('7178')
+      );
+      const targetVilNames = [
+        'Banpura -Banpura ke Tola- Birti Pandey Tola',
+        'Birti',
+        'Mehdar',
+        'Teliyadih',
+      ];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jr71783Route = {
+        id: 'rot-jr71783',
+        code: 'Jr/7178/3',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: veh7178?.id || 'veh-1793009518747',
+        vehicleNumber: veh7178?.registrationNumber || '7178',
+        vehicleLast4: '7178',
+        tripNumber: 3,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jr71783Route);
+    }
+
+    let jrOplo2Route = this.routes.find(
+      r =>
+        normalizeCode(r.code) === 'jroplo2' ||
+        r.id === 'rot-jroplo2'
+    );
+    if (!jrOplo2Route) {
+      const vehMarco = this.vehicles.find(
+        v =>
+          v.id === 'veh-1793009533994' ||
+          v.registrationNumber.toUpperCase().includes('MARCO') ||
+          v.registrationNumber.toUpperCase().includes('OPLO')
+      );
+      const targetVilNames = [
+        'Chainpur',
+        'Mubarakhpur',
+        'Nagai',
+        'Pipra (Ramgarh)',
+        'Ramgarh',
+      ];
+      const matchedVils = targetVilNames
+        .map(vn => findMatchingVillage(vn))
+        .filter((v): v is Village => Boolean(v));
+      const stopsList = matchedVils.flatMap(v =>
+        (v.stops || []).map(st => ({ ...st, villageName: v.name }))
+      );
+      jrOplo2Route = {
+        id: 'rot-jroplo2',
+        code: 'Jr/OPLO/2',
+        campus: 'Jr',
+        campusCode: 'Jr',
+        vehicleId: vehMarco?.id || 'veh-1793009533994',
+        vehicleNumber: vehMarco?.registrationNumber || 'MARCOPLO',
+        vehicleLast4: 'OPLO',
+        tripNumber: 2,
+        villageIds: matchedVils.map(v => v.id),
+        villageNames: matchedVils.map(v => v.name),
+        stopIds: stopsList.map(s => s.id),
+        stopNames: stopsList.map(s => s.name),
+        stops: stopsList,
+        active: true,
+      };
+      this.routes.push(jrOplo2Route);
+    }
+
+    const routeSeedBatches: Array<{
+      seedPrefix: string;
+      routeObj: Route | undefined;
+      fallbackRouteId: string;
+      fallbackRouteCode: string;
+      members: Array<{
+        admissionNo: string;
+        name: string;
+        className: string;
+        section?: string;
+        gender: 'M' | 'F';
+        fatherName: string;
+        villageMatch: string;
+        mobile: string;
+        emergencyContact?: string;
+      }>;
+    }> = [
+      {
+        seedPrefix: 'stu-srwb1',
+        routeObj: srWb1Route,
+        fallbackRouteId: 'rot-1793104201627',
+        fallbackRouteCode: 'Sr/WB/1',
+        members: [
+          {
+            admissionNo: 'NEV1205/25',
+            name: 'Anushka Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Birendra Sah',
+            villageMatch: 'Husena Bangra',
+            mobile: '8084211428',
+          },
+          {
+            admissionNo: 'NEV1247/26',
+            name: 'Diksha Singh',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'DEEPAK SINGH',
+            villageMatch: 'Husena Bangra',
+            mobile: '9199625386',
+          },
+          {
+            admissionNo: 'NEV1250/26',
+            name: 'KHUSHBU KUMARI',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: 'DHARMENDRA KU THAKUR',
+            villageMatch: 'Husena Bangra',
+            mobile: '9060266648',
+          },
+          {
+            admissionNo: 'NEV1220/25',
+            name: 'Mahi Singh',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: 'Mukesh Kumar Singh',
+            villageMatch: 'Husena Bangra',
+            mobile: '9973282909',
+          },
+          {
+            admissionNo: 'NEV1248/26',
+            name: 'RIYA SINGH',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: 'PAPPU SINGH',
+            villageMatch: 'Husena Bangra',
+            mobile: '8809464308',
+          },
+          {
+            admissionNo: 'NEV167/18',
+            name: 'Aradhya Kumari',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'Akhilesh kumar',
+            villageMatch: 'Ubdhi',
+            mobile: '9097419086',
+          },
+          {
+            admissionNo: 'NEV1222/25',
+            name: 'Wahid Hussain',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Mr. Asalm Mansuri',
+            villageMatch: 'Ubdhi',
+            mobile: '8809363119',
+          },
+          {
+            admissionNo: 'NEV1223/25',
+            name: 'Sahid Hussain',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Aslam Mansuri',
+            villageMatch: 'Ubdhi',
+            mobile: '8809363119',
+          },
+          {
+            admissionNo: 'NEV1038/24',
+            name: 'Amit Kr. Yadav',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Jitendra Yadav',
+            villageMatch: 'Sonbarsa',
+            mobile: '7763030140',
+          },
+          {
+            admissionNo: 'NEV1039/24',
+            name: 'Ashish Kumar Yadav',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Jitendra Yadav',
+            villageMatch: 'Sonbarsa',
+            mobile: '7763030717',
+          },
+          {
+            admissionNo: 'NEV237/18',
+            name: 'Shaurya Parashar',
+            className: 'Class IX',
+            gender: 'M',
+            fatherName: 'Raghvendra Narain Singh',
+            villageMatch: 'Kisunbari',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1132/24',
+            name: 'Adarsh Kumar',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Arvind Prshad',
+            villageMatch: 'Rampur',
+            mobile: '9470207502',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-sr71751',
+        routeObj: sr71751Route,
+        fallbackRouteId: 'rot-1793104335828',
+        fallbackRouteCode: 'Sr/7175/1',
+        members: [
+          {
+            admissionNo: 'NEV310/18',
+            name: 'Anshu Kumar',
+            className: 'Class X',
+            gender: 'M',
+            fatherName: 'Shrawan Ram',
+            villageMatch: 'Gora Dhusahan',
+            mobile: '7739473389',
+          },
+          {
+            admissionNo: 'NEV1140/24',
+            name: 'Divyank Raj',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Mr. Chandan Kr.Singh',
+            villageMatch: 'Baghauna',
+            mobile: '8102619522',
+          },
+          {
+            admissionNo: '',
+            name: 'Pragati Shriwashtava',
+            className: 'Class IV',
+            gender: 'F',
+            fatherName: 'Kumari Priyanka',
+            villageMatch: 'Gyaspur',
+            mobile: '6299105846',
+          },
+          {
+            admissionNo: 'NEV240/18',
+            name: 'Shiksha Shriwastwa',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Gyaspur',
+            mobile: '9939570091',
+          },
+          {
+            admissionNo: 'NEV1433/26',
+            name: 'Wajid Raja',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Ramji Raja',
+            villageMatch: 'Gyaspur',
+            mobile: '9065611397',
+          },
+          {
+            admissionNo: 'NEV1171/25',
+            name: 'Piyush Kumar Yadav',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Kanhaiya Kumar Yadav',
+            villageMatch: 'Siswan',
+            mobile: '7763023080',
+          },
+          {
+            admissionNo: 'NEV944/23',
+            name: 'Rohit Kumar Singh',
+            className: 'Class IX',
+            gender: 'M',
+            fatherName: 'Vinod Kumar Singh',
+            villageMatch: 'Siswan',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1179/25',
+            name: 'Harshit Yadav',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Mr.Satya Deo Yadav',
+            villageMatch: 'Bhagar',
+            mobile: '9661309538',
+          },
+          {
+            admissionNo: 'NEV837/22',
+            name: 'Riddhi Krishna',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: 'Ranjeet Kumar Singh',
+            villageMatch: 'Saraut',
+            mobile: '9955655310',
+          },
+          {
+            admissionNo: 'NEV943/23',
+            name: 'Rishikesh Kumar',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Dinesh Singh',
+            villageMatch: 'Saraut',
+            mobile: '8292226838',
+          },
+          {
+            admissionNo: 'NEV1050/24',
+            name: 'Sahil Kumar Prasad',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Vivek Prasad',
+            villageMatch: 'Saraut',
+            mobile: '7970330140',
+          },
+          {
+            admissionNo: 'NEV1504/26',
+            name: 'Siddharth Kumar',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Ganesh Sah',
+            villageMatch: 'Tarenwa Madhopur',
+            mobile: '9162330595',
+          },
+          {
+            admissionNo: 'NEV1505/26',
+            name: 'Amritanshu Panday',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Jitendra Panday',
+            villageMatch: 'Tarenwa Madhopur',
+            mobile: '9006808209',
+            emergencyContact: '9631987437',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-srmarco1',
+        routeObj: srMarco1Route,
+        fallbackRouteId: 'rot-1793104522784',
+        fallbackRouteCode: 'Sr/OPLO/1',
+        members: [
+          {
+            admissionNo: 'NEV043/18',
+            name: 'Amrit Raj',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Anshu Singh',
+            villageMatch: 'Teghra',
+            mobile: '7739656773',
+          },
+          {
+            admissionNo: 'NEV042/18',
+            name: 'Anuraj Kumar Singh',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Lalan Singh',
+            villageMatch: 'Teghra',
+            mobile: '7079047503',
+          },
+          {
+            admissionNo: 'NEV044/18',
+            name: 'Arpit Kumar Singh',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Ashutosh Kumar Singh',
+            villageMatch: 'Teghra',
+            mobile: '7739656773',
+          },
+          {
+            admissionNo: 'NEV887/23',
+            name: 'Samiksha Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Vimlesh Singh',
+            villageMatch: 'Katokhar',
+            mobile: '6201003928',
+            emergencyContact: '9135333769',
+          },
+          {
+            admissionNo: 'NEV180/18',
+            name: 'Abhinav kumar Tiwari',
+            className: 'Class IX',
+            gender: 'M',
+            fatherName: 'Dr.Sanjit Tiwari',
+            villageMatch: 'Mohammadpur',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV897/23',
+            name: 'Diksha Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Raju Tiwari',
+            villageMatch: 'Mohammadpur',
+            mobile: '6203163358',
+          },
+          {
+            admissionNo: 'NEV1230/25',
+            name: 'Nehal Ansari',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Nur Alam Ansari',
+            villageMatch: 'Mohammadpur',
+            mobile: '7461925347',
+          },
+          {
+            admissionNo: 'NEV519/18',
+            name: 'Adarsh Kumar',
+            className: 'Class III',
+            gender: 'M',
+            fatherName: 'Dilip Kumar',
+            villageMatch: 'Mohammadpur',
+            mobile: '8002240603',
+          },
+          {
+            admissionNo: 'NEV724/21',
+            name: 'Aditi Kumari',
+            className: 'Class IV',
+            gender: 'F',
+            fatherName: 'Dharmesh Prasad',
+            villageMatch: 'Mohammadpur',
+            mobile: '8789468683',
+          },
+          {
+            admissionNo: 'NEV1328/25',
+            name: 'Dhanu Kumar',
+            className: 'Class IV',
+            gender: 'M',
+            fatherName: 'Sankar Shah',
+            villageMatch: 'Mohammadpur',
+            mobile: '7646011088',
+          },
+          {
+            admissionNo: 'NEV1330/25',
+            name: 'Vinayak Kumar Tiwari',
+            className: 'Class IV',
+            gender: 'M',
+            fatherName: 'Dhananjay Tiwari',
+            villageMatch: 'Mohammadpur',
+            mobile: '7209536913',
+          },
+          {
+            admissionNo: '1377/26',
+            name: 'Satyam Singh',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Bittu Singh',
+            villageMatch: 'Gyani Chapra',
+            mobile: '8114513147',
+          },
+          {
+            admissionNo: '1378/26',
+            name: 'Sonali Singh',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Santosh singh',
+            villageMatch: 'Gyani Chapra',
+            mobile: '8114513147',
+          },
+          {
+            admissionNo: 'NEV401/18',
+            name: 'Aarav Gupta',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Mr.Sanjay Kr. Sah',
+            villageMatch: 'Pipra Ramgarh',
+            mobile: '9576742642',
+          },
+          {
+            admissionNo: 'NEV694/21',
+            name: 'Jansi Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Chandra Prakash Ojha',
+            villageMatch: 'Pipra Ramgarh',
+            mobile: '9631418493',
+          },
+          {
+            admissionNo: 'NEV1108/24',
+            name: 'Kishan Pratap Singh',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Vijay Kr. Singh',
+            villageMatch: 'Pipra Ramgarh',
+            mobile: '9771754766',
+          },
+          {
+            admissionNo: 'NEV680/20',
+            name: 'Palak Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Pawan Singh',
+            villageMatch: 'Pipra Ramgarh',
+            mobile: '9871713200',
+          },
+          {
+            admissionNo: 'NEV410/18',
+            name: 'Dibyanshu Dubey',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Sunil Dubey',
+            villageMatch: 'Ramgarh',
+            mobile: '7352894252',
+          },
+          {
+            admissionNo: 'NEV607/18',
+            name: 'Pranjal Dubey',
+            className: 'Class X',
+            gender: 'M',
+            fatherName: 'Dhruv Dubey',
+            villageMatch: 'Ramgarh',
+            mobile: '8002004261',
+          },
+          {
+            admissionNo: 'NEV650/19',
+            name: 'Rishabh Ranjit Urf Surya',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Kumar Aprajit',
+            villageMatch: 'Ramgarh',
+            mobile: '9955759166',
+          },
+          {
+            admissionNo: 'NEV1096/24',
+            name: 'Sanskar Kumar',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Raj Kumar Baitha',
+            villageMatch: 'Ramgarh',
+            mobile: '7542094302',
+          },
+          {
+            admissionNo: 'NEV489/18',
+            name: 'Shreya Sharma',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'Vijay Kishore Sharam',
+            villageMatch: 'Ramgarh',
+            mobile: '9661637359',
+          },
+          {
+            admissionNo: 'NEV400/18',
+            name: 'Tosif Raja',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Mr.Kitabuddin Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9102928605',
+          },
+          {
+            admissionNo: 'NEV1508/26',
+            name: 'Jeeviaa Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Mr Navin Upadhyay',
+            villageMatch: 'Ramgarh',
+            mobile: '8228852857',
+          },
+          {
+            admissionNo: 'NEV504/18',
+            name: 'Mahi Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Mr.Jitendra Kr. Yadav',
+            villageMatch: 'Nagai',
+            mobile: '7357969041',
+          },
+          {
+            admissionNo: 'NEV1206/25',
+            name: 'Anushka Kumari',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: 'Santosh Kr.Tiwari',
+            villageMatch: 'Mubarakhpur',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1026/24',
+            name: 'Roshan Kumar Sahani',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Prakash Kumar Sahani',
+            villageMatch: 'Mubarakhpur',
+            mobile: '7763030760',
+          },
+          {
+            admissionNo: '',
+            name: 'Piyush Kumar',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Shristi Kri',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Somya kumari',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'khushboo kumari',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Shristi patel',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Priya kumari',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'kritika kumari',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Snehi kumari',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Nisha Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'karan Kumar',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Raunak Kumar',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Old school',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-sr06261',
+        routeObj: sr06261Route,
+        fallbackRouteId: 'rot-1793104600020',
+        fallbackRouteCode: 'Sr/0626/1',
+        members: [
+          {
+            admissionNo: 'NEV1175/25',
+            name: 'Anshikha Yadav',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: 'Raju kumar Yadav',
+            villageMatch: 'Ansar',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV898/23',
+            name: 'Eklavya Singh',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Randhir Singh',
+            villageMatch: 'Ansar',
+            mobile: '9931495408',
+          },
+          {
+            admissionNo: 'NEV923/23',
+            name: 'Ayansh Singh',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Abhimanyu Singh',
+            villageMatch: 'Nanda Mura',
+            mobile: '9006564790',
+          },
+          {
+            admissionNo: 'NEV924/23',
+            name: 'Abhiraj Singh',
+            className: 'Class X',
+            gender: 'M',
+            fatherName: 'Abhimanyu Singh',
+            villageMatch: 'Nanda Mura',
+            mobile: '9006564790',
+          },
+          {
+            admissionNo: 'NEV1241/26',
+            name: 'Aditya Kumar pandit',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'SHAMBHU NATH PANDIT',
+            villageMatch: 'Nanda Mura',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV508/18',
+            name: 'Prince Kumar Yadav',
+            className: 'Class X',
+            gender: 'M',
+            fatherName: 'Manoj Yadav',
+            villageMatch: 'Nanda Mura',
+            mobile: '8709323256',
+          },
+          {
+            admissionNo: 'NEV1265/25',
+            name: 'Vijesh Kumar',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Ramesh Yadav',
+            villageMatch: 'Nanda Mura',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV698/21',
+            name: 'Sundaram Kuma Singh',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Shailendra Kumar Singh',
+            villageMatch: 'Saichani',
+            mobile: '9199979663',
+          },
+          {
+            admissionNo: 'NEV842/22',
+            name: 'Aryav',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Brij Mohan Kumar Singh',
+            villageMatch: 'Maha Nagar',
+            mobile: '9771355058',
+          },
+          {
+            admissionNo: 'NEV791/21',
+            name: 'Raunak Kumar Singh',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Sanjay Kumar Singh',
+            villageMatch: 'Maha Nagar',
+            mobile: '7761895707',
+          },
+          {
+            admissionNo: 'NEV840/22',
+            name: 'Tanu Kumari',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'Satyendra Singh',
+            villageMatch: 'Maha Nagar',
+            mobile: '9973032847',
+          },
+          {
+            admissionNo: 'NEV872/23',
+            name: 'Aryan Yadav',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Manoj Yadav',
+            villageMatch: 'Bhikhpur',
+            mobile: '8207687418',
+          },
+          {
+            admissionNo: 'NEV969/23',
+            name: 'Mahi Raj Gupta',
+            className: 'Class X',
+            gender: 'M',
+            fatherName: 'Manoj Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '7717778251',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-sr71782',
+        routeObj: sr71782Route,
+        fallbackRouteId: 'rot-1793104626097',
+        fallbackRouteCode: 'Sr/7178/2',
+        members: [
+          {
+            admissionNo: 'NEV577/18',
+            name: 'Anushka Kumari',
+            className: 'Class X',
+            gender: 'F',
+            fatherName: 'Amit Kumar Gupta',
+            villageMatch: 'Chainpur',
+            mobile: '9525854649',
+          },
+          {
+            admissionNo: 'NEV1232/25',
+            name: 'Arnav Kumar',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Munna Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '9006961354',
+          },
+          {
+            admissionNo: 'NEV933/23',
+            name: 'Aryan Kr. Soni',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Ramesh kr. Soni',
+            villageMatch: 'Chainpur',
+            mobile: '8092384910',
+          },
+          {
+            admissionNo: 'NEV1249/26',
+            name: 'DIGVIJAY KUMAR',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'MUKESH KUMAR PRASAD',
+            villageMatch: 'Chainpur',
+            mobile: '9122684962',
+          },
+          {
+            admissionNo: 'NEV628/18',
+            name: 'Isha Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Dhiraj Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '7070256062',
+          },
+          {
+            admissionNo: 'NEV1231/25',
+            name: 'Kumar Aarav',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Munna Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '9006961354',
+          },
+          {
+            admissionNo: 'NEV371/18',
+            name: 'Navya Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Chandan Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '8969529029',
+          },
+          {
+            admissionNo: 'NEV1211/25',
+            name: 'Omraj',
+            className: 'Class IX',
+            gender: 'M',
+            fatherName: 'Sanjay Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '8092073834',
+          },
+          {
+            admissionNo: 'NEV1034/24',
+            name: 'Prachi Kumari',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'Ranjan Kr.Prasad',
+            villageMatch: 'Chainpur',
+            mobile: '7739250100',
+          },
+          {
+            admissionNo: 'NEV699/21',
+            name: 'Prachi Kumari',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: 'Sunil Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '8092073834',
+          },
+          {
+            admissionNo: 'NEV590/18',
+            name: 'Ritika Raj',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Shri Ram Prasad',
+            villageMatch: 'Chainpur',
+            mobile: '9771355066',
+          },
+          {
+            admissionNo: 'NEV579/18',
+            name: 'Shaurya Kr Gupta',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Amit Kumar Gupta',
+            villageMatch: 'Chainpur',
+            mobile: '9525854640',
+          },
+          {
+            admissionNo: 'NEV968/23',
+            name: 'Yuvraj Gupta',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Raj Kumar Gupta',
+            villageMatch: 'Chainpur',
+            mobile: '6202607332',
+          },
+          {
+            admissionNo: 'NEV967/23',
+            name: 'Yash Raj Gupta',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Raj Kumar Gupta',
+            villageMatch: 'Chainpur',
+            mobile: '6202607332',
+          },
+          {
+            admissionNo: 'NEV1035/24',
+            name: 'Sameer Kumar',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Satish Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-sr37941',
+        routeObj: sr37941Route,
+        fallbackRouteId: 'rot-1793104681947',
+        fallbackRouteCode: 'Sr/3794/1',
+        members: [
+          {
+            admissionNo: 'NEV1242/26',
+            name: 'Arpita Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Raju Tiwari',
+            villageMatch: 'Tarwa Parsa',
+            mobile: '7827364706',
+          },
+          {
+            admissionNo: 'NEV1243/26',
+            name: 'Pallavi Kumari',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'Raju TIwari',
+            villageMatch: 'Tarwa Parsa',
+            mobile: '7827364706',
+          },
+          {
+            admissionNo: 'NEV547/18',
+            name: 'Nishant Kumar Yadav',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Manoj Yadav',
+            villageMatch: 'Khajuwan',
+            mobile: '9546914434',
+          },
+          {
+            admissionNo: 'NEV436/18',
+            name: 'Prashant Kumar Yadav',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Santosh Yadav',
+            villageMatch: 'Khajuwan',
+            mobile: '8002452700',
+          },
+          {
+            admissionNo: 'NEV435/18',
+            name: 'Ragni Kumari',
+            className: 'Class IX',
+            gender: 'F',
+            fatherName: 'Manoj Yadav',
+            villageMatch: 'Khajuwan',
+            mobile: '9546914434',
+          },
+          {
+            admissionNo: 'NEV548/18',
+            name: 'Saloni Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Santosh Kumar Yadav',
+            villageMatch: 'Khajuwan',
+            mobile: '9546914434',
+          },
+          {
+            admissionNo: 'NEV323/18',
+            name: 'Prolly Singh',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Bhim Kumar Singh',
+            villageMatch: 'Tesuwar',
+            mobile: '8521503366',
+          },
+          {
+            admissionNo: 'NEV433/18',
+            name: 'RAJVEER KUMAR SINGH',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Vinod Singh',
+            villageMatch: 'Tesuwar',
+            mobile: '7295935949',
+          },
+          {
+            admissionNo: 'NEV814/22',
+            name: 'Shivam Kr.Dubey',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Shubash Dubey',
+            villageMatch: 'Jamanpura',
+            mobile: '7061754590',
+          },
+          {
+            admissionNo: 'NEV603/18',
+            name: 'Arohi Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Gorakh Nath Dubey',
+            villageMatch: 'Jamanpura',
+            mobile: '9546375721',
+          },
+          {
+            admissionNo: 'NEV615/18',
+            name: 'Ayushi Kumari',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: 'Munna Kumar Singh',
+            villageMatch: 'Jamanpura',
+            mobile: '7631795209',
+          },
+          {
+            admissionNo: 'NEV405/18',
+            name: 'Anshu Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Mr.Dharmendra Kumar',
+            villageMatch: 'Baliya Kothi',
+            mobile: '7970467698',
+          },
+          {
+            admissionNo: 'NEV992/24',
+            name: 'Manu Kumar Bharti',
+            className: 'Class VI',
+            gender: 'M',
+            fatherName: 'Sailendra Bharti',
+            villageMatch: 'Tesuwar',
+            mobile: '9974252851',
+          },
+          {
+            admissionNo: 'NEV1507/26',
+            name: 'Rishi Kumar Panday',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Prmendra Panday',
+            villageMatch: 'Tarwa Parsa',
+            mobile: '7070704637',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-sr71752',
+        routeObj: sr71752Route,
+        fallbackRouteId: 'rot-1793104791279',
+        fallbackRouteCode: 'Sr/7175/2',
+        members: [
+          {
+            admissionNo: 'NEV1501/26',
+            name: 'JIGYA KUMARI',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'DHIRENDRA SINGH',
+            villageMatch: 'Jalalpur',
+            mobile: '6200069156',
+          },
+          {
+            admissionNo: 'NEV1407/26',
+            name: 'Jyesh Singh',
+            className: 'Class IV',
+            gender: 'M',
+            fatherName: 'DHIRENDRA SINGH',
+            villageMatch: 'Jalalpur',
+            mobile: '6200069156',
+          },
+          {
+            admissionNo: 'NEV1245/26',
+            name: 'Khushi Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Dinna Nath Ram',
+            villageMatch: 'Rajanpura',
+            mobile: '8757911385',
+          },
+          {
+            admissionNo: 'NEV1246/26',
+            name: 'Nikki Kumari',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: 'Dinna Nath Ram',
+            villageMatch: 'Rajanpura',
+            mobile: '8757911385',
+          },
+          {
+            admissionNo: 'NEV783/21',
+            name: 'Aditi Raj',
+            className: 'Class VIII',
+            gender: 'F',
+            fatherName: 'Ramashankar Yadav',
+            villageMatch: 'Kathtal',
+            mobile: '9576513949',
+          },
+          {
+            admissionNo: 'NEV1064/24',
+            name: 'Ashish Kumar Yadav',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Ravi Kumar Yadav',
+            villageMatch: 'Kathtal',
+            mobile: '6203489924',
+          },
+          {
+            admissionNo: 'NEV174/18',
+            name: 'Adarsh Kumar',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Chandan Kumar',
+            villageMatch: 'Chitaulli',
+            mobile: '9433289124',
+          },
+          {
+            admissionNo: 'NEV367/18',
+            name: 'Ankesh Kr. Yadav',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Guddu Yadav',
+            villageMatch: 'Chitaulli',
+            mobile: '8809107447',
+          },
+          {
+            admissionNo: 'NEV283/18',
+            name: 'Aniket Kumar',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Rabinder Kr. Singh',
+            villageMatch: 'Nawada',
+            mobile: '7654304680',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-srxylo1',
+        routeObj: srXylo1Route,
+        fallbackRouteId: 'rot-1793104832357',
+        fallbackRouteCode: 'Sr/XYLO/1',
+        members: [
+          {
+            admissionNo: 'NEV1126/24',
+            name: 'Aaradhy Upadhyay',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Pankaj Kumar Upadhyay',
+            villageMatch: 'Morwan',
+            mobile: '6386332943',
+          },
+          {
+            admissionNo: 'NEV1051/24',
+            name: 'Abhinav Kumar',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Rajeshwar Prasad',
+            villageMatch: 'Suwahi',
+            mobile: '9801050725',
+          },
+          {
+            admissionNo: 'NEV1235/25',
+            name: 'Khushi Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Late- Jawahar Prasad',
+            villageMatch: 'Suwahi',
+            mobile: '9523776374',
+          },
+          {
+            admissionNo: 'NEV109/18',
+            name: 'Adarsh Kumar Dwivedy',
+            className: 'Class VII',
+            gender: 'M',
+            fatherName: 'Kamlesh Kr.Dwivedi',
+            villageMatch: 'Nonya Patti',
+            mobile: '8507047771',
+          },
+          {
+            admissionNo: 'NEV664/20',
+            name: 'Ashutosh Kumar Dwivedi',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Sri Kamlesh Kumar Dwivedi',
+            villageMatch: 'Nonya Patti',
+            mobile: '9006468561',
+          },
+          {
+            admissionNo: 'NEV601/18',
+            name: 'Somya Singh',
+            className: 'Class V',
+            gender: 'F',
+            fatherName: 'Sanjay Singh',
+            villageMatch: 'Tilauta',
+            mobile: '7739342361',
+          },
+          {
+            admissionNo: 'NEV1151/25',
+            name: 'Rajveer Pandey',
+            className: 'Class VIII',
+            gender: 'M',
+            fatherName: 'Rajan Kr. Pandey',
+            villageMatch: 'Chainpur',
+            mobile: '7488821452',
+          },
+          {
+            admissionNo: 'NEV1152/25',
+            name: 'Prachi Kumari',
+            className: 'Class VI',
+            gender: 'F',
+            fatherName: 'Rajan Kumar Pandey',
+            villageMatch: 'Chainpur',
+            mobile: '7488821452',
+          },
+          {
+            admissionNo: 'NEV990/24',
+            name: 'Anshika Kumari',
+            className: 'Class VII',
+            gender: 'F',
+            fatherName: 'Ishwar dew Yadav',
+            villageMatch: 'Chainpur',
+            mobile: '9129353540',
+          },
+          {
+            admissionNo: 'NEV1506/26',
+            name: 'Krishna Kumar',
+            className: 'Class V',
+            gender: 'M',
+            fatherName: 'Achchelal Sah',
+            villageMatch: 'Saraut',
+            mobile: '8084421663',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr87071',
+        routeObj: jr87071Route,
+        fallbackRouteId: 'rot-1793009826681',
+        fallbackRouteCode: 'Jr/8707/1',
+        members: [
+          {
+            admissionNo: 'NEV1318/25',
+            name: 'Aaruehi Singh',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Dhananjay kumar singh',
+            villageMatch: 'Ansar',
+            mobile: '8252384201',
+          },
+          {
+            admissionNo: 'NEV1176/25',
+            name: 'Anish Kumar Yadav',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Raju Kumar Yadav',
+            villageMatch: 'Ansar',
+            mobile: '7632871946',
+          },
+          {
+            admissionNo: '1356/26',
+            name: 'Pallavi Kumari',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Rakesh kumar sah',
+            villageMatch: 'Ansar',
+            mobile: '9931591671',
+          },
+          {
+            admissionNo: 'NEV961/23',
+            name: 'Shan Kumar Singh',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Sonu Singh',
+            villageMatch: 'Ansar',
+            mobile: '8160697834',
+          },
+          {
+            admissionNo: 'NEV916/23',
+            name: 'Ashish Kumar',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Bhushan Singh',
+            villageMatch: 'Nanda Mura',
+            mobile: '9974343978',
+          },
+          {
+            admissionNo: 'NEV1256/25',
+            name: 'Ayush Kumar',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Manoj Yadav',
+            villageMatch: 'Nanda Mura',
+            mobile: '8210761439',
+          },
+          {
+            admissionNo: '1354/26',
+            name: 'Deepak kumar',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Vinod kumar',
+            villageMatch: 'Nanda Mura',
+            mobile: '7632866474',
+          },
+          {
+            admissionNo: '1386/26',
+            name: 'Saksham kuswaha',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vinod Kumar',
+            villageMatch: 'Nanda Mura',
+            mobile: '9546194449',
+          },
+          {
+            admissionNo: '1349/26',
+            name: 'Yuvraj yadav',
+            className: 'Playgroup',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Rajesh yadav',
+            villageMatch: 'Nanda Mura',
+            mobile: '7250262745',
+          },
+          {
+            admissionNo: 'NEV1418/26',
+            name: 'Aarohi kumari',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Pramod Tiwari',
+            villageMatch: 'Nanda Mura',
+            mobile: '7654821819',
+          },
+          {
+            admissionNo: 'NEV1414/26',
+            name: 'Sukesh Kumar',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Sanjay Yadav',
+            villageMatch: 'Nanda Mura',
+            mobile: '9264144731',
+          },
+          {
+            admissionNo: 'NEV1412/26',
+            name: 'Anshika Kumari',
+            className: 'LKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Sanjay yadav',
+            villageMatch: 'Nanda Mura',
+            mobile: '9264144731',
+          },
+          {
+            admissionNo: 'NEV922/23',
+            name: 'Anmol Kumar Singh',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Brijesh Kumar Singh',
+            villageMatch: 'Saichani',
+            mobile: '7461826865',
+          },
+          {
+            admissionNo: 'NEV1080/24',
+            name: 'Divya Kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Lakshman Sharma',
+            villageMatch: 'Saichani',
+            mobile: '8877349566',
+          },
+          {
+            admissionNo: 'NEV1159/25',
+            name: 'Pratigya Singh',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Rajnish Singh',
+            villageMatch: 'Saichani',
+            mobile: '9241303321',
+          },
+          {
+            admissionNo: 'NEV1121/24',
+            name: 'Adhiraj Kumar Sah',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Dhiraj Kumar Sah',
+            villageMatch: 'Maha Nagar',
+            mobile: '9031149501',
+          },
+          {
+            admissionNo: 'NEV978/24',
+            name: 'Aradhya Yadav',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Mukesh Kumar Yadav',
+            villageMatch: 'Maha Nagar',
+            mobile: '8340103605',
+          },
+          {
+            admissionNo: 'NRV1413/26',
+            name: 'Vindeswar',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Sanjay Yadav',
+            villageMatch: 'Maha Nagar',
+            mobile: '9264144731',
+          },
+          {
+            admissionNo: '',
+            name: 'Aryan Kumar',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Maha Nagar',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Isra',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Bhikhpur',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Aaraw',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Bhikhpur',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Arman',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Bhikhpur',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Prachi',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Bhikhpur',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Arvi Kumari',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Bhikhpur',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jrwb2',
+        routeObj: jrWb2Route,
+        fallbackRouteId: 'rot-1793010310199',
+        fallbackRouteCode: 'Jr/WB/2',
+        members: [
+          {
+            admissionNo: 'NEV1314/25',
+            name: 'Pari Kumari',
+            className: 'LKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Vinod kumar baitha',
+            villageMatch: 'Rajanpura',
+            mobile: '9771528119',
+          },
+          {
+            admissionNo: 'NEV1313/25',
+            name: 'Ayansh Kumar',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vinod kumar baitha',
+            villageMatch: 'Rajanpura',
+            mobile: '9771528119',
+          },
+          {
+            admissionNo: 'NEV899/23',
+            name: 'Rajshree Kumari',
+            className: 'Class II',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Rituraj Kumar',
+            villageMatch: 'Kathtal',
+            mobile: '6205465561',
+          },
+          {
+            admissionNo: 'NEV768/21',
+            name: 'Ansh Kumar',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Rituraj Kumar',
+            villageMatch: 'Kathtal',
+            mobile: '6205465561',
+          },
+          {
+            admissionNo: 'NEV1415/26',
+            name: 'Abhishek kumar',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Magistar yadav',
+            villageMatch: 'Dhum Nagar',
+            mobile: '8292562669',
+          },
+          {
+            admissionNo: 'NEV1040/24',
+            name: 'Rishabh Kumar Tiwari',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ranjeet Tiwari',
+            villageMatch: 'Madhawapur',
+            mobile: '9631140839',
+          },
+          {
+            admissionNo: 'NEV1041/24',
+            name: 'Rishika Kumari',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Ranjeet Tiwari',
+            villageMatch: 'Madhawapur',
+            mobile: '9631140839',
+          },
+          {
+            admissionNo: '1409/26',
+            name: 'Advik yadav',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dharmendra yadav',
+            villageMatch: 'Chitaulli',
+            mobile: '6201624062',
+          },
+          {
+            admissionNo: 'NEV1114/24',
+            name: 'Anmol Kumari',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Ratnesh Yadav',
+            villageMatch: 'Chitaulli',
+            mobile: '8102825406',
+          },
+          {
+            admissionNo: '1410/26',
+            name: 'Arpit yadav',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Dharmendra yadav',
+            villageMatch: 'Chitaulli',
+            mobile: '6201624062',
+          },
+          {
+            admissionNo: 'NEV1194/25',
+            name: 'Aryan Yadav',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ajay Yadav',
+            villageMatch: 'Chitaulli',
+            mobile: '7260048969',
+          },
+          {
+            admissionNo: 'NEV1116/24',
+            name: 'Satyam Kumar Yadav',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ratnesh Yadav',
+            villageMatch: 'Chitaulli',
+            mobile: '8102825406',
+          },
+          {
+            admissionNo: 'NEV907/23',
+            name: 'Utkarsh Kumar',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Chandan Kumar',
+            villageMatch: 'Chitaulli',
+            mobile: '6290403826',
+          },
+          {
+            admissionNo: '1373/26',
+            name: 'Anmol Pandey',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Manoj Pandey',
+            villageMatch: 'Nawada',
+            mobile: '7870717430',
+          },
+          {
+            admissionNo: '1385/26',
+            name: 'Divya Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Bhism Singh',
+            villageMatch: 'Nawada',
+            mobile: '7870416519',
+          },
+          {
+            admissionNo: '1372/26',
+            name: 'Harsh pandey',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Manoj pandey',
+            villageMatch: 'Nawada',
+            mobile: '7870717430',
+          },
+          {
+            admissionNo: '1375/26',
+            name: 'Rajveer Singh',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ranjan singh',
+            villageMatch: 'Nawada',
+            mobile: '9262853082',
+          },
+          {
+            admissionNo: '1376/26',
+            name: 'Rudarnsh Singh',
+            className: 'Playgroup',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ranjan Singh',
+            villageMatch: 'Nawada',
+            mobile: '9262853082',
+          },
+          {
+            admissionNo: '1374/26',
+            name: 'Supriya pandey',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Vinod Pandey',
+            villageMatch: 'Nawada',
+            mobile: '7870717430',
+          },
+          {
+            admissionNo: 'NEV649/19',
+            name: 'Yash Kumar',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ravi Ranjan Dubey',
+            villageMatch: 'Nawada',
+            mobile: '9801497632',
+          },
+          {
+            admissionNo: 'NEV1461/26',
+            name: 'Shreyansh Kumar',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Mr Vishal Patel',
+            villageMatch: 'Chitaulli',
+            mobile: '7479506459',
+          },
+          {
+            admissionNo: 'NEV1438/26',
+            name: 'Ashu Kumar',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Amrendra Singh',
+            villageMatch: 'Nawada',
+            mobile: '8434330354',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr06262',
+        routeObj: jr06262Route,
+        fallbackRouteId: 'rot-1793010433329',
+        fallbackRouteCode: 'Jr/0626/2',
+        members: [
+          {
+            admissionNo: 'NEV1348/26',
+            name: 'Aditya Kumar yadav',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Nikeshwar yadav',
+            villageMatch: 'Bakhari',
+            mobile: '7250641538',
+          },
+          {
+            admissionNo: 'NEV1347/26',
+            name: 'Aryan Yadav',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Nikeshwar Yadav',
+            villageMatch: 'Bakhari',
+            mobile: '7250641538',
+          },
+          {
+            admissionNo: 'NEV1013/24',
+            name: 'Anmol Kumar',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Akhilesh Kumar',
+            villageMatch: 'Ubdhi',
+            mobile: '6200531501',
+          },
+          {
+            admissionNo: 'NEV1266/25',
+            name: 'Aryan kumar',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Sunil kumar yadav',
+            villageMatch: 'Ubdhi',
+            mobile: '6206721488',
+          },
+          {
+            admissionNo: 'NEV1014/24',
+            name: 'Tejaswi Kumar Yadav',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Akhilesh Kumar',
+            villageMatch: 'Ubdhi',
+            mobile: '6200531501',
+          },
+          {
+            admissionNo: 'NEV1148/25',
+            name: 'Meraj Ansari',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Maksudan Ansari',
+            villageMatch: 'Ubdhi',
+            mobile: '7667847031',
+          },
+          {
+            admissionNo: 'NEV1147/25',
+            name: 'Prince Kumar',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Hiralal yadav',
+            villageMatch: 'Sonbarsa',
+            mobile: '9570638646',
+          },
+          {
+            admissionNo: 'NEV1366/26',
+            name: 'Risha Kumari',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Hiralal yadav',
+            villageMatch: 'Sonbarsa',
+            mobile: '9570638646',
+          },
+          {
+            admissionNo: 'NEV 1332/25',
+            name: 'Ankit Kumar',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Rakesh Baitha',
+            villageMatch: 'Kisunbari',
+            mobile: '9905289794',
+          },
+          {
+            admissionNo: 'NEV1133/24',
+            name: 'Anurag Kumar',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Raju Kumar Yadav',
+            villageMatch: 'Kisunbari',
+            mobile: '7870306765',
+          },
+          {
+            admissionNo: 'NEV1134/24',
+            name: 'Radha Kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Raju Kumar Yadav',
+            villageMatch: 'Kisunbari',
+            mobile: '7870306765',
+          },
+          {
+            admissionNo: 'NEV1342/26',
+            name: 'Anushka Kumari',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Pundev yadav',
+            villageMatch: 'Kisunbari',
+            mobile: '9330480493',
+          },
+          {
+            admissionNo: 'NEV1150/25',
+            name: 'Himanshu Kumar Yadav',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Guru yadav',
+            villageMatch: 'Kisunbari',
+            mobile: '9960579451',
+          },
+          {
+            admissionNo: 'NEV1335/25',
+            name: 'Nikhil kumar yadav',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ramprit yadav',
+            villageMatch: 'Kisunbari',
+            mobile: '9729839207',
+          },
+          {
+            admissionNo: 'NEV1422/26',
+            name: 'Prachi kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Sunil yadav',
+            villageMatch: 'Bhikhpur',
+            mobile: '8581870777',
+          },
+          {
+            admissionNo: 'NEV1457/26',
+            name: 'Ashish Kumar Yadav',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'pramatma Yadav',
+            villageMatch: 'Ubdhi',
+            mobile: '7079980622',
+          },
+          {
+            admissionNo: '',
+            name: 'Suchita Kumari',
+            className: 'LKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Kisunbari',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Ananya Kumari',
+            className: 'LKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Kisunbari',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Rishab Kumar',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Sonbarsa',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jrinod1',
+        routeObj: jrInod1Route,
+        fallbackRouteId: 'rot-1793117488462',
+        fallbackRouteCode: 'Jr/INOD/1',
+        members: [
+          {
+            admissionNo: 'NEV1216/25',
+            name: 'Aniket Kumar',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Lalji Manjhi',
+            villageMatch: 'Saraut',
+            mobile: '9631824745',
+          },
+          {
+            admissionNo: 'NEV1213/25',
+            name: 'Anmol Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vinod Kumar Ram',
+            villageMatch: 'Saraut',
+            mobile: '7858017081',
+          },
+          {
+            admissionNo: 'NEV1160/25',
+            name: 'Atul Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vijay Prasad',
+            villageMatch: 'Saraut',
+            mobile: '8969675160',
+          },
+          {
+            admissionNo: 'NEV1183/25',
+            name: 'Avish Pratap Singh',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vikash Pratap Singh',
+            villageMatch: 'Saraut',
+            mobile: '8595811824',
+          },
+          {
+            admissionNo: 'NEV1215/25',
+            name: 'Khushbu kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Lalji Manjhi',
+            villageMatch: 'Saraut',
+            mobile: '9631824745',
+          },
+          {
+            admissionNo: 'NEV1214/25',
+            name: 'Khushi kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Lalji Manjhi',
+            villageMatch: 'Saraut',
+            mobile: '9631824745',
+          },
+          {
+            admissionNo: 'NEV1186/25',
+            name: 'Prabhansh Kumar',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Ranjeet Prasad',
+            villageMatch: 'Saraut',
+            mobile: '8084055790',
+          },
+          {
+            admissionNo: 'NEV1198/25',
+            name: 'Riyanshi Singh',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Ranjeet Kumar Singh',
+            villageMatch: 'Saraut',
+            mobile: '7004043497',
+          },
+          {
+            admissionNo: 'NEV1158/25',
+            name: 'Sunny kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vivek Prasad',
+            villageMatch: 'Saraut',
+            mobile: '9990115264',
+          },
+          {
+            admissionNo: 'NEV1404/26',
+            name: 'Asd',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Saddam Ali',
+            villageMatch: 'Bhagar',
+            mobile: '8862933821',
+          },
+          {
+            admissionNo: 'NEV1180/25',
+            name: 'Kumari Anshika',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Vikash Kumar Yadav',
+            villageMatch: 'Bhagar',
+            mobile: '9546647117',
+          },
+          {
+            admissionNo: 'NEV1155/25',
+            name: 'Sarvjit Kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Sonu kumar',
+            villageMatch: 'Bhagar',
+            mobile: '7367939299',
+          },
+          {
+            admissionNo: 'NEV1397/26',
+            name: 'Aryan Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Akshay kumar yadav',
+            villageMatch: 'Kachnar',
+            mobile: '8320126970',
+          },
+          {
+            admissionNo: 'NEV1398/26',
+            name: 'Yash yadav',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Akshay kumar yadav',
+            villageMatch: 'Kachnar',
+            mobile: '8320126970',
+          },
+          {
+            admissionNo: 'NEV1436/26',
+            name: 'Chaitanya Trishika',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Arvind Kumar Singh',
+            villageMatch: 'Saraut',
+            mobile: '7004043497',
+          },
+          {
+            admissionNo: 'NEV1069/24',
+            name: 'Supriya Kumari',
+            className: 'Class VIII',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Santosh Kumar Singh',
+            villageMatch: 'Kachnar',
+            mobile: '7250305766',
+          },
+          {
+            admissionNo: 'NEV1238/25',
+            name: 'SURAJ KUMAR YADAV',
+            className: 'Class VII',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'HARISHANKAR YADAV',
+            villageMatch: 'Kachnar',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1068/24',
+            name: 'Surbhi Kumari',
+            className: 'Class X',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Santosh Kumar Singh',
+            villageMatch: 'Kachnar',
+            mobile: '7250305766',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jrinod2',
+        routeObj: jrInod2Route,
+        fallbackRouteId: 'rot-1793117542005',
+        fallbackRouteCode: 'Jr/INOD/2',
+        members: [
+          {
+            admissionNo: 'NEV1052/24',
+            name: 'Aashi Kumari',
+            className: 'Class II',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Dhananjay Kumar Singh',
+            villageMatch: 'Tilauta',
+            mobile: '7739342361',
+          },
+          {
+            admissionNo: 'NEV1324/25',
+            name: 'Kairo Kumar',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dhananjay Singh',
+            villageMatch: 'Tilauta',
+            mobile: '7542072495',
+          },
+          {
+            admissionNo: 'NEV1053/24',
+            name: 'Kavya Kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Sanjay Singh',
+            villageMatch: 'Tilauta',
+            mobile: '7739342361',
+          },
+          {
+            admissionNo: 'NEV1337/26',
+            name: 'Prabha Kumari',
+            className: 'LKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Pankaj Singh',
+            villageMatch: 'Tilauta',
+            mobile: '6207576037',
+          },
+          {
+            admissionNo: 'NEV1339/26',
+            name: 'Priyadarshan Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Pawan Singh',
+            villageMatch: 'Tilauta',
+            mobile: '6207576037',
+          },
+          {
+            admissionNo: 'NEV1338/26',
+            name: 'Purshtam Kumar',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Pawan Singh',
+            villageMatch: 'Tilauta',
+            mobile: '6207576037',
+          },
+          {
+            admissionNo: 'NEV1340/26',
+            name: 'Sanchit Kumar',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Subash Kumar',
+            villageMatch: 'Tilauta',
+            mobile: '8210369770',
+          },
+          {
+            admissionNo: 'NEV1095/24',
+            name: 'Sarika Kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Sanjeev Kumar Singh',
+            villageMatch: 'Tilauta',
+            mobile: '7250921423',
+          },
+          {
+            admissionNo: 'NEV1094/24',
+            name: 'Satyam Kumar Singh',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Sanjeev Kumar Singh',
+            villageMatch: 'Tilauta',
+            mobile: '7250921423',
+          },
+          {
+            admissionNo: 'NEV1384/26',
+            name: 'Tejaswi surya',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ramesh kumar patel',
+            villageMatch: 'Tilauta',
+            mobile: '7061786138',
+          },
+          {
+            admissionNo: 'NEV1362/26',
+            name: 'Ansh Yadav',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Punanjay yadav',
+            villageMatch: 'Chandpur',
+            mobile: '9006450076',
+          },
+          {
+            admissionNo: 'NEV1361/26',
+            name: 'Areyan Yadav',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Punanjay yadav',
+            villageMatch: 'Chandpur',
+            mobile: '9006450076',
+          },
+          {
+            admissionNo: 'NEV1383/26',
+            name: 'Balbeer kumar yadav',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Brajesh Yadav',
+            villageMatch: 'Chandpur',
+            mobile: '9525477418',
+          },
+          {
+            admissionNo: 'NEV1379/26',
+            name: 'Manya Kumari',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Munna Yadav',
+            villageMatch: 'Chandpur',
+            mobile: '7654624177',
+          },
+          {
+            admissionNo: 'NEV1345/26',
+            name: 'Shiva Kumar',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Umesh yadav',
+            villageMatch: 'Chandpur',
+            mobile: '8178391497',
+          },
+          {
+            admissionNo: 'NEV1346/26',
+            name: 'Shivam Kumar',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Umesh Yadav',
+            villageMatch: 'Chandpur',
+            mobile: '8178391497',
+          },
+          {
+            admissionNo: 'NEV1423/26',
+            name: 'Aaliya perveen',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Rijwan Ahmad',
+            villageMatch: 'Chandpur',
+            mobile: '8969405991',
+          },
+          {
+            admissionNo: 'NEV1424/26',
+            name: 'Yusuf Muhammad',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Rijwan Ahmad',
+            villageMatch: 'Chandpur',
+            mobile: '7762057199',
+          },
+          {
+            admissionNo: 'NEV824/22',
+            name: 'Aditya Raj',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Shree Bhagwan Ram',
+            villageMatch: 'Siswan',
+            mobile: '9798025326',
+          },
+          {
+            admissionNo: 'NEV1296/25',
+            name: 'Shubham Kumar',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'ShreeBhagwan Ram',
+            villageMatch: 'Siswan',
+            mobile: '9661314681',
+          },
+          {
+            admissionNo: 'NEV1355/26',
+            name: 'Adarsh Thakur',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Shailesh Thakur',
+            villageMatch: 'Siswan',
+            mobile: '9102928588',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr37942',
+        routeObj: jr37942Route,
+        fallbackRouteId: jr37942Route?.id || 'rot-jr37942',
+        fallbackRouteCode: 'Jr/3794/2',
+        members: [
+          {
+            admissionNo: 'NEV1184/25',
+            name: 'Anshik Kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Mukesh Kumar Ram',
+            villageMatch: 'Devpura Mathiya',
+            mobile: '9142646364',
+          },
+          {
+            admissionNo: 'NEV1031/24',
+            name: 'Anubhav Bharti',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Deepak Kumar Bharti',
+            villageMatch: 'Devpura Mathiya',
+            mobile: '9939992433',
+          },
+          {
+            admissionNo: 'NEV1004/24',
+            name: 'Aryan Kumar',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Mukesh Kumar Ram',
+            villageMatch: 'Devpura Mathiya',
+            mobile: '9142646364',
+          },
+          {
+            admissionNo: 'NEV1326/25',
+            name: 'Glow Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Pramod Kumar Singh',
+            villageMatch: 'Devpura',
+            mobile: '9852154172',
+          },
+          {
+            admissionNo: 'NEV993/24',
+            name: 'Sagar Kumar Bharti',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ravindra Bharti',
+            villageMatch: 'Tesuwar Mathiya',
+            mobile: '6207291949',
+          },
+          {
+            admissionNo: 'NEV1113/24',
+            name: 'Iwanka',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Chandra Bhushan Singh',
+            villageMatch: 'Tesuwar Mathiya',
+            mobile: '9507507253',
+          },
+          {
+            admissionNo: 'NEV1137/24',
+            name: 'Aarya Kashyap',
+            className: 'LKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Bhim Kumar Singh',
+            villageMatch: 'Tesuwar Mathiya',
+            mobile: '8521503366',
+          },
+          {
+            admissionNo: 'NEV1060/24',
+            name: 'Akansha Kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Munna Kumar Singh',
+            villageMatch: 'Jamanpura',
+            mobile: '6366262163',
+          },
+          {
+            admissionNo: 'NEV1250/25',
+            name: 'Anmol Kumar Dubey',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Tuntun Dubey',
+            villageMatch: 'Jamanpura',
+            mobile: '8092663588',
+          },
+          {
+            admissionNo: 'NEV1123/24',
+            name: 'Jitesh Kumar',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Jitendra Kumar',
+            villageMatch: 'Baliya Kothi',
+            mobile: '9771778884',
+          },
+          {
+            admissionNo: 'NEV851/22',
+            name: 'Shruti Kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Dharmendra Kumar',
+            villageMatch: 'Baliya Kothi',
+            mobile: '7254854519',
+          },
+          {
+            admissionNo: 'NEV1459/26',
+            name: 'Priyanshi Kumari',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Devpura',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr37931',
+        routeObj: jr37931Route,
+        fallbackRouteId: jr37931Route?.id || 'rot-jr37931',
+        fallbackRouteCode: 'Jr/3793/1',
+        members: [
+          {
+            admissionNo: 'NEV994/24',
+            name: 'Ravi Ranjan Kumar',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Umesh Yadav',
+            villageMatch: 'Bhar Ke Mathiya',
+            mobile: '9546272990',
+          },
+          {
+            admissionNo: 'NEV1170/25',
+            name: 'Arohi Kumari',
+            className: 'Class II',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Ramesh Kumar Yadav',
+            villageMatch: 'Bhar Ke Mathiya',
+            mobile: '9546272990',
+          },
+          {
+            admissionNo: 'NEV1169/25',
+            name: 'Arush Kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ramesh Yadav',
+            villageMatch: 'Bhar Ke Mathiya',
+            mobile: '9546272990',
+          },
+          {
+            admissionNo: 'NEV1092/24',
+            name: 'Ansh Kumar',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dinesh Yadav',
+            villageMatch: 'Khajuwan',
+            mobile: '9893398864',
+          },
+          {
+            admissionNo: 'NEV863/22',
+            name: 'Om Kumar Bharti',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Arun Kumar Bharti',
+            villageMatch: 'Chiraiya Mathiya',
+            mobile: '9818982403',
+          },
+          {
+            admissionNo: 'NEV849/22',
+            name: 'Amarnath Yadav',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Manoj Yadav',
+            villageMatch: 'Bangare Ke Bari',
+            mobile: '6353198684',
+          },
+          {
+            admissionNo: 'NEV885/23',
+            name: 'Rudra Pratap Singh',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Shailendra Singh',
+            villageMatch: 'Bangare Ke Bari',
+            mobile: '9563683282',
+          },
+          {
+            admissionNo: 'NEV972/24',
+            name: 'Sital Kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Rakesh Kumar',
+            villageMatch: 'Bangare Ke Bari',
+            mobile: '8757482001',
+          },
+          {
+            admissionNo: 'NEV1421/26',
+            name: 'Aman kumar singh',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Brajesh kumar singh',
+            villageMatch: 'Bangare Ke Bari',
+            mobile: '8235262668',
+          },
+          {
+            admissionNo: 'NEV1447/26',
+            name: 'Tejas Kumar',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Bangare Ke Bari',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Nishchay',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Chainpur',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr37932',
+        routeObj: jr37932Route,
+        fallbackRouteId: 'rot-jr37932',
+        fallbackRouteCode: 'Jr/3793/2',
+        members: [
+          {
+            admissionNo: '1405/26',
+            name: 'Aaira naaz',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Zishan Ahmad',
+            villageMatch: 'Chainpur',
+            mobile: '9122360468',
+          },
+          {
+            admissionNo: 'NEV1058/24',
+            name: 'Aarohi Kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Mukesh Kumar Yadav',
+            villageMatch: 'Chainpur',
+            mobile: '9939723884',
+          },
+          {
+            admissionNo: 'NEV991/24',
+            name: 'Ansh Yadav',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ishwar Dev Yadav',
+            villageMatch: 'Chainpur',
+            mobile: '9129353540',
+          },
+          {
+            admissionNo: 'NEV576/18',
+            name: 'Anshuman Kumar Soni',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Deepak Kumar Soni',
+            villageMatch: 'Chainpur',
+            mobile: '8083355052',
+          },
+          {
+            admissionNo: 'NEV1083/24',
+            name: 'Aradhya Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Ishwar Chaudhary',
+            villageMatch: 'Chainpur',
+            mobile: '6200483494',
+          },
+          {
+            admissionNo: 'NEV1303/25',
+            name: 'Aradhya Kumari',
+            className: 'LKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Chandan kumar',
+            villageMatch: 'Chainpur',
+            mobile: '9939365738',
+          },
+          {
+            admissionNo: 'NEV871/22',
+            name: 'Babu Rajpal Kumar Yadav',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dinesh Kumar Yadav',
+            villageMatch: 'Chainpur',
+            mobile: '9661034490',
+          },
+          {
+            admissionNo: '1390/26',
+            name: 'Kavya kumari',
+            className: 'Playgroup',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Kunadan kumar',
+            villageMatch: 'Chainpur',
+            mobile: '9264429534',
+          },
+          {
+            admissionNo: 'NEV861/22',
+            name: 'Md. Faruk Raja',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Kitabuddin',
+            villageMatch: 'Chainpur',
+            mobile: '8515831937',
+          },
+          {
+            admissionNo: 'NEV1139/24',
+            name: 'Nityam Kumar',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Abhimanyu Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '7042029493',
+          },
+          {
+            admissionNo: 'NEV1261/25',
+            name: 'Radhika Kumari',
+            className: 'LKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Deepak Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '9199487330',
+          },
+          {
+            admissionNo: '1391/26',
+            name: 'Raja Babu',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Ranjit kumar',
+            villageMatch: 'Chainpur',
+            mobile: '8539012552',
+          },
+          {
+            admissionNo: 'NEV1036/24',
+            name: 'Raunak Kumar',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Ranjan Kumar Prasad',
+            villageMatch: 'Chainpur',
+            mobile: '6200292988',
+          },
+          {
+            admissionNo: '1333/25',
+            name: 'Shreyanshi kumari gupta',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Amit Gupta',
+            villageMatch: 'Chainpur',
+            mobile: '7488840907',
+          },
+          {
+            admissionNo: 'NEV1059/24',
+            name: 'Tejswi Yadav',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Mukesh Kumar Yadav',
+            villageMatch: 'Chainpur',
+            mobile: '9939723884',
+          },
+          {
+            admissionNo: 'NEV1091/24',
+            name: 'Yuvraj Yuvraj Gupta',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Jay Prakash Gupta',
+            villageMatch: 'Chainpur',
+            mobile: '7631507576',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jrximo1',
+        routeObj: jrXimo1Route,
+        fallbackRouteId: 'rot-1793120194793',
+        fallbackRouteCode: 'Jr/XIMO/1',
+        members: [
+          {
+            admissionNo: 'NEV999/24',
+            name: 'Adarsh Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Chandan Kumar Singh',
+            villageMatch: 'Baghauna',
+            mobile: '8809415045',
+          },
+          {
+            admissionNo: 'NEV1000/24',
+            name: 'Aditya Kumar',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Chandan Kumar Singh',
+            villageMatch: 'Baghauna',
+            mobile: '8809415045',
+          },
+          {
+            admissionNo: 'NEV1174/25',
+            name: 'Aryan Kumar Singh',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Krishna Singh',
+            villageMatch: 'Baghauna',
+            mobile: '8789906422',
+          },
+          {
+            admissionNo: 'NEV1141/24',
+            name: 'Divyam Raj',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Chandan Kumar Singh',
+            villageMatch: 'Baghauna',
+            mobile: '8102619522',
+          },
+          {
+            admissionNo: 'NEV998/24',
+            name: 'Nishu Kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Chandan Kumar Singh',
+            villageMatch: 'Baghauna',
+            mobile: '8809415045',
+          },
+          {
+            admissionNo: 'NEV1319/25',
+            name: 'Shafiq Ali',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Seyajul Din Ali',
+            villageMatch: 'Baghauna',
+            mobile: '9940449357',
+          },
+          {
+            admissionNo: 'NEV1460/26',
+            name: 'M D Hamza',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Baghauna',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1028/24',
+            name: 'Akash Pratap Singh',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Sujit Kumar Singh',
+            villageMatch: 'Suwahi',
+            mobile: '7091039055',
+          },
+          {
+            admissionNo: 'NEV1302/25',
+            name: 'Akriti Kumari Singh',
+            className: 'Class II',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Abhishek Kishor Singh',
+            villageMatch: 'Suwahi',
+            mobile: '7256092342',
+          },
+          {
+            admissionNo: 'NEV1301/25',
+            name: 'Anshika Kumari Singh',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Abhishek Kishor Singh',
+            villageMatch: 'Suwahi',
+            mobile: '7256092342',
+          },
+          {
+            admissionNo: 'NEV734/21',
+            name: 'Aryan Kumar',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Kausalendra Tiwari',
+            villageMatch: 'Suwahi',
+            mobile: '8877703640',
+          },
+          {
+            admissionNo: 'NEV1280/25',
+            name: 'Bir Pratap Singh',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dhananjay Singh',
+            villageMatch: 'Suwahi',
+            mobile: '7858090100',
+          },
+          {
+            admissionNo: 'NEV918/23',
+            name: 'Shaurya',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Nagendra Kumar',
+            villageMatch: 'Suwahi',
+            mobile: '9973730672',
+          },
+          {
+            admissionNo: 'NEV1254/25',
+            name: 'Shivansh Kumar Singh',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Chandan Kumar Singh',
+            villageMatch: 'Suwahi',
+            mobile: '8228068965',
+          },
+          {
+            admissionNo: 'NEV1191/25',
+            name: 'Angad Kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Krishna Kumar Mahto',
+            villageMatch: 'Nonya Patti',
+            mobile: '8235224548',
+          },
+          {
+            admissionNo: 'NEV1100/24',
+            name: 'Raj Lakshmi',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Shyam Nandan Dubey',
+            villageMatch: 'Nonya Patti',
+            mobile: '6204956103',
+          },
+          {
+            admissionNo: 'NEV771/21',
+            name: 'Rudra Kumar Dubey',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Shyam Nandan Dubey',
+            villageMatch: 'Nonya Patti',
+            mobile: '9708454376',
+          },
+          {
+            admissionNo: 'NEV1427/26',
+            name: 'Sneha Kumari',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Sonu Dubey',
+            villageMatch: 'Nonya Patti',
+            mobile: '7378015105',
+          },
+          {
+            admissionNo: 'NEV1426/26',
+            name: 'Aditya Kumar',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Sonu Dubey',
+            villageMatch: 'Nonya Patti',
+            mobile: '7378015105',
+          },
+          {
+            admissionNo: 'NEV1458/26',
+            name: 'Vijay lakshmi',
+            className: 'LKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'kanhya Sarma',
+            villageMatch: 'Nonya Patti',
+            mobile: '7369008411',
+          },
+          {
+            admissionNo: 'NEV1462/26',
+            name: 'Saneha Sahi',
+            className: 'Playgroup',
+            section: '',
+            gender: 'F',
+            fatherName: 'Sandip Sahi',
+            villageMatch: 'Nonya Patti',
+            mobile: '9031148615',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jrximo2',
+        routeObj: jrXimo2Route,
+        fallbackRouteId: 'rot-jrximo2',
+        fallbackRouteCode: 'Jr/XIMO/2',
+        members: [
+          {
+            admissionNo: 'NEV847/22',
+            name: 'Abhimanyu Kumar Giri',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Prem Kumar Giri',
+            villageMatch: 'Bawandih',
+            mobile: '8271229867',
+          },
+          {
+            admissionNo: '1389/26',
+            name: 'Adarsh kumar',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Pappu giri',
+            villageMatch: 'Bawandih',
+            mobile: '6207848908',
+          },
+          {
+            admissionNo: 'NEV1275/25',
+            name: 'Aditi Kumari',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Deepak Kumar Giri',
+            villageMatch: 'Bawandih',
+            mobile: '6201634667',
+          },
+          {
+            admissionNo: 'NEV758/21',
+            name: 'Alok Kumar Giri',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Upendra Kumar Giri',
+            villageMatch: 'Bawandih',
+            mobile: '9955718355',
+          },
+          {
+            admissionNo: 'NEV977/24',
+            name: 'Paridhi Kumari',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Raju Giri',
+            villageMatch: 'Bawandih',
+            mobile: '7632928311',
+          },
+          {
+            admissionNo: 'NEV1131/24',
+            name: 'Prince Kumar',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Jitendra Kumar',
+            villageMatch: 'Bawandih',
+            mobile: '7321991096',
+          },
+          {
+            admissionNo: 'NEV854/22',
+            name: 'Raunak Kumar Giri',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Pankaj Giri',
+            villageMatch: 'Bawandih',
+            mobile: '7041568107',
+          },
+          {
+            admissionNo: 'NEV962/23',
+            name: 'Raunak Kumar Giri',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Shyam Narayan Giri',
+            villageMatch: 'Bawandih',
+            mobile: '9162828606',
+          },
+          {
+            admissionNo: 'NEV888/23',
+            name: 'Rishabh Kumar Giri',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Raju Giri',
+            villageMatch: 'Bawandih',
+            mobile: '7632928311',
+          },
+          {
+            admissionNo: 'NEV886/23',
+            name: 'Rudransh Puri',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Keshri Nandan Puri',
+            villageMatch: 'Bawandih',
+            mobile: '8809966437',
+          },
+          {
+            admissionNo: '1369/26',
+            name: 'Shiva Kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Subash kumar',
+            villageMatch: 'Bawandih',
+            mobile: '8292271046',
+          },
+          {
+            admissionNo: 'NEV1209/25',
+            name: 'Shivansh Kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Shashi Bhushan Kumar',
+            villageMatch: 'Bawandih',
+            mobile: '7759932333',
+          },
+          {
+            admissionNo: 'NEV966/23',
+            name: 'Shlok Kumar Giri',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Upendra Kumar Giri',
+            villageMatch: 'Bawandih',
+            mobile: '9955718355',
+          },
+          {
+            admissionNo: 'NEV1154/25',
+            name: 'Supriya Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Shailendra kumar Giri',
+            villageMatch: 'Bawandih',
+            mobile: '9097414527',
+          },
+          {
+            admissionNo: 'NEV1451/26',
+            name: 'Rishabh Kumar Giri',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Bawandih',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1404/26',
+            name: 'Shivansh Kumar',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Bawandih',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1455/26',
+            name: 'Shivansh Giri',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Bawandih',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1294/25',
+            name: 'Utkarshh Sharma',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Saturdhan Sharma',
+            villageMatch: 'Baliya Kothi',
+            mobile: '8335944506',
+          },
+          {
+            admissionNo: 'NEV1295/25',
+            name: 'Nishakarsh Sharma',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Saturdhan Sharma',
+            villageMatch: 'Baliya Kothi',
+            mobile: '8335944506',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jrxylo2',
+        routeObj: jrXylo2Route,
+        fallbackRouteId: 'rot-jrxylo2',
+        fallbackRouteCode: 'Jr/XYLO/2',
+        members: [
+          {
+            admissionNo: 'NEV1127/24',
+            name: 'Shreeshti Upadhyay',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Pankaj Kumar Upadhyay',
+            villageMatch: 'Morwan',
+            mobile: '6386332243',
+          },
+          {
+            admissionNo: 'NEV1054/24',
+            name: 'Ashmi Dubey',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Pankaj Kumar Dubey',
+            villageMatch: 'Ghurghat',
+            mobile: '9162845688',
+          },
+          {
+            admissionNo: 'NEV1055/24',
+            name: 'Ayansh Dubey',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Pankaj Kumar Dubey',
+            villageMatch: 'Ghurghat',
+            mobile: '9162845688',
+          },
+          {
+            admissionNo: 'NEV1267/25',
+            name: 'Nitya Sharma',
+            className: 'Class II',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Dipak Sharma',
+            villageMatch: 'Ghurghat Mathiya',
+            mobile: '6204282277',
+          },
+          {
+            admissionNo: 'NEV1271/25',
+            name: 'palak kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Surajmal Prasad Gupta',
+            villageMatch: 'Ghurghat',
+            mobile: '9102045842',
+          },
+          {
+            admissionNo: 'NEV1120/24',
+            name: 'Pratik Kumar',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Sunil Prasad',
+            villageMatch: 'Ghurghat',
+            mobile: '9771049985',
+          },
+          {
+            admissionNo: 'NEV1203/25',
+            name: 'Rishiranjan Kumar Thakur',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Shailendra Kumar Thakur',
+            villageMatch: 'Ghurghat',
+            mobile: '7488951568',
+          },
+          {
+            admissionNo: 'NEV1299/25',
+            name: 'Sakshi Kumari',
+            className: 'Class II',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Mukesh kumar',
+            villageMatch: 'Ghurghat',
+            mobile: '7761836311',
+          },
+          {
+            admissionNo: 'NEV1289/25',
+            name: 'Shashank Shekhar',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Pankaj Kumar Dubey',
+            villageMatch: 'Ghurghat',
+            mobile: '9546605502',
+          },
+          {
+            admissionNo: 'NEV1204/25',
+            name: 'Srishtee Kumari',
+            className: 'LKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Shailendra kumar thakur',
+            villageMatch: 'Ghurghat',
+            mobile: '7488951568',
+          },
+          {
+            admissionNo: 'NEV1070/24',
+            name: 'Sundaram Kumar Tiwari',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Balendra Tiwari',
+            villageMatch: 'Ghurghat',
+            mobile: '9631158714',
+          },
+          {
+            admissionNo: 'NEV1188/25',
+            name: 'Roshni Saini',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Arjun Bhagat',
+            villageMatch: 'Mubarakhpur',
+            mobile: '7880469258',
+          },
+          {
+            admissionNo: '',
+            name: 'Ansh',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Chainpur',
+            mobile: '',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr71753',
+        routeObj: jr71753Route,
+        fallbackRouteId: 'rot-jr71753',
+        fallbackRouteCode: 'Jr/7175/3',
+        members: [
+          {
+            admissionNo: 'NEV1277/25',
+            name: 'Abhirudra Pandey',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Visvash Kumar Pandey',
+            villageMatch: 'Birti',
+            mobile: '9006922831',
+          },
+          {
+            admissionNo: 'NEV1177/25',
+            name: 'Anmol Kumar Yadav',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Dilip Kumar Yadav',
+            villageMatch: 'Birti',
+            mobile: '7464081569',
+          },
+          {
+            admissionNo: 'NEV1167/25',
+            name: 'Ansh Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Jalendra Yadav',
+            villageMatch: 'Birti',
+            mobile: '8092073820',
+          },
+          {
+            admissionNo: '1368/26',
+            name: 'Anshika Kumari',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Jalendra yadav',
+            villageMatch: 'Birti',
+            mobile: '8092073820',
+          },
+          {
+            admissionNo: 'NEV1022/24',
+            name: 'Daksh Kumar Upadhyay',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Dhananjay Upadhyay',
+            villageMatch: 'Birti',
+            mobile: '9507615371',
+          },
+          {
+            admissionNo: 'NEV1166/25',
+            name: 'Pallavi Kumari',
+            className: 'Class II',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Jalendra Yadav',
+            villageMatch: 'Birti',
+            mobile: '8092073820',
+          },
+          {
+            admissionNo: 'NEV772/21',
+            name: 'Priti Kumari',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Umesh Kumar Mahato',
+            villageMatch: 'Birti',
+            mobile: '9168062504',
+          },
+          {
+            admissionNo: 'NEV996/24',
+            name: 'Radha Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Rabindra Yadav',
+            villageMatch: 'Birti',
+            mobile: '7667725930',
+          },
+          {
+            admissionNo: 'NEV1290/25',
+            name: 'Radhika Kumari',
+            className: 'LKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Dharmendra Baitha',
+            villageMatch: 'Birti',
+            mobile: '6005141711',
+          },
+          {
+            admissionNo: 'NEV1027/24',
+            name: 'Rudransh Pandey',
+            className: 'Class I',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Prakash Pandey',
+            villageMatch: 'Birti',
+            mobile: '9006922831',
+          },
+          {
+            admissionNo: 'NEV914/23',
+            name: 'Sahbaj Ansari',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Saheb Hussain Ansari',
+            villageMatch: 'Birti',
+            mobile: '7759950416',
+          },
+          {
+            admissionNo: 'NEV773/21',
+            name: 'Sibbu Kumari',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Munna Kumar Lal',
+            villageMatch: 'Birti',
+            mobile: '7319906928',
+          },
+          {
+            admissionNo: 'NEV1189/25',
+            name: 'Yash Kumar Mahto',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Rakesh Mahto',
+            villageMatch: 'Birti',
+            mobile: '9661876036',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jr71783',
+        routeObj: jr71783Route,
+        fallbackRouteId: 'rot-jr71783',
+        fallbackRouteCode: 'Jr/7178/3',
+        members: [
+          {
+            admissionNo: 'NEV1297/25',
+            name: 'Ananya Kumari',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Kamlesh Tiwari',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '7856913202',
+          },
+          {
+            admissionNo: 'NEV1288/25',
+            name: 'Shivay Upadhyay',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Putus Kumar Upadhyay',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '6201221960',
+          },
+          {
+            admissionNo: 'NEV1076/24',
+            name: 'Vridhi Upadhyay',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Putush Upadhyay',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '8448550997',
+          },
+          {
+            admissionNo: 'NEV820/22',
+            name: 'Aryak Kumar Singh',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Pintu Kumar Singh',
+            villageMatch: 'Mehdar',
+            mobile: '9102130188',
+          },
+          {
+            admissionNo: 'NEV819/22',
+            name: 'Ayush Kumar Singh',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Pintu Kumar Singh',
+            villageMatch: 'Mehdar',
+            mobile: '9102130188',
+          },
+          {
+            admissionNo: 'NEV1156/25',
+            name: 'Kavya kumari',
+            className: 'LKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Ajay kumar',
+            villageMatch: 'Teliyadih',
+            mobile: '9718780580',
+          },
+          {
+            admissionNo: 'NEV1311/25',
+            name: 'Arohi chaubey',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Dhananjay Chaubey',
+            villageMatch: 'Birti',
+            mobile: '9102278903',
+          },
+          {
+            admissionNo: 'NEV1360/26',
+            name: 'Rani pandey',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Hemant Pandey',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '8409567628',
+          },
+          {
+            admissionNo: '',
+            name: 'Ankit Kumar',
+            className: '',
+            section: '',
+            gender: 'M',
+            fatherName: 'Manoj Kumar Yadav',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '',
+          },
+          {
+            admissionNo: '',
+            name: 'Rinki',
+            className: 'Class IV',
+            section: '',
+            gender: 'F',
+            fatherName: 'Manoj Kumar Yadav',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1310/25',
+            name: 'Aashi Bhardwaj',
+            className: 'Class II',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Avinash Chandra Upadhyay',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '7004160068',
+          },
+          {
+            admissionNo: 'NEV1309/25',
+            name: 'Shreyanss Bhardwaj',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Avinash Chandra Upadhyay',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '7004160068',
+          },
+          {
+            admissionNo: 'NEV1264/25',
+            name: 'Abhiraj Kumar',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Ramesh Pandey',
+            villageMatch: 'Banpura -Banpura ke Tola- Birti Pandey Tola',
+            mobile: '7870849789',
+          },
+        ],
+      },
+      {
+        seedPrefix: 'stu-jroplo2',
+        routeObj: jrOplo2Route,
+        fallbackRouteId: 'rot-jroplo2',
+        fallbackRouteCode: 'Jr/OPLO/2',
+        members: [
+          {
+            admissionNo: 'NEV810/22',
+            name: 'Dewansh Kashyap',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dinesh Kumar Tiwari',
+            villageMatch: 'Mubarakhpur',
+            mobile: '6200870688',
+          },
+          {
+            admissionNo: 'NEV1388/26',
+            name: 'Ashish kumar',
+            className: 'Nursery',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Vijay shankar mallah',
+            villageMatch: 'Pipra (Ramgarh)',
+            mobile: '7542095293',
+          },
+          {
+            admissionNo: 'NEV811/22',
+            name: 'Priyanshu Kumar',
+            className: 'Class III',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Chandra Prakash Ojha',
+            villageMatch: 'Pipra (Ramgarh)',
+            mobile: '8873493952',
+          },
+          {
+            admissionNo: 'NEV801/22',
+            name: 'Shri Ganesh',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Girdhar Tripathi',
+            villageMatch: 'Pipra (Ramgarh)',
+            mobile: '9162846953',
+          },
+          {
+            admissionNo: 'NEV1008/24',
+            name: 'Shri Ganeshwar',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Giridhar Tripathi',
+            villageMatch: 'Pipra (Ramgarh)',
+            mobile: '8581975537',
+          },
+          {
+            admissionNo: 'NEV1088/24',
+            name: 'Srishti Sahani',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Vijay Shankar Mallah',
+            villageMatch: 'Pipra (Ramgarh)',
+            mobile: '9631219760',
+          },
+          {
+            admissionNo: 'NEV1079/24',
+            name: 'Abhinandan Singh',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Anshuman Singh',
+            villageMatch: 'Ramgarh',
+            mobile: '7479737100',
+          },
+          {
+            admissionNo: 'NEV1016/24',
+            name: 'Adarsh Kumar Mishra',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Arun Kumar Mishra',
+            villageMatch: 'Ramgarh',
+            mobile: '7654037383',
+          },
+          {
+            admissionNo: 'NEV959/23',
+            name: 'Aniket Kumar Sah',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Raj Kishor Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9128688808',
+          },
+          {
+            admissionNo: 'NEV1395/26',
+            name: 'Ansh kumar',
+            className: 'LKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Dinesh sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9708371562',
+          },
+          {
+            admissionNo: 'NEV1118/24',
+            name: 'Anshika Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Abhishek Kumar',
+            villageMatch: 'Ramgarh',
+            mobile: '8000080411',
+          },
+          {
+            admissionNo: 'NEV1416/26',
+            name: 'Ayansh Chaurasiya',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ram Babu Chaurasiya',
+            villageMatch: 'Ramgarh',
+            mobile: '9801026260',
+          },
+          {
+            admissionNo: 'NEV1102/24',
+            name: 'Arpit Kumar Chaurasiya',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ram Babu Chaurasiya',
+            villageMatch: 'Ramgarh',
+            mobile: '9801026260',
+          },
+          {
+            admissionNo: 'NEV1394/26',
+            name: 'Ayush kumar',
+            className: 'LKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Munna sah',
+            villageMatch: 'Ramgarh',
+            mobile: '8207356386',
+          },
+          {
+            admissionNo: 'NEV1081/24',
+            name: 'Ayushman Bhardwaj',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Raj Kishor Sharma',
+            villageMatch: 'Ramgarh',
+            mobile: '9973561075',
+          },
+          {
+            admissionNo: 'NEV1077/24',
+            name: 'Ayushvardhan Singh',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vikas Singh',
+            villageMatch: 'Ramgarh',
+            mobile: '9122321321',
+          },
+          {
+            admissionNo: 'NEV1293/25',
+            name: 'Deepak Kumar Gupta',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Ramlal Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '7352504929',
+          },
+          {
+            admissionNo: 'NEV781/21',
+            name: 'Jay Shankar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Vijay Shankar Mallah',
+            villageMatch: 'Ramgarh',
+            mobile: '9631219760',
+          },
+          {
+            admissionNo: 'NEV955/23',
+            name: 'Jaya Kumari',
+            className: 'Class II',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Raju Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9525465635',
+          },
+          {
+            admissionNo: 'NEV836/22',
+            name: 'Kavyansh Kaushik',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Kulmani Kaushik',
+            villageMatch: 'Ramgarh',
+            mobile: '9955605919',
+          },
+          {
+            admissionNo: 'NEV960/23',
+            name: 'Krishu Kumar',
+            className: 'Class II',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Raj Kishor Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9525465635',
+          },
+          {
+            admissionNo: 'NEV1146/24',
+            name: 'Manya Kumari',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Ravi Shankar Upadhyay',
+            villageMatch: 'Ramgarh',
+            mobile: '8084422118',
+          },
+          {
+            admissionNo: 'NEV1061/24',
+            name: 'Minakshi Kumari',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Vinit Kumar',
+            villageMatch: 'Ramgarh',
+            mobile: '9576459532',
+          },
+          {
+            admissionNo: 'NEV1107/24',
+            name: 'Mohini Kumari',
+            className: 'Class II',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Aswani Kumar Mishra',
+            villageMatch: 'Ramgarh',
+            mobile: '7481906310',
+          },
+          {
+            admissionNo: 'NEV1017/24',
+            name: 'Mohit Kumar Mishra',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Aswani Kumar Mishra',
+            villageMatch: 'Ramgarh',
+            mobile: '7481906310',
+          },
+          {
+            admissionNo: 'NEV957/23',
+            name: 'Rani Kumari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Raj Kumar Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9128688808',
+          },
+          {
+            admissionNo: 'NEV733/21',
+            name: 'Ratik Kumar',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Ravishankar Upadhayay',
+            villageMatch: 'Ramgarh',
+            mobile: '7367947460',
+          },
+          {
+            admissionNo: 'NEV958/23',
+            name: 'Ravi Kumar',
+            className: 'Class II',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Raj Kumar Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9525465635',
+          },
+          {
+            admissionNo: 'NEV759/21',
+            name: 'Riddhish Ranjit',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Kumar Aprajit',
+            villageMatch: 'Ramgarh',
+            mobile: '9507403424',
+          },
+          {
+            admissionNo: 'NEV826/22',
+            name: 'RishiKant Singh',
+            className: 'Class IV',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Krishna Kant Singh',
+            villageMatch: 'Ramgarh',
+            mobile: '7739511460',
+          },
+          {
+            admissionNo: 'NEV956/23',
+            name: 'Riya Kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Raju Sah',
+            villageMatch: 'Ramgarh',
+            mobile: '9128688808',
+          },
+          {
+            admissionNo: 'NEV1190/25',
+            name: 'Samir Kumar',
+            className: 'UKG',
+            section: 'B',
+            gender: 'M',
+            fatherName: 'Anil Kumar Thakur',
+            villageMatch: 'Ramgarh',
+            mobile: '8207697740',
+          },
+          {
+            admissionNo: 'NEV1145/24',
+            name: 'Shanvi Gupta',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Arjun Kumar Prasad',
+            villageMatch: 'Ramgarh',
+            mobile: '7091931486',
+          },
+          {
+            admissionNo: 'NEV1411/26',
+            name: 'Anushika Kumari',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Kamlesh yadav',
+            villageMatch: 'Ramgarh',
+            mobile: '9931169429',
+          },
+          {
+            admissionNo: 'NEV1097/24',
+            name: 'Shreyansh Kaushik',
+            className: 'UKG',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Kulmani Kaushik',
+            villageMatch: 'Ramgarh',
+            mobile: '9199704211',
+          },
+          {
+            admissionNo: 'NEV1082/24',
+            name: 'Shrishti Bhardwaj',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Raj Kishor Sharma',
+            villageMatch: 'Ramgarh',
+            mobile: '9973561075',
+          },
+          {
+            admissionNo: 'NEV1135/24',
+            name: 'Siddhi Kumari',
+            className: 'UKG',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Om Prakash Upadhyay',
+            villageMatch: 'Ramgarh',
+            mobile: '7209933863',
+          },
+          {
+            admissionNo: 'NEV1062/24',
+            name: 'Sonakshi Kumari',
+            className: 'Class II',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Vinit Kumar',
+            villageMatch: 'Ramgarh',
+            mobile: '9576459532',
+          },
+          {
+            admissionNo: 'NEV936/23',
+            name: 'Anshika Kumari',
+            className: 'Class II',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Jitendra Kumar Yadav',
+            villageMatch: 'Nagai',
+            mobile: '7761922378',
+          },
+          {
+            admissionNo: 'NEV935/23',
+            name: 'Pratigya Kumari Yadav',
+            className: 'Class III',
+            section: 'B',
+            gender: 'F',
+            fatherName: 'Jitendra Kumar Yadav',
+            villageMatch: 'Nagai',
+            mobile: '7761922378',
+          },
+          {
+            admissionNo: 'NEV1321/25',
+            name: 'Vedansh kumar Singh',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Krishankant signh',
+            villageMatch: 'Ramgarh',
+            mobile: '7739511460',
+          },
+          {
+            admissionNo: 'NEV1419/26',
+            name: 'Pramit kumar Tiwari',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Pramod Tiwari',
+            villageMatch: 'Mubarakhpur',
+            mobile: '7654821819',
+          },
+          {
+            admissionNo: 'NEV1418/26',
+            name: 'Aarohi kumari',
+            className: 'Class III',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Pramod Tiwari',
+            villageMatch: 'Mubarakhpur',
+            mobile: '7654821819',
+          },
+          {
+            admissionNo: 'NEV1308/25',
+            name: 'Aradhya Tiwari',
+            className: 'UKG',
+            section: 'A',
+            gender: 'F',
+            fatherName: 'Rahul kumar Tiwari',
+            villageMatch: 'Mubarakhpur',
+            mobile: '7250499292',
+          },
+          {
+            admissionNo: '',
+            name: 'Shidarth Singh',
+            className: 'Class IV',
+            section: '',
+            gender: 'M',
+            fatherName: '',
+            villageMatch: 'Mubarakhpur',
+            mobile: '',
+          },
+          {
+            admissionNo: 'NEV1268/25',
+            name: 'Pratik Kumar',
+            className: 'Class III',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Nitesh Kumar',
+            villageMatch: 'Chainpur',
+            mobile: '8083332670',
+          },
+          {
+            admissionNo: 'NEV1434/26',
+            name: 'Ritesh Kumar',
+            className: 'Class I',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Rambachan Chaursiya',
+            villageMatch: 'Ramgarh',
+            mobile: '9973098657',
+          },
+          {
+            admissionNo: 'NEV1435/26',
+            name: 'Aditya Kumar',
+            className: 'Nursery',
+            section: 'A',
+            gender: 'M',
+            fatherName: 'Kamlesh Yadav',
+            villageMatch: 'Ramgarh',
+            mobile: '9931169429',
+          },
+          {
+            admissionNo: 'NEV1453/26',
+            name: 'Soniya Kumari',
+            className: 'Class I',
+            section: 'B',
+            gender: 'F',
+            fatherName: '',
+            villageMatch: 'Ramgarh',
+            mobile: '',
+          },
+        ],
+      },
+    ];
+
+    let changed = false;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    // Deduplicate any accidental duplicate route codes (e.g. duplicate Sr/3794/1)
+    const seenRouteCodes = new Set<string>();
+    const dedupedRoutes = this.routes.filter(r => {
+      const key = normalizeCode(r.code);
+      if (seenRouteCodes.has(key)) return false;
+      seenRouteCodes.add(key);
+      return true;
+    });
+    if (dedupedRoutes.length !== this.routes.length) {
+      this.routes = dedupedRoutes;
+      changed = true;
+    }
+
+    // Rectify village "Old school" monthly charges to ₹0 (Zero) across Village Master, Routes, Members, and Invoices
+    for (const vil of this.villages) {
+      if (normalizeVillage(vil.name) === 'old school') {
+        if (vil.monthlyRate !== 0) {
+          vil.monthlyRate = 0;
+          changed = true;
+        }
+        if (Array.isArray(vil.stops)) {
+          for (const stp of vil.stops) {
+            if (Number(stp.fee) !== 0) {
+              stp.fee = 0;
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    for (const rt of this.routes) {
+      if (Array.isArray(rt.stops)) {
+        for (const stp of rt.stops) {
+          if (
+            normalizeVillage(stp.name || '') === 'old school' ||
+            normalizeVillage((stp as any).villageName || '') === 'old school'
+          ) {
+            if (Number(stp.fee) !== 0) {
+              stp.fee = 0;
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+
+    // Also ensure all existing students have their campus aligned with Playgroup-IV -> Jr, V-X -> Sr, and Old school students have ₹0 fee
+    for (const st of this.students) {
+      if ((st.memberType || 'Student').toLowerCase() === 'student') {
+        const expectedCampus = this.inferCampusFromClass(st.class, st.campus || 'Sr');
+        if (st.campus !== expectedCampus) {
+          st.campus = expectedCampus;
+          changed = true;
+        }
+      }
+      if (!st.villageId && st.villageName) {
+        const matchedVil = findMatchingVillage(st.villageName);
+        if (matchedVil) {
+          const firstStop = matchedVil.stops?.[0];
+          st.villageId = matchedVil.id;
+          st.villageName = matchedVil.name;
+          if (!st.pickupDropStopId && firstStop) {
+            st.pickupDropStopId = firstStop.id;
+            st.pickupDropStopName = firstStop.name;
+            st.morningStopId = firstStop.id;
+            st.morningStopName = firstStop.name;
+            st.eveningStopId = firstStop.id;
+            st.eveningStopName = firstStop.name;
+            st.monthlyFee =
+              firstStop.fee !== undefined && firstStop.fee !== null
+                ? Number(firstStop.fee)
+                : matchedVil.monthlyRate !== undefined && matchedVil.monthlyRate !== null
+                ? Number(matchedVil.monthlyRate)
+                : Number(st.monthlyFee ?? 0);
+          }
+          changed = true;
+        }
+      }
+      if (
+        normalizeVillage(st.villageName || '') === 'old school' ||
+        normalizeVillage(st.pickupDropStopName || '') === 'old school'
+      ) {
+        if (Number(st.monthlyFee) !== 0) {
+          st.monthlyFee = 0;
+          changed = true;
+        }
+        const beforeInvCount = this.invoices.length;
+        this.invoices = this.invoices.filter(
+          inv => !(inv.studentId === st.id && (Number(inv.paidAmount) || 0) === 0)
+        );
+        if (this.invoices.length !== beforeInvCount) {
+          changed = true;
+        }
+        const remainingDue = this.invoices
+          .filter(inv => inv.studentId === st.id)
+          .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+        if (Number(st.balanceDue) !== remainingDue) {
+          st.balanceDue = remainingDue;
+          changed = true;
+        }
+      }
+    }
+
+    for (const batch of routeSeedBatches) {
+      for (let i = 0; i < batch.members.length; i++) {
+        const item = batch.members[i];
+        const deterministicId = `${batch.seedPrefix}-${i + 1}`;
+        const existing = this.students.find(s => {
+          if (s.id === deterministicId) return true;
+          if (
+            item.admissionNo.trim() &&
+            s.admissionNo.trim().toLowerCase() === item.admissionNo.trim().toLowerCase() &&
+            s.name.trim().toLowerCase() === item.name.trim().toLowerCase() &&
+            normalizeCode(s.routeCode || '') === normalizeCode(batch.fallbackRouteCode)
+          ) {
+            return true;
+          }
+          if (
+            !item.admissionNo.trim() &&
+            s.name.trim().toLowerCase() === item.name.trim().toLowerCase() &&
+            normalizeVillage(s.villageName || '') === normalizeVillage(item.villageMatch) &&
+            normalizeCode(s.routeCode || '') === normalizeCode(batch.fallbackRouteCode)
+          ) {
+            return true;
+          }
+          return false;
+        });
+        if (existing) continue;
+
+        const matchedVil = findMatchingVillage(item.villageMatch);
+        const firstStop = matchedVil?.stops?.[0];
+        const villageId = matchedVil?.id || '';
+        const villageName = matchedVil?.name || item.villageMatch;
+        const stopId = firstStop?.id || '';
+        const stopName = firstStop?.name || villageName;
+        const rawFee =
+          normalizeVillage(villageName) === 'old school'
+            ? 0
+            : firstStop?.fee !== undefined && firstStop?.fee !== null
+            ? Number(firstStop.fee)
+            : matchedVil?.monthlyRate !== undefined && matchedVil?.monthlyRate !== null
+            ? Number(matchedVil.monthlyRate)
+            : 800;
+        const fee = isNaN(rawFee) ? 0 : Math.max(0, rawFee);
+
+        const routeId = batch.routeObj?.id || batch.fallbackRouteId;
+        const routeCode = batch.routeObj?.code || batch.fallbackRouteCode;
+        const inferredCampus = this.inferCampusFromClass(
+          item.className,
+          batch.routeObj?.campus || 'Sr'
+        );
+
+        const newStudent: StudentMember = {
+          id: deterministicId,
+          admissionNo: item.admissionNo,
+          name: item.name,
+          profilePhoto: '',
+          memberType: 'Student',
+          class: item.className,
+          section: item.section || 'A',
+          gender: item.gender,
+          campus: inferredCampus,
+          academicSession: this.config.currentAcademicSession || '2026-2027',
+          fatherName: item.fatherName,
+          mobile: item.mobile,
+          address: villageName,
+          routeId,
+          routeCode,
+          villageId,
+          villageName,
+          pickupDropStopId: stopId,
+          pickupDropStopName: stopName,
+          morningStopId: stopId,
+          morningStopName: stopName,
+          eveningStopId: stopId,
+          eveningStopName: stopName,
+          serviceType: 'both',
+          transportStatus: 'Active',
+          emergencyContact: item.emergencyContact || item.mobile,
+          monthlyFee: fee,
+          concessionAmount: 0,
+          balanceDue: 0,
+          joiningDate: todayStr,
+          documents: [],
+          specialHistory: [],
+          version: 1,
+        };
+
+        this.students.push(newStudent);
+        this.ensureAutoFeeForMember(newStudent);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.rebuildScheduledServices();
+      this.saveLocalSnapshot();
+    }
+    return changed;
+  }
+
+  private syncPreviousDuesInvoiceForStudent(
+    student: StudentMember,
+    rawAmount?: number,
+    rawRemarks?: string
+  ) {
+    if (rawAmount === undefined || rawAmount === null || isNaN(Number(rawAmount))) {
+      return;
+    }
+    const amount = Math.max(0, Number(rawAmount) || 0);
+    const cleanRemarks = (rawRemarks ?? student.previousDuesRemarks ?? '').trim();
+    const headLabel = cleanRemarks
+      ? `Previous Dues (${cleanRemarks})`
+      : 'Previous Dues (Old Software)';
+    const key = `PREV-DUES-${student.id}`;
+
+    const existingInv = this.invoices.find(
+      inv =>
+        inv.studentId === student.id &&
+        (inv.idempotencyKey === key || inv.month.toLowerCase().startsWith('previous dues'))
+    );
+
+    if (amount > 0) {
+      student.previousDues = amount;
+      student.previousDuesRemarks = cleanRemarks || 'Old Software Arrears';
+      if (existingInv) {
+        existingInv.month = headLabel;
+        existingInv.baseFee = amount;
+        existingInv.netAmount = Math.max(0, amount - (Number(existingInv.concession) || 0));
+        existingInv.balanceDue = Math.max(
+          0,
+          existingInv.netAmount - (Number(existingInv.paidAmount) || 0)
+        );
+        existingInv.status =
+          existingInv.balanceDue <= 0
+            ? 'Paid'
+            : (Number(existingInv.paidAmount) || 0) > 0
+            ? 'Partially Paid'
+            : 'Unpaid';
+      } else {
+        const inv: FeeInvoice = {
+          id: `inv-prev-${student.id}-${Date.now()}`,
+          invoiceNo: `INV-PREV-${(this.invoices.length + 1).toString().padStart(4, '0')}`,
+          studentId: student.id,
+          admissionNo: student.admissionNo,
+          studentName: student.name,
+          month: headLabel,
+          baseFee: amount,
+          concession: 0,
+          netAmount: amount,
+          paidAmount: 0,
+          balanceDue: amount,
+          status: 'Unpaid',
+          dueDate: new Date().toISOString().split('T')[0],
+          idempotencyKey: key,
+        };
+        this.invoices.unshift(inv);
+      }
+    } else {
+      student.previousDues = 0;
+      student.previousDuesRemarks = '';
+      if (existingInv && (Number(existingInv.paidAmount) || 0) === 0) {
+        this.invoices = this.invoices.filter(i => i.id !== existingInv.id);
+      }
+    }
+
+    student.balanceDue = this.invoices
+      .filter(inv => inv.studentId === student.id && inv.status !== 'Paid')
+      .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+  }
+
+  public async setStudentPreviousDues(
+    studentId: string,
+    amount: number,
+    remarks?: string
+  ): Promise<StudentMember> {
+    return this.enqueueWrite(async () => {
+      const student = this.students.find(s => s.id === studentId);
+      if (!student) throw new Error('Member not found.');
+      this.syncPreviousDuesInvoiceForStudent(student, amount, remarks);
+      student.version = (student.version || 1) + 1;
+      await this.internalSyncToGoogleSheets();
+      return student;
+    });
+  }
+
+  public async bulkSetPreviousDues(
+    entries: { studentId: string; amount: number; remarks?: string }[]
+  ): Promise<{ updatedCount: number; totalPreviousDuesAdded: number }> {
+    return this.enqueueWrite(async () => {
+      let updatedCount = 0;
+      let totalPreviousDuesAdded = 0;
+      for (const item of entries) {
+        const student = this.students.find(s => s.id === item.studentId);
+        if (!student) continue;
+        const amt = Math.max(0, Number(item.amount) || 0);
+        this.syncPreviousDuesInvoiceForStudent(student, amt, item.remarks);
+        student.version = (student.version || 1) + 1;
+        updatedCount++;
+        totalPreviousDuesAdded += amt;
+      }
+      if (updatedCount > 0) {
+        await this.internalSyncToGoogleSheets();
+      }
+      return { updatedCount, totalPreviousDuesAdded };
+    });
+  }
+
   public async saveStudent(data: Partial<StudentMember>): Promise<StudentMember> {
     return this.enqueueWrite(async () => {
-      // Strict mandatory field & prerequisite record checks
+      // Core identity checks (optional fields like admissionNo, profilePhoto, mobile, fatherName, section, address, documents are ignored if missing)
       if (!data.name || !data.name.trim()) {
         throw new Error('Member Full Name is mandatory.');
       }
-      if (!data.admissionNo || !data.admissionNo.trim()) {
-        throw new Error('Admission No. / Staff ID is mandatory.');
-      }
-      if (!data.memberType || !data.memberType.trim()) {
-        throw new Error('Member Type (Student / Teacher / Staff) is mandatory.');
-      }
-      if (!data.campus || !data.campus.trim()) {
-        throw new Error('Campus is mandatory.');
-      }
-      if (!data.class || !data.class.trim()) {
-        throw new Error('Class / Department is mandatory.');
-      }
-      if (!data.fatherName || !data.fatherName.trim()) {
-        throw new Error('Father / Guardian / Spouse Name is mandatory.');
-      }
-      if (!data.mobile || data.mobile.replace(/\D/g, '').length < 10) {
-        throw new Error('A valid 10-digit Mobile / WhatsApp Number is mandatory.');
-      }
-      if (!data.address || !data.address.trim()) {
-        throw new Error('Residential Address is mandatory.');
-      }
-      if (this.villages.length === 0 || (!data.villageId && !data.villageName?.trim())) {
+
+      const matchedVil =
+        this.villages.find(v => v.id === data.villageId) ||
+        (data.villageName
+          ? this.villages.find(
+              v =>
+                v.name.trim().toLowerCase() === data.villageName!.trim().toLowerCase() ||
+                v.name.trim().toLowerCase().startsWith(data.villageName!.trim().toLowerCase())
+            )
+          : undefined);
+
+      const resolvedVillageId = matchedVil?.id || data.villageId || '';
+      const resolvedVillageName = matchedVil?.name || data.villageName?.trim() || '';
+
+      if (this.villages.length === 0 || (!resolvedVillageId && !resolvedVillageName)) {
         throw new Error('Mandatory prerequisite record missing: Please select a valid Village from Village Master.');
       }
-      if (!data.pickupDropStopName || !data.pickupDropStopName.trim() || data.pickupDropStopName === 'Assigned Stop') {
-        throw new Error('Mandatory prerequisite record missing: Please select a valid Pickup & Drop Stop.');
-      }
-      const stopName = data.pickupDropStopName.trim();
-      const stopId = data.pickupDropStopId || '';
+
+      const defaultStop = matchedVil?.stops?.[0];
+      const stopId = data.pickupDropStopId || defaultStop?.id || '';
+      const stopName =
+        data.pickupDropStopName && data.pickupDropStopName.trim() && data.pickupDropStopName !== 'Assigned Stop'
+          ? data.pickupDropStopName.trim()
+          : defaultStop?.name || resolvedVillageName;
 
       // Resolve best matching Route for the student's Village / Stop so changing village/stop auto-attaches to the new route
       const autoMatchedRoute = this.findBestRouteForVillageOrStop(
-        data.villageId,
-        data.villageName,
+        resolvedVillageId,
+        resolvedVillageName,
         stopId,
         stopName,
         data.campus
@@ -3197,10 +8071,10 @@ export class SheetsDatabaseManager {
       );
       const explicitCoversVillage =
         explicitRoute &&
-        ((data.villageId && explicitRoute.villageIds.includes(data.villageId)) ||
-          (data.villageName &&
+        ((resolvedVillageId && explicitRoute.villageIds.includes(resolvedVillageId)) ||
+          (resolvedVillageName &&
             explicitRoute.villageNames.some(
-              vn => vn.trim().toLowerCase() === data.villageName!.trim().toLowerCase()
+              vn => vn.trim().toLowerCase() === resolvedVillageName.trim().toLowerCase()
             )));
       const resolvedRoute = explicitCoversVillage
         ? explicitRoute
@@ -3209,38 +8083,53 @@ export class SheetsDatabaseManager {
       if (this.routes.length === 0 || (!resolvedRoute && !data.routeId && !data.routeCode?.trim())) {
         throw new Error('Mandatory prerequisite record missing: Please select a valid Assigned Route from Route Master.');
       }
-      if (!data.monthlyFee || Number(data.monthlyFee) <= 0) {
-        throw new Error('Monthly Transport Fee is mandatory and must be greater than ₹0.');
-      }
+
+      const defaultStopFee =
+        defaultStop?.fee !== undefined && defaultStop?.fee !== null
+          ? Number(defaultStop.fee)
+          : matchedVil?.monthlyRate !== undefined && matchedVil?.monthlyRate !== null
+          ? Number(matchedVil.monthlyRate)
+          : 0;
+      const resolvedFee =
+        data.monthlyFee !== undefined &&
+        data.monthlyFee !== null &&
+        !isNaN(Number(data.monthlyFee)) &&
+        Number(data.monthlyFee) >= 0
+          ? Number(data.monthlyFee)
+          : Math.max(0, defaultStopFee);
+
+      const memberTypeStr = (data.memberType || 'Student').trim();
+      const classStr = (data.class || 'Class I').trim();
+      const sectionStr = (data.section || 'A').trim();
+      const campusStr =
+        memberTypeStr.toLowerCase() === 'student'
+          ? this.inferCampusFromClass(classStr, (data.campus || resolvedRoute?.campus || 'Sr').trim())
+          : (data.campus || resolvedRoute?.campus || 'Sr').trim();
 
       // Auto-register any custom Member Type, Campus, Class, or Section typed by the user
-      if (data.memberType && data.memberType.trim()) {
-        const mtTrim = data.memberType.trim();
-        if (!this.memberTypesMaster.some(m => m.name.toLowerCase() === mtTrim.toLowerCase())) {
-          this.memberTypesMaster.push({ id: `mt-${Date.now()}`, name: mtTrim });
+      if (memberTypeStr) {
+        if (!this.memberTypesMaster.some(m => m.name.toLowerCase() === memberTypeStr.toLowerCase())) {
+          this.memberTypesMaster.push({ id: `mt-${Date.now()}`, name: memberTypeStr });
         }
       }
-      if (data.campus && data.campus.trim()) {
-        const cmpTrim = data.campus.trim();
+      if (campusStr) {
         if (
           !this.campusesMaster.some(
-            c => c.code.toLowerCase() === cmpTrim.toLowerCase() || c.name.toLowerCase() === cmpTrim.toLowerCase()
+            c => c.code.toLowerCase() === campusStr.toLowerCase() || c.name.toLowerCase() === campusStr.toLowerCase()
           )
         ) {
-          this.campusesMaster.push({ id: `cmp-${Date.now()}`, name: cmpTrim, code: cmpTrim });
+          this.campusesMaster.push({ id: `cmp-${Date.now()}`, name: campusStr, code: campusStr });
           this.config.campuses = [...this.campusesMaster];
         }
       }
-      if (data.class && data.class.trim()) {
-        const clsTrim = data.class.trim();
-        if (!this.classesMaster.some(c => c.toLowerCase() === clsTrim.toLowerCase())) {
-          this.classesMaster.push(clsTrim);
+      if (classStr) {
+        if (!this.classesMaster.some(c => c.toLowerCase() === classStr.toLowerCase())) {
+          this.classesMaster.push(classStr);
         }
       }
-      if (data.section && data.section.trim()) {
-        const secTrim = data.section.trim();
-        if (!this.sectionsMaster.some(s => s.toLowerCase() === secTrim.toLowerCase())) {
-          this.sectionsMaster.push(secTrim);
+      if (sectionStr) {
+        if (!this.sectionsMaster.some(s => s.toLowerCase() === sectionStr.toLowerCase())) {
+          this.sectionsMaster.push(sectionStr);
         }
       }
 
@@ -3249,8 +8138,8 @@ export class SheetsDatabaseManager {
         if (idx >= 0) {
           const existing = this.students[idx];
           const villageOrStopChanged =
-            (data.villageId && data.villageId !== existing.villageId) ||
-            (data.villageName && data.villageName !== existing.villageName) ||
+            (resolvedVillageId && resolvedVillageId !== existing.villageId) ||
+            (resolvedVillageName && resolvedVillageName !== existing.villageName) ||
             (stopId && stopId !== existing.pickupDropStopId) ||
             (stopName && stopName !== existing.pickupDropStopName);
           const finalRoute = villageOrStopChanged
@@ -3261,8 +8150,17 @@ export class SheetsDatabaseManager {
             ...existing,
             ...data,
             name: data.name.trim(),
-            admissionNo: data.admissionNo.trim(),
-            profilePhoto: data.profilePhoto || existing.profilePhoto,
+            admissionNo: (data.admissionNo ?? existing.admissionNo ?? '').trim(),
+            profilePhoto: data.profilePhoto !== undefined ? data.profilePhoto : existing.profilePhoto,
+            memberType: memberTypeStr,
+            campus: campusStr,
+            class: classStr,
+            section: sectionStr,
+            fatherName: (data.fatherName ?? existing.fatherName ?? '').trim(),
+            mobile: (data.mobile ?? existing.mobile ?? '').trim(),
+            address: (data.address ?? existing.address ?? resolvedVillageName).trim(),
+            villageId: resolvedVillageId,
+            villageName: resolvedVillageName,
             routeId: finalRoute ? finalRoute.id : data.routeId || existing.routeId,
             routeCode: finalRoute ? finalRoute.code : data.routeCode || existing.routeCode,
             pickupDropStopId: stopId,
@@ -3271,44 +8169,65 @@ export class SheetsDatabaseManager {
             morningStopName: stopName,
             eveningStopId: stopId,
             eveningStopName: stopName,
-            monthlyFee: Number(data.monthlyFee) || existing.monthlyFee,
+            monthlyFee: resolvedFee,
             concessionAmount: Number(data.concessionAmount ?? existing.concessionAmount ?? 0),
+            previousDues:
+              data.previousDues !== undefined
+                ? Math.max(0, Number(data.previousDues) || 0)
+                : existing.previousDues,
+            previousDuesRemarks:
+              data.previousDuesRemarks !== undefined
+                ? data.previousDuesRemarks
+                : existing.previousDuesRemarks,
             documents: data.documents !== undefined ? data.documents : existing.documents,
             specialHistory: data.specialHistory !== undefined ? data.specialHistory : existing.specialHistory,
             activePermissionLetter: data.activePermissionLetter !== undefined ? data.activePermissionLetter : existing.activePermissionLetter,
             version: existing.version + 1,
           };
+          if (resolvedFee === 0) {
+            this.invoices = this.invoices.filter(
+              inv =>
+                !(
+                  inv.studentId === updated.id &&
+                  (Number(inv.paidAmount) || 0) === 0 &&
+                  !inv.idempotencyKey?.startsWith('PREV-DUES-') &&
+                  !inv.month.toLowerCase().startsWith('previous dues')
+                )
+            );
+            updated.balanceDue = this.invoices
+              .filter(inv => inv.studentId === updated.id)
+              .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+          }
           this.students[idx] = updated;
           // Auto-calculate monthly fee for both Active and Suspended members
           this.ensureAutoFeeForMember(updated);
+          if (data.previousDues !== undefined) {
+            this.syncPreviousDuesInvoiceForStudent(updated, data.previousDues, data.previousDuesRemarks);
+          }
           this.rebuildScheduledServices();
           await this.internalSyncToGoogleSheets();
           return updated;
         }
       }
 
-      if (!data.profilePhoto) {
-        throw new Error('Display Picture (DP) attachment is compulsory when adding a member.');
-      }
-
       const newStudent: StudentMember = {
         id: `stu-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        admissionNo: data.admissionNo.trim(),
+        admissionNo: (data.admissionNo || '').trim(),
         name: data.name.trim(),
-        profilePhoto: data.profilePhoto,
-        memberType: data.memberType.trim(),
-        class: data.class.trim(),
-        section: data.section?.trim() || 'A',
+        profilePhoto: data.profilePhoto || '',
+        memberType: memberTypeStr,
+        class: classStr,
+        section: sectionStr,
         gender: data.gender || 'M',
-        campus: data.campus.trim(),
-        academicSession: data.academicSession || this.config.currentAcademicSession || '2026-27',
-        fatherName: data.fatherName.trim(),
-        mobile: data.mobile.trim(),
-        address: data.address.trim(),
+        campus: campusStr,
+        academicSession: data.academicSession || this.config.currentAcademicSession || '2026-2027',
+        fatherName: (data.fatherName || '').trim(),
+        mobile: (data.mobile || '').trim(),
+        address: (data.address || resolvedVillageName || '').trim(),
         routeId: resolvedRoute ? resolvedRoute.id : data.routeId || '',
         routeCode: resolvedRoute ? resolvedRoute.code : data.routeCode || '',
-        villageId: data.villageId || '',
-        villageName: data.villageName || '',
+        villageId: resolvedVillageId,
+        villageName: resolvedVillageName,
         pickupDropStopId: stopId,
         pickupDropStopName: stopName,
         morningStopId: stopId,
@@ -3318,9 +8237,11 @@ export class SheetsDatabaseManager {
         serviceType: 'both',
         transportStatus: data.transportStatus || 'Active',
         statusReason: data.statusReason,
-        emergencyContact: data.emergencyContact || data.mobile.trim(),
-        monthlyFee: Number(data.monthlyFee),
+        emergencyContact: (data.emergencyContact || data.mobile || '').trim(),
+        monthlyFee: resolvedFee,
         concessionAmount: Number(data.concessionAmount) || 0,
+        previousDues: data.previousDues ? Math.max(0, Number(data.previousDues) || 0) : 0,
+        previousDuesRemarks: data.previousDuesRemarks || '',
         balanceDue: Number(data.balanceDue) || 0,
         joiningDate: data.joiningDate || new Date().toISOString().split('T')[0],
         documents: data.documents || [],
@@ -3331,6 +8252,9 @@ export class SheetsDatabaseManager {
       this.students.unshift(newStudent);
       // Auto-calculate monthly fee for both Active and Suspended members immediately upon creation
       this.ensureAutoFeeForMember(newStudent);
+      if (data.previousDues && Number(data.previousDues) > 0) {
+        this.syncPreviousDuesInvoiceForStudent(newStudent, data.previousDues, data.previousDuesRemarks);
+      }
       this.rebuildScheduledServices();
       await this.internalSyncToGoogleSheets();
       return newStudent;
@@ -4409,8 +9333,23 @@ export class SheetsDatabaseManager {
 
       existingAtt = this.attendance.filter(a => a.tripId === trip!.id);
       trip.rosterCount = existingAtt.length;
-      trip.presentCount = existingAtt.filter(a => a.assistantStatus === 'Present').length;
-      trip.absentCount = existingAtt.filter(a => a.assistantStatus === 'Absent').length;
+      trip.presentCountDriver = existingAtt.filter(a => a.driverStatus === 'Present').length;
+      trip.presentCountAssistant = existingAtt.filter(a => a.assistantStatus === 'Present').length;
+      trip.presentCount = existingAtt.filter(
+        a => a.resolvedStatus === 'Present' || a.driverStatus === 'Present' || a.assistantStatus === 'Present'
+      ).length;
+      trip.absentCount = existingAtt.filter(
+        a =>
+          a.driverStatus !== 'Present' &&
+          a.assistantStatus !== 'Present' &&
+          (a.resolvedStatus === 'Absent' || a.driverStatus === 'Absent' || a.assistantStatus === 'Absent')
+      ).length;
+      trip.mismatchCount = existingAtt.filter(
+        a =>
+          a.driverStatus !== 'Pending' &&
+          a.assistantStatus !== 'Pending' &&
+          a.driverStatus !== a.assistantStatus
+      ).length;
 
       await this.internalSyncToGoogleSheets();
       return { trip, attendance: existingAtt };
@@ -4489,24 +9428,77 @@ export class SheetsDatabaseManager {
 
       if (!rec) throw new Error('Record not found');
 
-      if (source === 'driver') rec.driverStatus = value as any;
-      else if (source === 'assistant') {
-        rec.assistantStatus = value as any;
+      if (source === 'driver') {
         rec.driverStatus = value as any;
-        rec.reconciliationStatus = value === 'Present' ? 'Matched_Present' : value === 'Absent' ? 'Matched_Absent' : 'Assistant_Pending';
+        if (reason !== undefined) {
+          rec.resolutionReason = reason;
+          rec.notes = reason;
+        }
+      } else if (source === 'assistant') {
+        rec.assistantStatus = value as any;
+        if (reason !== undefined) {
+          rec.resolutionReason = reason;
+          rec.notes = reason;
+        }
       } else if (source === 'resolve') {
-        rec.resolvedStatus = value as any;
         rec.resolvedBy = resolverName;
-        rec.resolutionReason = reason;
-        rec.reconciliationStatus = 'Resolved_Exception';
+        rec.resolutionReason = reason !== undefined ? reason : rec.resolutionReason;
+        rec.notes = reason !== undefined ? reason : rec.notes;
+      }
+
+      const arr = rec.driverStatus || 'Pending';
+      const dep = rec.assistantStatus || 'Pending';
+
+      // Rule: If student is Present during EITHER Arrival OR Departure, overall daily attendance is Present
+      if (arr === 'Present' || dep === 'Present') {
+        rec.resolvedStatus = 'Present';
+      } else if (dep !== 'Pending') {
+        rec.resolvedStatus = dep;
+      } else if (arr !== 'Pending') {
+        rec.resolvedStatus = arr;
+      } else {
+        rec.resolvedStatus = 'Pending';
+      }
+
+      // Rule: Remarks needed ONLY if Arrival and Departure differ; no remarks needed when both are same
+      if (arr !== 'Pending' && dep !== 'Pending') {
+        if (arr === dep) {
+          rec.reconciliationStatus = arr === 'Present' ? 'Matched_Present' : 'Matched_Absent';
+          rec.resolutionReason = '';
+          rec.notes = '';
+        } else {
+          rec.reconciliationStatus =
+            rec.resolutionReason && rec.resolutionReason.trim().length > 0
+              ? 'Resolved_Exception'
+              : 'Mismatch';
+        }
+      } else if (arr !== 'Pending') {
+        rec.reconciliationStatus = 'Assistant_Pending';
+      } else {
+        rec.reconciliationStatus = 'Driver_Pending';
       }
 
       const trip = this.trips.find(t => t.id === rec!.tripId);
       if (trip) {
         const tripAtts = this.attendance.filter(a => a.tripId === trip.id);
         trip.rosterCount = Math.max(trip.rosterCount || 0, tripAtts.length);
-        trip.presentCount = tripAtts.filter(a => a.assistantStatus === 'Present').length;
-        trip.absentCount = tripAtts.filter(a => a.assistantStatus === 'Absent').length;
+        trip.presentCountDriver = tripAtts.filter(a => a.driverStatus === 'Present').length;
+        trip.presentCountAssistant = tripAtts.filter(a => a.assistantStatus === 'Present').length;
+        trip.presentCount = tripAtts.filter(
+          a => a.resolvedStatus === 'Present' || a.driverStatus === 'Present' || a.assistantStatus === 'Present'
+        ).length;
+        trip.absentCount = tripAtts.filter(
+          a =>
+            a.driverStatus !== 'Present' &&
+            a.assistantStatus !== 'Present' &&
+            (a.resolvedStatus === 'Absent' || a.driverStatus === 'Absent' || a.assistantStatus === 'Absent')
+        ).length;
+        trip.mismatchCount = tripAtts.filter(
+          a =>
+            a.driverStatus !== 'Pending' &&
+            a.assistantStatus !== 'Pending' &&
+            a.driverStatus !== a.assistantStatus
+        ).length;
       }
 
       await this.internalSyncToGoogleSheets();

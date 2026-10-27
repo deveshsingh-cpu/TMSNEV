@@ -663,9 +663,10 @@ export function App() {
   const handleMarkAttendance = async (
     recordId: string,
     source: 'driver' | 'assistant',
-    value: string
+    value: string,
+    reason?: string
   ) => {
-    await api.markAttendance(recordId, source, value);
+    await api.markAttendance(recordId, source, value, reason);
     await loadAllData();
   };
 
@@ -1139,6 +1140,7 @@ export function App() {
                   villages={villages}
                   stops={stops}
                   vehicles={vehicles}
+                  students={students}
                   initialSubTab={activeSubTab || 'routes'}
                 />
               )}

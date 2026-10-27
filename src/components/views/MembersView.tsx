@@ -11,6 +11,7 @@ import {
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview, FilterPopover } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
+import { api } from '../../services/api.js';
 
 interface MembersViewProps {
   schoolName?: string;
@@ -120,6 +121,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [campusFilter, setCampusFilter] = useState<string>('all');
   const [memberTypeFilter, setMemberTypeFilter] = useState<string>('all');
   const [routeFilter, setRouteFilter] = useState<string>('all');
+  const [vehicleFilter, setVehicleFilter] = useState<string>('all');
   const [classFilter, setClassFilter] = useState<string>('all');
   const [villageFilter, setVillageFilter] = useState<string>('all');
   const [stopFilter, setStopFilter] = useState<string>('all');
@@ -216,7 +218,18 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [selectedRouteId, setSelectedRouteId] = useState('');
   const [monthlyFee, setMonthlyFee] = useState<number>(700);
   const [concessionAmount, setConcessionAmount] = useState<number>(0);
+  const [previousDues, setPreviousDues] = useState<number>(0);
+  const [previousDuesRemarks, setPreviousDuesRemarks] = useState<string>('');
   const [schoolIdDoc, setSchoolIdDoc] = useState<DocumentAttachment | null>(null);
+
+  // Previous Dues (Old Software) Quick Modal & Profile State
+  const [showPrevDuesModal, setShowPrevDuesModal] = useState(false);
+  const [prevDuesMemberId, setPrevDuesMemberId] = useState<string>('');
+  const [prevDuesAmount, setPrevDuesAmount] = useState<string>('');
+  const [prevDuesNote, setPrevDuesNote] = useState<string>('Previous Dues (Old Software)');
+  const [prevDuesSearch, setPrevDuesSearch] = useState<string>('');
+  const [profilePrevDuesAmt, setProfilePrevDuesAmt] = useState<string>('');
+  const [profilePrevDuesNote, setProfilePrevDuesNote] = useState<string>('');
 
   const [memberStatusInput, setMemberStatusInput] = useState<StudentMember['transportStatus']>('Active');
   const [openActionMenuId, setOpenActionMenuId] = useState<string | null>(null);
@@ -298,6 +311,14 @@ export const MembersView: React.FC<MembersViewProps> = ({
   );
   const filterVillageStops = activeFilterVillageObj?.stops || [];
 
+  const getMemberVehicleInfo = (s: StudentMember): { vehicleId: string; vehicleNumber: string } => {
+    const rt = routes.find(r => r.id === s.routeId || r.code === s.routeCode);
+    return {
+      vehicleId: rt?.vehicleId || '',
+      vehicleNumber: rt?.vehicleNumber || '',
+    };
+  };
+
   const isFiltered =
     searchQuery.trim() !== '' ||
     statusFilter !== 'all' ||
@@ -305,6 +326,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
     campusFilter !== 'all' ||
     memberTypeFilter !== 'all' ||
     routeFilter !== 'all' ||
+    vehicleFilter !== 'all' ||
     classFilter !== 'all' ||
     villageFilter !== 'all' ||
     stopFilter !== 'all';
@@ -319,6 +341,10 @@ export const MembersView: React.FC<MembersViewProps> = ({
     if (campusFilter !== 'all' && s.campus !== campusFilter) return false;
     if (memberTypeFilter !== 'all' && s.memberType !== memberTypeFilter) return false;
     if (routeFilter !== 'all' && s.routeId !== routeFilter && s.routeCode !== routeFilter) return false;
+    if (vehicleFilter !== 'all') {
+      const vInfo = getMemberVehicleInfo(s);
+      if (vInfo.vehicleId !== vehicleFilter && vInfo.vehicleNumber !== vehicleFilter) return false;
+    }
     if (classFilter !== 'all' && s.class !== classFilter) return false;
     if (villageFilter !== 'all' && s.villageId !== villageFilter && s.villageName !== villageFilter) return false;
     if (
@@ -332,12 +358,14 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
     if (searchQuery.trim() !== '') {
       const q = searchQuery.toLowerCase();
+      const vInfo = getMemberVehicleInfo(s);
       return (
         s.name.toLowerCase().includes(q) ||
         s.admissionNo.toLowerCase().includes(q) ||
         s.villageName.toLowerCase().includes(q) ||
         s.pickupDropStopName.toLowerCase().includes(q) ||
         s.routeCode.toLowerCase().includes(q) ||
+        vInfo.vehicleNumber.toLowerCase().includes(q) ||
         s.mobile.toLowerCase().includes(q)
       );
     }
@@ -364,6 +392,10 @@ export const MembersView: React.FC<MembersViewProps> = ({
     if (campusFilter !== 'all' && s.campus !== campusFilter) return false;
     if (memberTypeFilter !== 'all' && s.memberType !== memberTypeFilter) return false;
     if (routeFilter !== 'all' && s.routeId !== routeFilter && s.routeCode !== routeFilter) return false;
+    if (vehicleFilter !== 'all') {
+      const vInfo = getMemberVehicleInfo(s);
+      if (vInfo.vehicleId !== vehicleFilter && vInfo.vehicleNumber !== vehicleFilter) return false;
+    }
     if (villageFilter !== 'all' && s.villageId !== villageFilter && s.villageName !== villageFilter) return false;
     if (
       stopFilter !== 'all' &&
@@ -439,6 +471,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setCampusFilter('all');
     setMemberTypeFilter('all');
     setRouteFilter('all');
+    setVehicleFilter('all');
     setClassFilter('all');
     setVillageFilter('all');
     setStopFilter('all');
@@ -577,7 +610,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
       const defaultStop = vil.stops.length > 0 ? vil.stops[0] : undefined;
       const nextStopId = defaultStop ? defaultStop.id : '';
       setSelectedStopId(nextStopId);
-      setMonthlyFee(defaultStop?.fee || vil.monthlyRate || 700);
+      setMonthlyFee(defaultStop?.fee ?? vil.monthlyRate ?? 0);
       const matchingRoute = resolveBestRouteForVillage(vilId, nextStopId, campus);
       setSelectedRouteId(matchingRoute ? matchingRoute.id : '');
     } else {
@@ -590,7 +623,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setSelectedStopId(stpId);
     setCustomStopName('');
     const stp = availableStops.find(s => s.id === stpId);
-    if (stp && stp.fee) {
+    if (stp && stp.fee !== undefined) {
       setMonthlyFee(stp.fee);
     }
     if (selectedVillageId) {
@@ -628,6 +661,59 @@ export const MembersView: React.FC<MembersViewProps> = ({
     }
   };
 
+  const inferCampusFromClass = (className: string, fallback = ''): string => {
+    const c = String(className || '').trim().toUpperCase();
+    if (!c) return fallback;
+    if (
+      c.includes('PLAY') ||
+      c.includes('NURSERY') ||
+      c.includes('LKG') ||
+      c.includes('UKG') ||
+      c.includes('PREP')
+    ) {
+      return 'Jr';
+    }
+    const tokens = c
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .trim()
+      .split(/\s+/);
+    for (const tok of tokens) {
+      if (
+        tok === 'I' ||
+        tok === 'II' ||
+        tok === 'III' ||
+        tok === 'IV' ||
+        tok === '1' ||
+        tok === '2' ||
+        tok === '3' ||
+        tok === '4'
+      ) {
+        return 'Jr';
+      }
+      if (
+        tok === 'V' ||
+        tok === 'VI' ||
+        tok === 'VII' ||
+        tok === 'VIII' ||
+        tok === 'IX' ||
+        tok === 'X' ||
+        tok === 'XI' ||
+        tok === 'XII' ||
+        tok === '5' ||
+        tok === '6' ||
+        tok === '7' ||
+        tok === '8' ||
+        tok === '9' ||
+        tok === '10' ||
+        tok === '11' ||
+        tok === '12'
+      ) {
+        return 'Sr';
+      }
+    }
+    return fallback;
+  };
+
   const openNewModal = () => {
     setFormError(null);
     setEditingId(null);
@@ -650,8 +736,10 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setCustomVillageName('');
     setSelectedStopId(defaultVil?.stops[0]?.id || '');
     setCustomStopName('');
-    setMonthlyFee(defaultVil?.stops[0]?.fee || defaultVil?.monthlyRate || 700);
+    setMonthlyFee(defaultVil?.stops[0]?.fee ?? defaultVil?.monthlyRate ?? 0);
     setConcessionAmount(0);
+    setPreviousDues(0);
+    setPreviousDuesRemarks('');
     const defaultRoute = routes[0];
     setSelectedRouteId(defaultRoute?.id || '');
     setMemberStatusInput('Active');
@@ -668,7 +756,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setStudentClass(s.class || '');
     setSection(s.section || '');
     setGender(s.gender || 'M');
-    setCampus(s.campus || '');
+    setCampus(inferCampusFromClass(s.class || '', s.campus || ''));
     setFatherName(s.fatherName || '');
     setMobile(s.mobile || '');
     setEmergencyContact(s.emergencyContact || s.mobile || '');
@@ -681,6 +769,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
     setSelectedRouteId(s.routeId || '');
     setMonthlyFee(s.monthlyFee);
     setConcessionAmount(s.concessionAmount);
+    setPreviousDues(s.previousDues ?? 0);
+    setPreviousDuesRemarks(s.previousDuesRemarks || '');
     setMemberStatusInput(s.transportStatus || 'Active');
     setSchoolIdDoc(null);
     setShowAddModal(true);
@@ -690,67 +780,32 @@ export const MembersView: React.FC<MembersViewProps> = ({
     e.preventDefault();
     setFormError(null);
 
-    if (!admissionNo.trim()) {
-      setFormError('Admission No. / Staff ID is mandatory.');
-      return;
-    }
     if (!name.trim()) {
       setFormError('Member Full Name is mandatory.');
       return;
     }
-    if (!profilePhoto) {
-      setFormError('Display Picture (DP) attachment is compulsory when adding a member.');
-      return;
-    }
-    if (!memberType.trim()) {
-      setFormError('Please enter or select a Member Type.');
-      return;
-    }
-    if (!campus.trim()) {
-      setFormError('Please enter or select a Campus.');
-      return;
-    }
-    if (!studentClass.trim()) {
-      setFormError('Class / Role / Department is mandatory.');
-      return;
-    }
-    if (!fatherName.trim()) {
-      setFormError('Father / Guardian / Spouse Name is mandatory.');
-      return;
-    }
-    if (!mobile.trim() || mobile.replace(/\D/g, '').length < 10) {
-      setFormError('A valid 10-digit Mobile / WhatsApp Number is mandatory.');
-      return;
-    }
-    if (!address.trim()) {
-      setFormError('Residential Address is mandatory.');
-      return;
-    }
 
     const vil = villages.find(v => v.id === selectedVillageId);
-    const stp = vil?.stops.find(s => s.id === selectedStopId);
+    const stp = vil?.stops.find(s => s.id === selectedStopId) || vil?.stops?.[0];
     const rt = routes.find(r => r.id === selectedRouteId);
 
     const resolvedVillageName = customVillageName.trim() || vil?.name || '';
-    const resolvedStopName = customStopName.trim() || stp?.name || '';
+    const resolvedStopName = customStopName.trim() || stp?.name || resolvedVillageName;
     const resolvedRouteCode = rt?.code || '';
 
     if (!vil && !resolvedVillageName) {
       setFormError('Mandatory prerequisite record missing: Please select a valid Village from Village Master.');
       return;
     }
-    if (!stp && !resolvedStopName) {
-      setFormError('Mandatory prerequisite record missing: Please select a valid Pickup & Drop Stop.');
-      return;
-    }
     if (!rt && !resolvedRouteCode) {
       setFormError('Mandatory prerequisite record missing: Please select a valid Assigned Route from Route Master.');
       return;
     }
-    if (!monthlyFee || Number(monthlyFee) <= 0) {
-      setFormError('Monthly Transport Fee is mandatory and must be greater than ₹0.');
-      return;
-    }
+
+    const effectiveFee =
+      monthlyFee !== undefined && monthlyFee !== null && !isNaN(Number(monthlyFee)) && Number(monthlyFee) >= 0
+        ? Number(monthlyFee)
+        : Number(stp?.fee ?? vil?.monthlyRate ?? 0);
 
     setSubmitting(true);
     try {
@@ -762,24 +817,29 @@ export const MembersView: React.FC<MembersViewProps> = ({
         id: editingId || undefined,
         admissionNo: admissionNo.trim(),
         name: name.trim(),
-        profilePhoto,
-        memberType: memberType.trim(),
-        class: studentClass.trim(),
+        profilePhoto: profilePhoto || '',
+        memberType: (memberType || 'Student').trim(),
+        class: (studentClass || 'Class I').trim(),
         section: section.trim() || 'A',
         gender,
-        campus: campus.trim(),
+        campus: inferCampusFromClass(
+          studentClass || 'Class I',
+          (campus || rt?.campus || 'Sr').trim()
+        ),
         fatherName: fatherName.trim(),
         mobile: mobile.trim(),
         emergencyContact: (emergencyContact || mobile).trim(),
-        address: address.trim(),
+        address: (address || resolvedVillageName).trim(),
         villageId: vil?.id || '',
         villageName: resolvedVillageName,
         pickupDropStopId: stp?.id || '',
         pickupDropStopName: resolvedStopName,
         routeId: rt?.id || '',
         routeCode: resolvedRouteCode,
-        monthlyFee: Number(monthlyFee),
+        monthlyFee: effectiveFee,
         concessionAmount: Number(concessionAmount) || 0,
+        previousDues: Number(previousDues) || 0,
+        previousDuesRemarks: previousDuesRemarks.trim() || undefined,
         transportStatus: memberStatusInput,
         documents: updatedDocs,
       });
@@ -801,22 +861,31 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
   // Profile Modal Member Lookup
   const activeProfileMember = profileMemberId ? students.find(s => s.id === profileMemberId) || null : null;
+  const activeProfileAdmNo = activeProfileMember?.admissionNo?.trim() || '';
   const memberInvoices = activeProfileMember
-    ? invoices.filter(i => i.studentId === activeProfileMember.id || i.admissionNo === activeProfileMember.admissionNo)
+    ? invoices.filter(
+        i => i.studentId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && i.admissionNo === activeProfileAdmNo)
+      )
     : [];
   const memberReceipts = activeProfileMember
-    ? receipts.filter(r => r.studentId === activeProfileMember.id || r.admissionNo === activeProfileMember.admissionNo)
+    ? receipts.filter(
+        r => r.studentId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && r.admissionNo === activeProfileAdmNo)
+      )
     : [];
   const memberAttendance = activeProfileMember
     ? attendanceRecords.filter(
-        a => a.studentId === activeProfileMember.id || a.admissionNo === activeProfileMember.admissionNo
+        a => a.studentId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && a.admissionNo === activeProfileAdmNo)
       )
     : [];
   const memberFollowUps = activeProfileMember
-    ? feeFollowUps.filter(f => f.memberId === activeProfileMember.id || f.admissionNo === activeProfileMember.admissionNo)
+    ? feeFollowUps.filter(
+        f => f.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && f.admissionNo === activeProfileAdmNo)
+      )
     : [];
   const memberDisciplines = activeProfileMember
-    ? disciplineRecords.filter(d => d.memberId === activeProfileMember.id || d.admissionNo === activeProfileMember.admissionNo)
+    ? disciplineRecords.filter(
+        d => d.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && d.admissionNo === activeProfileAdmNo)
+      )
     : [];
 
   const isStudentMember = (m: StudentMember) =>
@@ -1591,159 +1660,288 @@ export const MembersView: React.FC<MembersViewProps> = ({
             SUB-MODULE 1: MEMBERS DIRECTORY
            ===================================================================== */
         <>
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <h2 className="text-base font-bold text-slate-900">Member Directory</h2>
-              <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-xs font-mono font-bold">
-                {filteredStudents.length}
-              </span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative w-52 sm:w-64">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                  placeholder="Search name, ID, stop, route..."
-                  className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
-                />
+          <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <h2 className="text-base font-bold text-slate-900">Member Directory</h2>
+                <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-xs font-mono font-bold">
+                  {filteredStudents.length}
+                </span>
               </div>
 
-              <FilterPopover isFiltered={isFiltered} onReset={clearAllFilters}>
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Campus</label>
-                  <select
-                    value={campusFilter}
-                    onChange={e => setCampusFilter(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
-                  >
-                    <option value="all">All Campuses</option>
-                    {campuses.map(c => (
-                      <option key={c.id} value={c.code}>
-                        {c.name} ({c.code})
-                      </option>
-                    ))}
-                  </select>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative w-52 sm:w-64">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    placeholder="Search name, ID, stop, route, vehicle..."
+                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
                 </div>
 
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Member Type</label>
-                  <select
-                    value={memberTypeFilter}
-                    onChange={e => setMemberTypeFilter(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
-                  >
-                    <option value="all">All Member Types</option>
-                    {memberTypes.map(m => (
-                      <option key={m.id} value={m.name}>
-                        {m.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Route</label>
-                  <select
-                    value={routeFilter}
-                    onChange={e => setRouteFilter(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
-                  >
-                    <option value="all">All Routes</option>
-                    {routes.map(r => (
-                      <option key={r.id} value={r.id}>
-                        {r.code}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Village (A–Z)</label>
-                  <select
-                    value={villageFilter}
-                    onChange={e => {
-                      setVillageFilter(e.target.value);
-                      setStopFilter('all');
-                    }}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
-                  >
-                    <option value="all">All Villages</option>
-                    {sortedVillages.map(v => (
-                      <option key={v.id} value={v.id}>
-                        {v.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {villageFilter !== 'all' && filterVillageStops.length > 0 && (
+                <FilterPopover isFiltered={isFiltered} onReset={clearAllFilters}>
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Stop</label>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Campus</label>
                     <select
-                      value={stopFilter}
-                      onChange={e => setStopFilter(e.target.value)}
-                      className="w-full px-3 py-2 bg-amber-50 border border-amber-300 rounded-xl text-xs font-bold text-slate-900"
+                      value={campusFilter}
+                      onChange={e => setCampusFilter(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
                     >
-                      <option value="all">All Stops ({activeFilterVillageObj?.name})</option>
-                      {filterVillageStops.map(st => (
-                        <option key={st.id} value={st.id}>
-                          {st.name}
+                      <option value="all">All Campuses</option>
+                      {campuses.map(c => (
+                        <option key={c.id} value={c.code}>
+                          {c.name} ({c.code})
                         </option>
                       ))}
                     </select>
                   </div>
-                )}
 
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Status</label>
-                  <select
-                    value={statusFilter}
-                    onChange={e => setStatusFilter(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
-                  >
-                    <option value="all">All Status</option>
-                    <option value="Active">Active</option>
-                    <option value="Suspended">Suspended</option>
-                    <option value="Needs Setup">Needs Setup</option>
-                    <option value="Left">Left</option>
-                  </select>
-                </div>
-              </FilterPopover>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Member Type</label>
+                    <select
+                      value={memberTypeFilter}
+                      onChange={e => setMemberTypeFilter(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
+                    >
+                      <option value="all">All Member Types</option>
+                      {memberTypes.map(m => (
+                        <option key={m.id} value={m.name}>
+                          {m.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              <PrintExportToolbar
-                title="Members Register"
-                filename="Members_Register"
-                schoolName={schoolName}
-                isFiltered={isFiltered}
-                filteredRows={filteredStudents}
-                allRows={students}
-                columns={[
-                  { header: 'ID / Admission No', accessor: s => s.admissionNo },
-                  { header: 'Member Name', accessor: s => s.name },
-                  { header: 'Member Type', accessor: s => s.memberType || '—' },
-                  { header: 'Class & Sec', accessor: s => `${s.class}-${s.section}` },
-                  { header: 'Campus', accessor: s => getCampusLabel(s.campus) },
-                  { header: 'Father / Guardian', accessor: s => s.fatherName },
-                  { header: 'Mobile', accessor: s => s.mobile },
-                  { header: 'Village', accessor: s => s.villageName },
-                  { header: 'Pickup & Drop Stop', accessor: s => s.pickupDropStopName },
-                  { header: 'Route Code', accessor: s => s.routeCode },
-                  { header: 'Net Monthly Fee', accessor: s => Math.max(0, s.monthlyFee - s.concessionAmount) },
-                  { header: 'Balance Due', accessor: s => s.balanceDue },
-                  { header: 'Status', accessor: s => s.transportStatus },
-                ]}
-              />
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Route</label>
+                    <select
+                      value={routeFilter}
+                      onChange={e => setRouteFilter(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
+                    >
+                      <option value="all">All Routes</option>
+                      {routes.map(r => (
+                        <option key={r.id} value={r.id}>
+                          {r.code}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              <button
-                onClick={openNewModal}
-                className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Vehicle</label>
+                    <select
+                      value={vehicleFilter}
+                      onChange={e => setVehicleFilter(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
+                    >
+                      <option value="all">All Vehicles</option>
+                      {vehicles.map(v => (
+                        <option key={v.id} value={v.registrationNumber}>
+                          {v.registrationNumber} {v.vehicleCode ? `(${v.vehicleCode})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Village (A–Z)</label>
+                    <select
+                      value={villageFilter}
+                      onChange={e => {
+                        setVillageFilter(e.target.value);
+                        setStopFilter('all');
+                      }}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
+                    >
+                      <option value="all">All Villages</option>
+                      {sortedVillages.map(v => (
+                        <option key={v.id} value={v.id}>
+                          {v.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {villageFilter !== 'all' && filterVillageStops.length > 0 && (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Stop</label>
+                      <select
+                        value={stopFilter}
+                        onChange={e => setStopFilter(e.target.value)}
+                        className="w-full px-3 py-2 bg-amber-50 border border-amber-300 rounded-xl text-xs font-bold text-slate-900"
+                      >
+                        <option value="all">All Stops ({activeFilterVillageObj?.name})</option>
+                        {filterVillageStops.map(st => (
+                          <option key={st.id} value={st.id}>
+                            {st.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Status</label>
+                    <select
+                      value={statusFilter}
+                      onChange={e => setStatusFilter(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700"
+                    >
+                      <option value="all">All Status</option>
+                      <option value="Active">Active</option>
+                      <option value="Suspended">Suspended</option>
+                      <option value="Needs Setup">Needs Setup</option>
+                      <option value="Left">Left</option>
+                    </select>
+                  </div>
+                </FilterPopover>
+
+                <PrintExportToolbar
+                  title="Members Register"
+                  filename="Members_Register"
+                  schoolName={schoolName}
+                  isFiltered={isFiltered}
+                  filteredRows={filteredStudents}
+                  allRows={students}
+                  columns={[
+                    { header: 'ID / Admission No', accessor: s => s.admissionNo },
+                    { header: 'Member Name', accessor: s => s.name },
+                    { header: 'Member Type', accessor: s => s.memberType || '—' },
+                    { header: 'Class & Sec', accessor: s => `${s.class}-${s.section}` },
+                    { header: 'Campus', accessor: s => getCampusLabel(s.campus) },
+                    { header: 'Father / Guardian', accessor: s => s.fatherName },
+                    { header: 'Mobile', accessor: s => s.mobile },
+                    { header: 'Village', accessor: s => s.villageName },
+                    { header: 'Pickup & Drop Stop', accessor: s => s.pickupDropStopName },
+                    { header: 'Route Code', accessor: s => s.routeCode },
+                    { header: 'Vehicle', accessor: s => getMemberVehicleInfo(s).vehicleNumber || '—' },
+                    { header: 'Net Monthly Fee', accessor: s => Math.max(0, s.monthlyFee - s.concessionAmount) },
+                    { header: 'Previous Dues', accessor: s => s.previousDues || 0 },
+                    { header: 'Balance Due', accessor: s => s.balanceDue },
+                    { header: 'Status', accessor: s => s.transportStatus },
+                  ]}
+                />
+
+                <button
+                  onClick={() => {
+                    const first = students[0];
+                    setPrevDuesMemberId(first?.id || '');
+                    setPrevDuesAmount(String(first?.previousDues ?? ''));
+                    setPrevDuesNote(first?.previousDuesRemarks || 'Previous Dues (Old Software)');
+                    setPrevDuesSearch('');
+                    setShowPrevDuesModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                >
+                  <IndianRupee className="w-3.5 h-3.5" />
+                  <span>+ Previous Dues</span>
+                </button>
+
+                <button
+                  onClick={openNewModal}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Member</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Inline Quick Filters Bar: Campuses, Member Type, Route, Vehicle, Village, Status */}
+            <div className="pt-2.5 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+              <select
+                value={campusFilter}
+                onChange={e => setCampusFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
               >
-                <Plus className="w-4 h-4" />
-                <span>Add Member</span>
-              </button>
+                <option value="all">Campus: All</option>
+                {campuses.map(c => (
+                  <option key={c.id} value={c.code}>
+                    {c.name} ({c.code})
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={memberTypeFilter}
+                onChange={e => setMemberTypeFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Member Type: All</option>
+                {memberTypes.map(m => (
+                  <option key={m.id} value={m.name}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={routeFilter}
+                onChange={e => setRouteFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Route: All</option>
+                {routes.map(r => (
+                  <option key={r.id} value={r.id}>
+                    {r.code}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={vehicleFilter}
+                onChange={e => setVehicleFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Vehicle: All</option>
+                {vehicles.map(v => (
+                  <option key={v.id} value={v.registrationNumber}>
+                    {v.registrationNumber} {v.vehicleCode ? `(${v.vehicleCode})` : ''}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={villageFilter}
+                onChange={e => {
+                  setVillageFilter(e.target.value);
+                  setStopFilter('all');
+                }}
+                className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Village: All</option>
+                {sortedVillages.map(v => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={statusFilter}
+                  onChange={e => setStatusFilter(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+                >
+                  <option value="all">Status: All</option>
+                  <option value="Active">Active</option>
+                  <option value="Suspended">Suspended</option>
+                  <option value="Needs Setup">Needs Setup</option>
+                  <option value="Left">Left</option>
+                </select>
+                {isFiltered && (
+                  <button
+                    onClick={clearAllFilters}
+                    title="Reset Filters"
+                    className="p-1.5 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 cursor-pointer shrink-0"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1826,14 +2024,24 @@ export const MembersView: React.FC<MembersViewProps> = ({
                         <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 font-mono text-xs font-bold">
                           {s.routeCode || 'Unassigned'}
                         </span>
+                        {getMemberVehicleInfo(s).vehicleNumber && (
+                          <div className="text-[10px] font-mono text-slate-500 mt-1">
+                            {getMemberVehicleInfo(s).vehicleNumber}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3.5 px-4">
                         <div className="font-semibold text-slate-900">
                           ₹{Math.max(0, s.monthlyFee - s.concessionAmount)}/mo
                         </div>
+                        {(s.previousDues ?? 0) > 0 && (
+                          <div className="text-[10px] text-amber-800 font-bold">
+                            Prev. Dues: ₹{(s.previousDues ?? 0).toLocaleString('en-IN')}
+                          </div>
+                        )}
                         {s.balanceDue > 0 ? (
                           <div className="text-[11px] text-rose-600 font-semibold">
-                            Due: ₹{s.balanceDue.toLocaleString('en-IN')}
+                            Total Due: ₹{s.balanceDue.toLocaleString('en-IN')}
                           </div>
                         ) : (
                           <div className="text-[11px] text-emerald-600 font-medium">No Dues</div>
@@ -2144,6 +2352,74 @@ export const MembersView: React.FC<MembersViewProps> = ({
               {/* TAB: FEES */}
               {profileTab === 'fees' && (
                 <div className="space-y-4">
+                  {/* Previous Dues (Old Software Arrears Head) Box */}
+                  <div className="p-4 rounded-2xl bg-amber-50/80 border border-amber-200 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                        <IndianRupee className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Previous Dues Head (From Old Software)</span>
+                      </div>
+                      <p className="text-[11px] text-amber-800">
+                        Current Recorded Previous Dues:{' '}
+                        <strong>₹{(activeProfileMember.previousDues ?? 0).toLocaleString('en-IN')}</strong>
+                        {activeProfileMember.previousDuesRemarks ? ` (${activeProfileMember.previousDuesRemarks})` : ''}
+                        {' '}— Included in Outstanding &amp; collectible in Fee Collection.
+                      </p>
+                    </div>
+                    <form
+                      onSubmit={async e => {
+                        e.preventDefault();
+                        const amt = Number(
+                          profilePrevDuesAmt !== ''
+                            ? profilePrevDuesAmt
+                            : activeProfileMember.previousDues ?? 0
+                        );
+                        if (isNaN(amt) || amt < 0) return;
+                        setSubmitting(true);
+                        try {
+                          await api.setStudentPreviousDues(
+                            activeProfileMember.id,
+                            amt,
+                            profilePrevDuesNote || activeProfileMember.previousDuesRemarks || 'Previous Dues (Old Software)'
+                          );
+                          setProfilePrevDuesAmt('');
+                        } finally {
+                          setSubmitting(false);
+                        }
+                      }}
+                      className="flex flex-wrap items-end gap-2"
+                    >
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Previous Dues (₹)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          placeholder={String(activeProfileMember.previousDues ?? 0)}
+                          value={profilePrevDuesAmt}
+                          onChange={e => setProfilePrevDuesAmt(e.target.value)}
+                          className="w-28 px-2.5 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Head / Remark</label>
+                        <input
+                          type="text"
+                          placeholder={activeProfileMember.previousDuesRemarks || 'Old Software Arrears'}
+                          value={profilePrevDuesNote}
+                          onChange={e => setProfilePrevDuesNote(e.target.value)}
+                          className="w-44 px-2.5 py-1.5 bg-white border border-amber-300 rounded-xl text-xs"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-xl text-xs font-bold cursor-pointer"
+                      >
+                        {submitting ? 'Saving...' : 'Save Previous Dues'}
+                      </button>
+                    </form>
+                  </div>
+
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-bold text-slate-900">Member Fee Receipts Ledger</h4>
                     <div className="px-3.5 py-2 rounded-xl bg-slate-100 text-xs font-bold text-slate-800">
@@ -2547,6 +2823,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 });
 
                 const getEffectiveAttendanceStatus = (a: TripAttendanceRecord) => {
+                  if (a.driverStatus === 'Present' || a.assistantStatus === 'Present') return 'Present';
                   if (a.resolvedStatus && a.resolvedStatus !== 'Pending') return a.resolvedStatus;
                   if (a.assistantStatus && a.assistantStatus !== 'Pending') return a.assistantStatus;
                   if (a.driverStatus && a.driverStatus !== 'Pending') return a.driverStatus;
@@ -2574,7 +2851,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                       <div>
                         <h4 className="text-sm font-bold text-slate-900">Transport Attendance Summary</h4>
                         <p className="text-[11px] text-slate-500">
-                          Calculated strictly from recorded daily trip attendance logs
+                          Present in either Arrival or Departure marks the day as Present
                         </p>
                       </div>
                       <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
@@ -2596,13 +2873,13 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                        <span className="text-xs text-slate-500">{attendancePeriod} Recorded Trips</span>
+                        <span className="text-xs text-slate-500">{attendancePeriod} Recorded Days</span>
                         <div className="text-xl font-bold text-slate-900 mt-1">
                           {totalRecordedTrips}
                         </div>
                       </div>
                       <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
-                        <span className="text-xs text-emerald-800">Present Trips</span>
+                        <span className="text-xs text-emerald-800">Present Days</span>
                         <div className="text-xl font-bold text-emerald-700 mt-1">
                           {presentTrips}
                         </div>
@@ -2627,21 +2904,23 @@ export const MembersView: React.FC<MembersViewProps> = ({
                           <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
                             <th className="py-2.5 px-4">Date</th>
                             <th className="py-2.5 px-3">Stop</th>
-                            <th className="py-2.5 px-3">Driver Sheet</th>
-                            <th className="py-2.5 px-3">Assistant App</th>
+                            <th className="py-2.5 px-3">Morning Arrival</th>
+                            <th className="py-2.5 px-3">School Departure</th>
                             <th className="py-2.5 px-3">Final Status</th>
+                            <th className="py-2.5 px-3">Remarks</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {periodRecords.length === 0 ? (
                             <tr>
-                              <td colSpan={5} className="py-8 text-center text-slate-400">
+                              <td colSpan={6} className="py-8 text-center text-slate-400">
                                 No transport attendance has been recorded for this member in the selected period yet.
                               </td>
                             </tr>
                           ) : (
                             periodRecords.map(rec => {
                               const effStatus = getEffectiveAttendanceStatus(rec);
+                              const remarkText = rec.resolutionReason || rec.notes || '';
                               return (
                                 <tr key={rec.id}>
                                   <td className="py-2.5 px-4 font-mono font-semibold text-slate-900">
@@ -2663,6 +2942,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                       {effStatus}
                                     </span>
                                   </td>
+                                  <td className="py-2.5 px-3 text-slate-600">{remarkText || '—'}</td>
                                 </tr>
                               );
                             })
@@ -3119,13 +3399,13 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   )}
                   <div>
                     <span className="text-xs font-bold text-slate-900 block">
-                      Member Display Picture (DP) * <span className="text-rose-600">(Compulsory)</span>
+                      Member Display Picture (DP) <span className="text-slate-500 font-normal">(Optional — can be added later)</span>
                     </span>
                   </div>
                 </div>
                 <label className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold cursor-pointer shrink-0">
                   <Upload className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{profilePhoto ? 'Change DP Photo' : 'Upload DP Photo *'}</span>
+                  <span>{profilePhoto ? 'Change DP Photo' : 'Upload DP Photo'}</span>
                   <input type="file" accept="image/*" onChange={handleDpUpload} className="hidden" />
                 </label>
               </div>
@@ -3169,11 +3449,12 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   )}
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Admission / Staff ID *</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Admission / Staff ID <span className="text-[10px] font-normal text-slate-400">(Optional)</span>
+                  </label>
                   <input
                     type="text"
-                    required
-                    placeholder="e.g. NEV2026123"
+                    placeholder="e.g. NEV1205/25"
                     value={admissionNo}
                     onChange={e => setAdmissionNo(e.target.value)}
                     className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold focus:border-slate-900 focus:outline-hidden"
@@ -3181,7 +3462,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Campus * <span className="text-[10px] font-normal text-slate-400">(Type or Select)</span>
+                    Campus * <span className="text-[10px] font-normal text-slate-400">(Playgroup–IV: Jr • V–X: Sr)</span>
                   </label>
                   <input
                     type="text"
@@ -3254,7 +3535,12 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     required
                     list="erp-classes-list"
                     value={studentClass}
-                    onChange={e => setStudentClass(e.target.value)}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setStudentClass(val);
+                      const inferred = inferCampusFromClass(val, '');
+                      if (inferred) setCampus(inferred);
+                    }}
                     placeholder="e.g. Class X, LKG, Teacher"
                     className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
                   />
@@ -3266,14 +3552,14 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Section <span className="text-[10px] font-normal text-slate-400">(Type or Select)</span>
+                    Section <span className="text-[10px] font-normal text-slate-400">(Optional)</span>
                   </label>
                   <input
                     type="text"
                     list="erp-sections-list"
                     value={section}
                     onChange={e => setSection(e.target.value)}
-                    placeholder="e.g. A, B, Science"
+                    placeholder="e.g. A, B (defaults to A)"
                     className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:border-slate-900 focus:outline-hidden"
                   />
                   <datalist id="erp-sections-list">
@@ -3296,23 +3582,26 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Mobile / WhatsApp *</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Mobile / WhatsApp <span className="text-[10px] font-normal text-slate-400">(Optional)</span>
+                  </label>
                   <input
                     type="text"
-                    required
                     value={mobile}
                     onChange={e => setMobile(e.target.value)}
-                    placeholder="10-digit Mobile"
+                    placeholder="10-digit Mobile (can be added later)"
                     className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Residential Address</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Residential Address <span className="text-[10px] font-normal text-slate-400">(Optional)</span>
+                  </label>
                   <input
                     type="text"
                     value={address}
                     onChange={e => setAddress(e.target.value)}
-                    placeholder="House / Ward / Locality"
+                    placeholder="Defaults to Village if blank"
                     className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs"
                   />
                 </div>
@@ -3350,7 +3639,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                       <option value="">-- Select Village (A–Z) --</option>
                       {sortedVillages.map(v => (
                         <option key={v.id} value={v.id}>
-                          {v.name} (₹{v.monthlyRate || v.stops?.[0]?.fee || 700}/mo)
+                          {v.name} (₹{v.stops?.[0]?.fee ?? v.monthlyRate ?? 0}/mo)
                         </option>
                       ))}
                     </select>
@@ -3468,6 +3757,35 @@ export const MembersView: React.FC<MembersViewProps> = ({
                       <option value="Needs Setup">Needs Setup</option>
                       {canInitiateSuspension && <option value="Suspended">Suspended (Included in Auto-Fee)</option>}
                     </select>
+                  </div>
+                </div>
+
+                {/* Previous Dues (Old Software Opening Arrears Head) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-amber-200/80">
+                  <div>
+                    <label className="block text-xs font-bold text-amber-950 mb-1">
+                      Previous Dues Head — Old Software Arrears (₹)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={previousDues}
+                      onChange={e => setPreviousDues(Number(e.target.value))}
+                      placeholder="0"
+                      className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs font-bold text-slate-900"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-amber-950 mb-1">
+                      Previous Dues Remark / Session Period
+                    </label>
+                    <input
+                      type="text"
+                      value={previousDuesRemarks}
+                      onChange={e => setPreviousDuesRemarks(e.target.value)}
+                      placeholder="e.g. Old Software Dues up to Mid-Session"
+                      className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs"
+                    />
                   </div>
                 </div>
               </div>
@@ -3767,6 +4085,142 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl cursor-pointer shadow-xs"
                 >
                   {submitting ? 'Saving...' : 'Save Permission & Revoke/Protect'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) MODAL */}
+      {showPrevDuesModal && (
+        <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <IndianRupee className="w-5 h-5 text-amber-600" />
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Add / Update Previous Dues (Old Software Head)
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Adds opening arrears head into member&apos;s Outstanding for collection in this software
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowPrevDuesModal(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async e => {
+                e.preventDefault();
+                if (!prevDuesMemberId) return;
+                const amt = Number(prevDuesAmount);
+                if (isNaN(amt) || amt < 0) return;
+                setSubmitting(true);
+                try {
+                  await api.setStudentPreviousDues(
+                    prevDuesMemberId,
+                    amt,
+                    prevDuesNote.trim() || 'Previous Dues (Old Software)'
+                  );
+                  setShowPrevDuesModal(false);
+                } finally {
+                  setSubmitting(false);
+                }
+              }}
+              className="space-y-3.5 text-xs"
+            >
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Search Member</label>
+                <input
+                  type="text"
+                  value={prevDuesSearch}
+                  onChange={e => setPrevDuesSearch(e.target.value)}
+                  placeholder="Type name, admission no, route, or village..."
+                  className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50 mb-1.5"
+                />
+                <label className="block font-bold text-slate-700 mb-1">Select Member *</label>
+                <select
+                  required
+                  value={prevDuesMemberId}
+                  onChange={e => {
+                    const id = e.target.value;
+                    setPrevDuesMemberId(id);
+                    const found = students.find(s => s.id === id);
+                    if (found) {
+                      setPrevDuesAmount(String(found.previousDues ?? 0));
+                      setPrevDuesNote(found.previousDuesRemarks || 'Previous Dues (Old Software)');
+                    }
+                  }}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-semibold"
+                >
+                  {students
+                    .filter(s => {
+                      if (!prevDuesSearch.trim()) return true;
+                      const q = prevDuesSearch.toLowerCase();
+                      return (
+                        s.name.toLowerCase().includes(q) ||
+                        s.admissionNo.toLowerCase().includes(q) ||
+                        s.villageName.toLowerCase().includes(q) ||
+                        s.routeCode.toLowerCase().includes(q)
+                      );
+                    })
+                    .map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.admissionNo}) — {s.class}-{s.section} • Route {s.routeCode} • Prev Dues: ₹{s.previousDues ?? 0} • Total Due: ₹{s.balanceDue}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Previous Dues Amount (₹) *
+                </label>
+                <input
+                  type="number"
+                  required
+                  min={0}
+                  value={prevDuesAmount}
+                  onChange={e => setPrevDuesAmount(e.target.value)}
+                  placeholder="Enter previous dues amount from old software"
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-bold text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Dues Head / Remark
+                </label>
+                <input
+                  type="text"
+                  value={prevDuesNote}
+                  onChange={e => setPrevDuesNote(e.target.value)}
+                  placeholder="e.g. Previous Dues (Old Software up to Sept)"
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPrevDuesModal(false)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl cursor-pointer shadow-xs"
+                >
+                  {submitting ? 'Saving...' : 'Save Previous Dues'}
                 </button>
               </div>
             </form>

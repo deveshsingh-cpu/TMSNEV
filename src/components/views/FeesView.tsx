@@ -9,6 +9,7 @@ import {
   StudentMember, UserRole, MemberTypeMaster
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
+import { api } from '../../services/api.js';
 
 interface FeesViewProps {
   schoolName?: string;
@@ -81,6 +82,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [isIndividualSuspendModalOpen, setIsIndividualSuspendModalOpen] = useState(false);
   const [suspendReasonMap, setSuspendReasonMap] = useState<Record<string, string>>({});
 
+  // Previous Dues (Old Software Opening Arrears Head) Modal State
+  const [isPrevDuesModalOpen, setIsPrevDuesModalOpen] = useState(false);
+  const [prevDuesFilterClass, setPrevDuesFilterClass] = useState('all');
+  const [prevDuesFilterRoute, setPrevDuesFilterRoute] = useState('all');
+  const [prevDuesSearch, setPrevDuesSearch] = useState('');
+  const [prevDuesEdits, setPrevDuesEdits] = useState<Record<string, { amount: string; remarks: string }>>({});
+  const [isSavingPrevDues, setIsSavingPrevDues] = useState(false);
+
   // --- Improvised Fee Collection Form State ---
   const [memberSearchQuery, setMemberSearchQuery] = useState('');
   const [memberFilterClass, setMemberFilterClass] = useState('all');
@@ -143,7 +152,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
       ? memberUnpaidInvoices.map((inv) => ({
           id: inv.id,
           month: inv.month,
-          description: `${inv.month} — Transport Fee (${selectedMember?.pickupDropStopName || 'Assigned Stop'}, ${selectedMember?.villageName || ''})`,
+          description:
+            inv.idempotencyKey?.startsWith('PREV-DUES-') || inv.month.toLowerCase().includes('previous dues')
+              ? `${inv.month} — Opening Arrears from Old Software`
+              : `${inv.month} — Transport Fee (${selectedMember?.pickupDropStopName || 'Assigned Stop'}, ${selectedMember?.villageName || ''})`,
           duesAmount: inv.balanceDue,
         }))
       : selectedMember && selectedMember.balanceDue > 0
@@ -750,6 +762,17 @@ export const FeesView: React.FC<FeesViewProps> = ({
               />
 
               <button
+                onClick={() => {
+                  setPrevDuesEdits({});
+                  setIsPrevDuesModalOpen(true);
+                }}
+                className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Previous Dues (Old Software)</span>
+              </button>
+
+              <button
                 onClick={handleRunBilling}
                 disabled={isRunningBilling}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-2"
@@ -762,6 +785,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
           {activeTab === 'receipts' && (
             <>
+              <button
+                onClick={() => {
+                  setPrevDuesEdits({});
+                  setIsPrevDuesModalOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Previous Dues (Old Software)</span>
+              </button>
               <PrintExportToolbar
                 title="Transport Fee Receipts & Collections Register"
                 filename="fee_receipts"
@@ -2139,6 +2172,235 @@ export const FeesView: React.FC<FeesViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) ENTRY MODAL */}
+      {isPrevDuesModalOpen && (() => {
+        const distinctRoutes = Array.from(new Set(students.map(s => s.routeCode).filter(Boolean))).sort();
+        const filteredForPrevDues = students.filter(s => {
+          if (prevDuesFilterClass !== 'all' && s.class !== prevDuesFilterClass) return false;
+          if (prevDuesFilterRoute !== 'all' && s.routeCode !== prevDuesFilterRoute) return false;
+          if (prevDuesSearch.trim()) {
+            const q = prevDuesSearch.toLowerCase();
+            return (
+              s.name.toLowerCase().includes(q) ||
+              s.admissionNo.toLowerCase().includes(q) ||
+              s.villageName.toLowerCase().includes(q) ||
+              s.routeCode.toLowerCase().includes(q)
+            );
+          }
+          return true;
+        });
+
+        const handleSaveSinglePrevDues = async (student: StudentMember) => {
+          const edit = prevDuesEdits[student.id];
+          const rawAmt = edit !== undefined ? edit.amount : String(student.previousDues ?? 0);
+          const rawRem = edit !== undefined ? edit.remarks : (student.previousDuesRemarks || 'Previous Dues (Old Software)');
+          const amt = Number(rawAmt);
+          if (isNaN(amt) || amt < 0) return;
+          setIsSavingPrevDues(true);
+          try {
+            await api.setStudentPreviousDues(student.id, amt, rawRem);
+            setStatusMessage({
+              type: 'success',
+              text: `Updated Previous Dues head for ${student.name} to ₹${amt.toLocaleString('en-IN')}. Included in Outstanding.`,
+            });
+          } finally {
+            setIsSavingPrevDues(false);
+          }
+        };
+
+        const handleSaveAllEditedPrevDues = async () => {
+          const entries = Object.entries(prevDuesEdits)
+            .map(([studentId, val]) => ({
+              studentId,
+              amount: Number(val.amount) || 0,
+              remarks: val.remarks || 'Previous Dues (Old Software)',
+            }))
+            .filter(e => !isNaN(e.amount) && e.amount >= 0);
+
+          if (entries.length === 0) {
+            setIsPrevDuesModalOpen(false);
+            return;
+          }
+          setIsSavingPrevDues(true);
+          try {
+            const res = await api.bulkSetPreviousDues(entries);
+            setStatusMessage({
+              type: 'success',
+              text: `Saved Previous Dues (Old Software Head) for ${res.updatedCount} member(s). Outstanding balances updated.`,
+            });
+            setPrevDuesEdits({});
+            setIsPrevDuesModalOpen(false);
+          } finally {
+            setIsSavingPrevDues(false);
+          }
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/65 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <div className="bg-white rounded-2xl max-w-4xl w-full p-6 space-y-4 shadow-2xl border border-slate-200 max-h-[90vh] flex flex-col">
+              <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    <IndianRupee className="w-5 h-5 text-amber-600" />
+                    <span>Add / Manage Previous Dues Head (From Old Software)</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Enter opening arrears from your old software for any member. It creates a dedicated &ldquo;Previous Dues (Old Software)&rdquo; head included in Outstanding &amp; collectible via Fee Receipts.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setIsPrevDuesModalOpen(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Filter Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={prevDuesSearch}
+                    onChange={e => setPrevDuesSearch(e.target.value)}
+                    placeholder="Search member name, ID, village..."
+                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+                <select
+                  value={prevDuesFilterRoute}
+                  onChange={e => setPrevDuesFilterRoute(e.target.value)}
+                  className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold"
+                >
+                  <option value="all">All Routes</option>
+                  {distinctRoutes.map(rc => (
+                    <option key={rc} value={rc}>Route: {rc}</option>
+                  ))}
+                </select>
+                <select
+                  value={prevDuesFilterClass}
+                  onChange={e => setPrevDuesFilterClass(e.target.value)}
+                  className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold"
+                >
+                  <option value="all">All Classes</option>
+                  {classes.map(c => (
+                    <option key={c} value={c}>Class: {c}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Table of Members to Enter Previous Dues */}
+              <div className="border border-slate-200 rounded-xl overflow-y-auto flex-1 max-h-[54vh]">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-[11px] font-bold text-slate-600 uppercase z-10">
+                    <tr>
+                      <th className="py-2.5 px-3">Member &amp; ID</th>
+                      <th className="py-2.5 px-3">Class / Route</th>
+                      <th className="py-2.5 px-3">Current Total Outstanding</th>
+                      <th className="py-2.5 px-3">Previous Dues Amount (₹)</th>
+                      <th className="py-2.5 px-3">Head / Period Remark</th>
+                      <th className="py-2.5 px-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredForPrevDues.map(st => {
+                      const edit = prevDuesEdits[st.id];
+                      const valAmt = edit !== undefined ? edit.amount : String(st.previousDues ?? 0);
+                      const valRem = edit !== undefined ? edit.remarks : (st.previousDuesRemarks || 'Previous Dues (Old Software)');
+                      return (
+                        <tr key={st.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 px-3">
+                            <div className="font-bold text-slate-900">{st.name}</div>
+                            <div className="font-mono text-[10px] text-slate-500">{st.admissionNo} • {st.villageName}</div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="font-semibold text-slate-800">{st.class}-{st.section}</div>
+                            <div className="font-mono text-[10px] text-amber-700 font-bold">{st.routeCode}</div>
+                          </td>
+                          <td className="py-2.5 px-3 font-bold text-rose-600">
+                            ₹{st.balanceDue.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="number"
+                              min={0}
+                              value={valAmt}
+                              onChange={e =>
+                                setPrevDuesEdits(prev => ({
+                                  ...prev,
+                                  [st.id]: {
+                                    amount: e.target.value,
+                                    remarks: valRem,
+                                  },
+                                }))
+                              }
+                              className="w-28 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg font-bold text-slate-900 focus:border-amber-500 focus:outline-hidden"
+                            />
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="text"
+                              value={valRem}
+                              onChange={e =>
+                                setPrevDuesEdits(prev => ({
+                                  ...prev,
+                                  [st.id]: {
+                                    amount: valAmt,
+                                    remarks: e.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder="Previous Dues (Old Software)"
+                              className="w-48 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                            />
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <button
+                              type="button"
+                              disabled={isSavingPrevDues}
+                              onClick={() => handleSaveSinglePrevDues(st)}
+                              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold rounded-lg text-[11px] cursor-pointer"
+                            >
+                              Save
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-slate-200">
+                <span className="text-xs text-slate-500">
+                  Edited in this session: <strong>{Object.keys(prevDuesEdits).length}</strong> member(s)
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsPrevDuesModalOpen(false)}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-semibold text-slate-700 cursor-pointer"
+                  >
+                    Close
+                  </button>
+                  {Object.keys(prevDuesEdits).length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isSavingPrevDues}
+                      onClick={handleSaveAllEditedPrevDues}
+                      className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer shadow-xs"
+                    >
+                      {isSavingPrevDues ? 'Saving All...' : `Save All Edited (${Object.keys(prevDuesEdits).length})`}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

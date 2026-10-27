@@ -19,7 +19,7 @@ interface DailyOperationsViewProps {
   initialSubTab?: string;
   onSelectTrip: (tripId: string) => void;
   onSelectRouteForDate?: (date: string, routeId: string) => Promise<void>;
-  onMarkAttendance: (recordId: string, source: 'driver' | 'assistant', value: string) => Promise<any>;
+  onMarkAttendance: (recordId: string, source: 'driver' | 'assistant', value: string, reason?: string) => Promise<any>;
   onResolveMismatch: (recordId: string, value: string, reason: string) => Promise<any>;
   onVerifyTrip: (
     tripId: string,
@@ -67,11 +67,33 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       : 'board'
   );
 
+  // Separate mode for 1- Arrival Attendance vs 2- Departure Attendance
+  const [boardMode, setBoardMode] = useState<'arrival' | 'departure'>(
+    initialSubTab === 'departure' ? 'departure' : 'arrival'
+  );
+
+  // Mismatch Reason Popup Modal state when Departure Attendance != Arrival Attendance
+  const [mismatchPopup, setMismatchPopup] = useState<{
+    recordId: string;
+    studentName: string;
+    admissionNo: string;
+    arrivalStatus: string;
+    departureStatus: string;
+    reason: string;
+  } | null>(null);
+  const [mismatchError, setMismatchError] = useState<string | null>(null);
+
   useEffect(() => {
     if (initialSubTab === 'pack') setActiveSubView('pack');
     else if (initialSubTab === 'summary') setActiveSubView('summary');
     else if (initialSubTab === 'calendar') setActiveSubView('calendar');
-    else if (initialSubTab === 'board') setActiveSubView('board');
+    else if (initialSubTab === 'departure') {
+      setActiveSubView('board');
+      setBoardMode('departure');
+    } else if (initialSubTab === 'arrival' || initialSubTab === 'board') {
+      setActiveSubView('board');
+      setBoardMode('arrival');
+    }
   }, [initialSubTab]);
 
   const todayStr = new Date().toISOString().split('T')[0];
@@ -289,24 +311,72 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     };
   });
 
-  const presentCount = tripAttendanceList.filter((a) => a.assistantStatus === 'Present').length;
-  const absentCount = tripAttendanceList.filter((a) => a.assistantStatus === 'Absent').length;
-  const leaveCount = tripAttendanceList.filter((a) => a.assistantStatus === 'Leave').length;
-  const holidayCount = tripAttendanceList.filter((a) => a.assistantStatus === 'Holiday').length;
+  const activeBoardStatus = (rec: TripAttendanceRecord) =>
+    boardMode === 'arrival' ? rec.driverStatus : rec.assistantStatus;
+
+  const presentCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Present').length;
+  const absentCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Absent').length;
+  const leaveCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Leave').length;
+  const holidayCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Holiday').length;
   const pendingCount = tripAttendanceList.filter(
     (a) =>
-      a.assistantStatus !== 'Present' &&
-      a.assistantStatus !== 'Absent' &&
-      a.assistantStatus !== 'Leave' &&
-      a.assistantStatus !== 'Holiday'
+      activeBoardStatus(a) !== 'Present' &&
+      activeBoardStatus(a) !== 'Absent' &&
+      activeBoardStatus(a) !== 'Leave' &&
+      activeBoardStatus(a) !== 'Holiday'
   ).length;
 
   const handleMarkAllHoliday = async () => {
+    const targetSource = boardMode === 'arrival' ? 'driver' : 'assistant';
     for (const rec of tripAttendanceList) {
-      await onMarkAttendance(rec.id, 'assistant', 'Holiday');
+      await onMarkAttendance(rec.id, targetSource, 'Holiday');
     }
-    setStatusFeedback(`Marked ${tripAttendanceList.length} member(s) as Holiday (H) for ${selectedDate}`);
+    setStatusFeedback(
+      `Marked ${tripAttendanceList.length} member(s) as Holiday (H) in ${
+        boardMode === 'arrival' ? 'Arrival' : 'Departure'
+      } Attendance for ${selectedDate}`
+    );
     setTimeout(() => setStatusFeedback(null), 3500);
+  };
+
+  const handleDepartureAttendanceClick = async (rec: TripAttendanceRecord, newDepStatus: string) => {
+    const arrStatus = rec.driverStatus || 'Pending';
+    // If Arrival Attendance was marked (not Pending) and does NOT match the newly chosen Departure Attendance, open Mismatch Reason Popup
+    if (arrStatus !== 'Pending' && arrStatus !== newDepStatus) {
+      setMismatchError(null);
+      setMismatchPopup({
+        recordId: rec.id,
+        studentName: rec.studentName,
+        admissionNo: rec.admissionNo,
+        arrivalStatus: arrStatus,
+        departureStatus: newDepStatus,
+        reason: rec.resolutionReason || rec.notes || '',
+      });
+      return;
+    }
+    await onMarkAttendance(rec.id, 'assistant', newDepStatus);
+  };
+
+  const handleConfirmMismatchDeparture = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mismatchPopup) return;
+    const cleanReason = mismatchPopup.reason.trim();
+    if (cleanReason.length < 3) {
+      setMismatchError('Please enter a reason / remark for the mismatch between Arrival and Departure attendance.');
+      return;
+    }
+    await onMarkAttendance(
+      mismatchPopup.recordId,
+      'assistant',
+      mismatchPopup.departureStatus,
+      cleanReason
+    );
+    setStatusFeedback(
+      `Saved Departure Attendance (${mismatchPopup.departureStatus}) for ${mismatchPopup.studentName} with mismatch remark: "${cleanReason}"`
+    );
+    setMismatchPopup(null);
+    setMismatchError(null);
+    setTimeout(() => setStatusFeedback(null), 4000);
   };
 
   const handleMarkTripArrivalOrDeparture = async (mode: 'Arrived' | 'Departed') => {
@@ -810,7 +880,9 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               ? 'Attendance Summary Sheet'
               : activeSubView === 'calendar'
               ? 'Monthly Calendar (P/A/L/H)'
-              : 'Arrival & Departure Attendance'}
+              : boardMode === 'departure'
+              ? '2- Departure Attendance (School Dispersal)'
+              : '1- Arrival Attendance (Morning Pickup)'}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeSubView === 'board' && `${tripAttendanceList.length} Members`}
@@ -870,21 +942,33 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               </FilterPopover>
 
               <PrintExportToolbar
-                title={`Attendance — ${currentTrip?.routeName || selectedRouteObj?.code || 'Route'}`}
-                filename="school_attendance"
+                title={`${boardMode === 'departure' ? 'Departure Attendance' : 'Arrival Attendance'} — ${currentTrip?.routeName || selectedRouteObj?.code || 'Route'}`}
+                filename={boardMode === 'departure' ? 'departure_attendance' : 'arrival_attendance'}
                 schoolName={schoolName}
                 filteredData={tripAttendanceList}
                 allData={tripAttendanceList}
                 hasActiveFilters={true}
                 filterSummary={`Date: ${selectedDate} | Vehicle: ${currentTrip?.vehicleNumber || selectedRouteObj?.vehicleNumber || 'All'} | Route: ${currentTrip?.routeName || selectedRouteObj?.code || 'All'}`}
-                columns={[
-                  { header: 'ID / Adm No', accessor: (r) => r.admissionNo },
-                  { header: 'Member Name', accessor: (r) => r.studentName },
-                  { header: 'Class / Dept', accessor: (r) => r.classSection },
-                  { header: 'Transport Stop', accessor: (r) => r.stopName },
-                  { header: 'Status', accessor: (r) => r.transportStatus },
-                  { header: 'Attendance', accessor: (r) => r.assistantStatus },
-                ]}
+                columns={
+                  boardMode === 'departure'
+                    ? [
+                        { header: 'ID / Adm No', accessor: (r) => r.admissionNo },
+                        { header: 'Member Name', accessor: (r) => r.studentName },
+                        { header: 'Class / Dept', accessor: (r) => r.classSection },
+                        { header: 'Transport Stop', accessor: (r) => r.stopName },
+                        { header: 'Arrival Status', accessor: (r) => r.driverStatus || 'Pending' },
+                        { header: 'Departure Status', accessor: (r) => r.assistantStatus || 'Pending' },
+                        { header: 'Mismatch Remark', accessor: (r) => r.resolutionReason || r.notes || '—' },
+                      ]
+                    : [
+                        { header: 'ID / Adm No', accessor: (r) => r.admissionNo },
+                        { header: 'Member Name', accessor: (r) => r.studentName },
+                        { header: 'Class / Dept', accessor: (r) => r.classSection },
+                        { header: 'Transport Stop', accessor: (r) => r.stopName },
+                        { header: 'Status', accessor: (r) => r.transportStatus },
+                        { header: 'Arrival Attendance', accessor: (r) => r.driverStatus || 'Pending' },
+                      ]
+                }
               />
             </>
           )}
@@ -1084,41 +1168,47 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">In Time:</span>
-                    <input
-                      type="time"
-                      value={tripInTime}
-                      onChange={(e) => setTripInTime(e.target.value)}
-                      className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleMarkTripArrivalOrDeparture('Arrived')}
-                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-2xs"
-                  >
-                    <ArrowDownLeft className="w-3.5 h-3.5" />
-                    <span>Mark Arrival</span>
-                  </button>
-
-                  <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs ml-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">Out Time:</span>
-                    <input
-                      type="time"
-                      value={tripOutTime}
-                      onChange={(e) => setTripOutTime(e.target.value)}
-                      className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleMarkTripArrivalOrDeparture('Departed')}
-                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-2xs"
-                  >
-                    <ArrowUpRight className="w-3.5 h-3.5" />
-                    <span>Mark Departure</span>
-                  </button>
+                  {boardMode === 'arrival' ? (
+                    <>
+                      <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Arrival (In) Time:</span>
+                        <input
+                          type="time"
+                          value={tripInTime}
+                          onChange={(e) => setTripInTime(e.target.value)}
+                          className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleMarkTripArrivalOrDeparture('Arrived')}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-2xs"
+                      >
+                        <ArrowDownLeft className="w-3.5 h-3.5" />
+                        <span>Mark Arrival</span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Departure (Out) Time:</span>
+                        <input
+                          type="time"
+                          value={tripOutTime}
+                          onChange={(e) => setTripOutTime(e.target.value)}
+                          className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleMarkTripArrivalOrDeparture('Departed')}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-2xs"
+                      >
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                        <span>Mark Departure</span>
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -1157,7 +1247,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             </div>
           </div>
 
-          {/* Clean Attendance Table */}
+          {/* Clean Attendance Table — Separate for Arrival vs Departure */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
@@ -1167,19 +1257,26 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                     <th className="py-3 px-3">Class / Dept</th>
                     <th className="py-3 px-3">Transport Stop</th>
                     <th className="py-3 px-3">Status</th>
-                    <th className="py-3 px-4 text-right">Attendance (P / A / L / H)</th>
+                    {boardMode === 'departure' && (
+                      <th className="py-3 px-3">Arrival Attendance</th>
+                    )}
+                    <th className="py-3 px-4 text-right">
+                      {boardMode === 'departure'
+                        ? 'Mark Departure Attendance (P / A / L / H)'
+                        : 'Mark Arrival Attendance (P / A / L / H)'}
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {isLoadingRouteTrip ? (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-400">
+                      <td colSpan={boardMode === 'departure' ? 6 : 5} className="py-8 text-center text-slate-400">
                         Loading route members...
                       </td>
                     </tr>
                   ) : tripAttendanceList.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-400">
+                      <td colSpan={boardMode === 'departure' ? 6 : 5} className="py-8 text-center text-slate-400">
                         No members assigned to this route.
                       </td>
                     </tr>
@@ -1187,6 +1284,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                     tripAttendanceList.map((rec) => {
                       const stuObj = students.find((s) => s.id === rec.studentId);
                       const isSuspended = rec.transportStatus === 'Suspended';
+                      const arrStatus = rec.driverStatus || 'Pending';
+                      const depStatus = rec.assistantStatus || 'Pending';
+                      const currentMarked = boardMode === 'arrival' ? arrStatus : depStatus;
+                      const hasMismatch =
+                        boardMode === 'departure' &&
+                        arrStatus !== 'Pending' &&
+                        depStatus !== 'Pending' &&
+                        arrStatus !== depStatus;
+                      const remarkText = rec.resolutionReason || rec.notes || '';
+
                       return (
                         <tr
                           key={rec.id}
@@ -1236,52 +1343,74 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                               {rec.transportStatus}
                             </span>
                           </td>
+
+                          {/* Arrival Attendance Column (Shown on Departure Page) */}
+                          {boardMode === 'departure' && (
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`inline-flex items-center px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                                  arrStatus === 'Present'
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : arrStatus === 'Absent'
+                                    ? 'bg-rose-50 text-rose-800 border-rose-200'
+                                    : arrStatus === 'Leave'
+                                    ? 'bg-amber-50 text-amber-900 border-amber-200'
+                                    : arrStatus === 'Holiday'
+                                    ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                    : 'bg-slate-100 text-slate-500 border-slate-200'
+                                }`}
+                              >
+                                {arrStatus === 'Pending' ? 'Not Marked' : `Arrival: ${arrStatus}`}
+                              </span>
+                              {(hasMismatch || remarkText) && (
+                                <div className="mt-1 text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                                  Remark: {remarkText || 'Mismatch noted'}
+                                </div>
+                              )}
+                            </td>
+                          )}
+
                           <td className="py-2.5 px-4 text-right">
                             <div className="inline-flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => onMarkAttendance(rec.id, 'assistant', 'Present')}
-                                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-                                  rec.assistantStatus === 'Present'
+                              {(['Present', 'Absent', 'Leave', 'Holiday'] as const).map((stVal) => {
+                                const shortCode = stVal[0];
+                                const isSelected = currentMarked === stVal;
+                                const activeColor =
+                                  stVal === 'Present'
                                     ? 'bg-emerald-600 text-white shadow-2xs'
-                                    : 'bg-slate-100 hover:bg-emerald-50 text-slate-700'
-                                }`}
-                              >
-                                <span>P (Present)</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onMarkAttendance(rec.id, 'assistant', 'Absent')}
-                                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-                                  rec.assistantStatus === 'Absent'
+                                    : stVal === 'Absent'
                                     ? 'bg-rose-600 text-white shadow-2xs'
-                                    : 'bg-slate-100 hover:bg-rose-50 text-slate-700'
-                                }`}
-                              >
-                                <span>A (Absent)</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onMarkAttendance(rec.id, 'assistant', 'Leave')}
-                                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-                                  rec.assistantStatus === 'Leave'
+                                    : stVal === 'Leave'
                                     ? 'bg-amber-500 text-slate-950 shadow-2xs'
-                                    : 'bg-slate-100 hover:bg-amber-50 text-slate-700'
-                                }`}
-                              >
-                                <span>L (Leave)</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onMarkAttendance(rec.id, 'assistant', 'Holiday')}
-                                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-                                  rec.assistantStatus === 'Holiday'
-                                    ? 'bg-indigo-600 text-white shadow-2xs'
-                                    : 'bg-slate-100 hover:bg-indigo-50 text-slate-700'
-                                }`}
-                              >
-                                <span>H (Holiday)</span>
-                              </button>
+                                    : 'bg-indigo-600 text-white shadow-2xs';
+                                const hoverColor =
+                                  stVal === 'Present'
+                                    ? 'bg-slate-100 hover:bg-emerald-50 text-slate-700'
+                                    : stVal === 'Absent'
+                                    ? 'bg-slate-100 hover:bg-rose-50 text-slate-700'
+                                    : stVal === 'Leave'
+                                    ? 'bg-slate-100 hover:bg-amber-50 text-slate-700'
+                                    : 'bg-slate-100 hover:bg-indigo-50 text-slate-700';
+
+                                return (
+                                  <button
+                                    key={stVal}
+                                    type="button"
+                                    onClick={() => {
+                                      if (boardMode === 'arrival') {
+                                        onMarkAttendance(rec.id, 'driver', stVal);
+                                      } else {
+                                        handleDepartureAttendanceClick(rec, stVal);
+                                      }
+                                    }}
+                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
+                                      isSelected ? activeColor : hoverColor
+                                    }`}
+                                  >
+                                    <span>{shortCode} ({stVal})</span>
+                                  </button>
+                                );
+                              })}
                             </div>
                           </td>
                         </tr>
@@ -1292,6 +1421,115 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               </table>
             </div>
           </div>
+
+          {/* Mismatch Reason / Remark Popup Modal (When Departure Attendance != Arrival Attendance) */}
+          {mismatchPopup && (
+            <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">
+                      Arrival &amp; Departure Attendance Mismatch
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Please mention the reason / remark for this attendance difference
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMismatchPopup(null)}
+                    className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Member:</span>
+                    <span className="font-bold text-slate-900">
+                      {mismatchPopup.studentName} ({mismatchPopup.admissionNo})
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Morning Arrival Attendance:</span>
+                    <span className="font-bold text-emerald-800">{mismatchPopup.arrivalStatus}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Selected Departure Attendance:</span>
+                    <span className="font-bold text-rose-700">{mismatchPopup.departureStatus}</span>
+                  </div>
+                </div>
+
+                {mismatchError && (
+                  <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold">
+                    {mismatchError}
+                  </div>
+                )}
+
+                <form onSubmit={handleConfirmMismatchDeparture} className="space-y-3 text-xs">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1.5">
+                      Quick Select or Enter Reason / Remark *
+                    </label>
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {[
+                        'Picked up by parent from school',
+                        'Dropped by parent in morning, returning by bus',
+                        'Left early with principal permission',
+                        'Half-day / Medical leave',
+                      ].map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() =>
+                            setMismatchPopup((prev) =>
+                              prev ? { ...prev, reason: preset } : prev
+                            )
+                          }
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold cursor-pointer ${
+                            mismatchPopup.reason === preset
+                              ? 'bg-slate-900 text-amber-400 border-slate-900'
+                              : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                          }`}
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+                    <textarea
+                      rows={3}
+                      required
+                      value={mismatchPopup.reason}
+                      onChange={(e) =>
+                        setMismatchPopup((prev) =>
+                          prev ? { ...prev, reason: e.target.value } : prev
+                        )
+                      }
+                      placeholder="Enter reason / remark why departure attendance differs from arrival..."
+                      className="w-full p-2.5 border border-slate-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setMismatchPopup(null)}
+                      className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold rounded-xl cursor-pointer shadow-xs"
+                    >
+                      Save Remark &amp; Mark Departure
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

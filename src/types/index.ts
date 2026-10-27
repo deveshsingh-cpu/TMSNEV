@@ -269,6 +269,8 @@ export interface Route {
   active: boolean;
   name?: string;
   stops?: TransportStop[];
+  departureTime?: string;
+  arrivalTime?: string;
 }
 
 export type RouteMaster = Route;
@@ -352,6 +354,8 @@ export interface StudentMember {
   emergencyContact: string;
   monthlyFee: number; // from stop fee
   concessionAmount: number;
+  previousDues?: number; // Opening arrears from old software
+  previousDuesRemarks?: string;
   balanceDue: number;
   joiningDate: string;
   leavingDate?: string;

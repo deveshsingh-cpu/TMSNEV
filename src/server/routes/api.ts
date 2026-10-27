@@ -368,6 +368,14 @@ apiRouter.delete('/masters/routes/:id', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.post('/routes/:id/timings', async (req: Request, res: Response) => {
+  try {
+    const updated = await sheetsDb.updateRouteTimings(req.params.id, req.body || {});
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // Vehicle-Driver-Helper Assignments & Date History
 apiRouter.get('/vehicle-assignments', (_req: Request, res: Response) => {
@@ -548,6 +556,23 @@ apiRouter.post('/students/:id/suspension-approval', async (req: Request, res: Re
       reviewedBy || 'Admin',
       rejectionReason
     );
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.post('/students/previous-dues/bulk', async (req: Request, res: Response) => {
+  try {
+    const result = await sheetsDb.bulkSetPreviousDues(req.body?.entries || []);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.post('/students/:id/previous-dues', async (req: Request, res: Response) => {
+  try {
+    const { amount, remarks } = req.body || {};
+    const updated = await sheetsDb.setStudentPreviousDues(req.params.id, Number(amount) || 0, remarks);
     res.json(updated);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -818,8 +843,8 @@ apiRouter.get('/trips/:id/attendance', (req: Request, res: Response) => {
 });
 apiRouter.post('/attendance/:id/mark', async (req: Request, res: Response) => {
   try {
-    const { source, value } = req.body;
-    const updated = await sheetsDb.updateAttendanceObservation(req.params.id, source, value);
+    const { source, value, reason } = req.body;
+    const updated = await sheetsDb.updateAttendanceObservation(req.params.id, source, value, undefined, reason);
     res.json(updated);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
