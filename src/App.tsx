@@ -61,6 +61,8 @@ import {
   HolidayRecord,
   SystemUser,
   UserRole,
+  MemberLifecycleRequest,
+  SessionMonthCode,
 } from './types/index.js';
 import { Bus, RefreshCw, AlertCircle, CheckCircle2, Shield, LogOut, KeyRound, UserCheck } from 'lucide-react';
 
@@ -144,6 +146,7 @@ export function App() {
   const [staffAdvances, setStaffAdvances] = useState<StaffAdvanceRecord[]>([]);
   const [staffPayrolls, setStaffPayrolls] = useState<StaffPayrollRecord[]>([]);
   const [holidays, setHolidays] = useState<HolidayRecord[]>([]);
+  const [memberRequests, setMemberRequests] = useState<MemberLifecycleRequest[]>([]);
 
   // Analytics & Sync
   const [reportsSummary, setReportsSummary] = useState<ReportsSummary | null>(null);
@@ -217,6 +220,7 @@ export function App() {
       setStaffAdvances(boot?.staffAdvances || []);
       setStaffPayrolls(boot?.staffPayrolls || []);
       setHolidays(boot?.holidays || []);
+      setMemberRequests(boot?.memberRequests || []);
 
       if (Array.isArray(boot?.attendance)) {
         setAttendanceRecords(boot.attendance);
@@ -602,6 +606,72 @@ export function App() {
     await loadAllData();
   };
 
+  // --- Fees Setup & Member Lifecycle Requests Handlers ---
+  const handleUpdateFeesSetup = async (payload: {
+    attachedSessionMonths?: SessionMonthCode[];
+    applyToAllStops?: boolean;
+    stopId?: string;
+    villageId?: string;
+    transportName?: string;
+    distanceRoute?: string;
+    selectedMonths?: SessionMonthCode[];
+    monthlyFee?: number;
+  }) => {
+    const res = await api.updateFeesSetup(payload);
+    await loadAllData();
+    return res;
+  };
+
+  const handleCreateMemberRequest = async (payload: {
+    requestType: 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER';
+    memberId?: string;
+    memberData?: Partial<StudentMember>;
+    reason?: string;
+    effectiveDate?: string;
+    requestedBy?: string;
+    requestedByRole?: UserRole;
+  }) => {
+    const res = await api.createMemberRequest({
+      ...payload,
+      requestedBy: payload.requestedBy || currentUser?.fullName || activeRole,
+      requestedByRole: payload.requestedByRole || activeRole,
+    });
+    await loadAllData();
+    return res;
+  };
+
+  const handleCoordinatorReviewMemberRequest = async (
+    id: string,
+    payload: {
+      action: 'Approve' | 'Reject';
+      remarks: string;
+      reviewedBy?: string;
+    }
+  ) => {
+    const res = await api.coordinatorReviewMemberRequest(id, {
+      ...payload,
+      reviewedBy: payload.reviewedBy || currentUser?.fullName || 'Transport Coordinator',
+    });
+    await loadAllData();
+    return res;
+  };
+
+  const handleAdminReviewMemberRequest = async (
+    id: string,
+    payload: {
+      action: 'Approve' | 'Reject';
+      remarks?: string;
+      approvedBy?: string;
+    }
+  ) => {
+    const res = await api.adminReviewMemberRequest(id, {
+      ...payload,
+      approvedBy: payload.approvedBy || currentUser?.fullName || 'Admin',
+    });
+    await loadAllData();
+    return res;
+  };
+
   // --- Employees & Resumes Handlers ---
   const handleSaveEmployee = async (data: Partial<Employee>) => {
     await api.saveEmployee(data);
@@ -679,7 +749,13 @@ export function App() {
     tripId: string,
     notes?: string,
     statusOverride?: 'Arrived' | 'Departed' | 'Completed',
-    timingPayload?: { inTime?: string; outTime?: string; inStrength?: number; outStrength?: number }
+    timingPayload?: {
+      inTime?: string;
+      outTime?: string;
+      inStrength?: number;
+      outStrength?: number;
+      strengthMismatchRemark?: string;
+    }
   ) => {
     await api.verifyTrip(tripId, activeRole, notes, statusOverride, timingPayload);
     await loadAllData();
@@ -832,7 +908,11 @@ export function App() {
   const pendingMaintCount = maintenance.filter(
     (m) => m.status === 'Pending Approval' || m.status === 'Open'
   ).length;
-  const pendingApprovalsCount = pendingExpensesCount + pendingMaintCount + pendingSuspensionCount;
+  const pendingMemberReqCount = memberRequests.filter(
+    (r) => r.status === 'Pending Coordinator Approval' || r.status === 'Pending Admin Approval'
+  ).length;
+  const pendingApprovalsCount =
+    pendingExpensesCount + pendingMaintCount + pendingSuspensionCount + pendingMemberReqCount;
 
   const dashboardSummary: DashboardSummary | null = reportsSummary
     ? {
@@ -979,7 +1059,10 @@ export function App() {
                   summary={dashboardSummary}
                   students={students}
                   vehicles={vehicles}
+                  routes={routes}
                   dailyTrips={dailyTrips}
+                  attendanceRecords={attendanceRecords}
+                  memberRequests={memberRequests}
                   feeReceipts={receipts}
                   expenses={expenses}
                   maintenance={maintenance}
@@ -993,6 +1076,8 @@ export function App() {
                   onUpdateMaintenanceStatus={handleUpdateMaintenanceStatus}
                   onAddMaintenance={handleAddMaintenance}
                   onReviewSuspensionRequest={handleReviewSuspensionRequest}
+                  onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
+                  onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
                 />
               )}
 
@@ -1016,8 +1101,10 @@ export function App() {
                   onSaveUser={handleSaveUser}
                   onDeleteUser={handleDeleteUser}
                   isAdmin={isAdmin}
+                  currentRole={activeRole}
                   initialSubTab={activeSubTab || undefined}
                   onUpdateConfig={handleUpdateConfig}
+                  onUpdateFeesSetup={handleUpdateFeesSetup}
                   onAddCampus={handleAddCampus}
                   onUpdateCampus={handleUpdateCampus}
                   onRemoveCampus={handleRemoveCampus}
@@ -1062,11 +1149,17 @@ export function App() {
                   attendanceRecords={attendanceRecords}
                   feeFollowUps={feeFollowUps}
                   disciplineRecords={disciplineRecords}
+                  memberRequests={memberRequests}
+                  onCreateMemberRequest={handleCreateMemberRequest}
+                  onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
+                  onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
                   initialStatusFilter={
                     activeSubTab === 'Suspended' || activeSubTab === 'suspended'
                       ? 'Suspended'
                       : activeSubTab === 'discipline'
                       ? 'discipline'
+                      : activeSubTab === 'requests'
+                      ? 'requests'
                       : 'all'
                   }
                   externalOpenMemberId={externalOpenMemberId}
@@ -1165,6 +1258,8 @@ export function App() {
               {activeNav === 'operations' && (
                 <DailyOperationsView
                   schoolName={config.schoolName}
+                  isAdmin={isAdmin}
+                  currentRole={activeRole}
                   campuses={campuses}
                   vehicles={vehicles}
                   trips={dailyTrips}
@@ -1230,6 +1325,7 @@ export function App() {
                 <AccountsView
                   schoolName={config.schoolName}
                   isAdmin={isAdmin}
+                  currentRole={activeRole}
                   initialTab={
                     activeSubTab === 'income'
                       ? 'income'

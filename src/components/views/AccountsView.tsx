@@ -15,6 +15,7 @@ import { readFileCompressed } from '../../utils/fileCompressor.js';
 interface AccountsViewProps {
   schoolName?: string;
   isAdmin?: boolean;
+  currentRole?: string;
   initialTab?: 'day_book' | 'income' | 'vouchers' | 'vehicle_ledger' | 'student_ledger' | 'trial_balance';
   accounts: AccountHead[];
   vouchers: JournalVoucher[];

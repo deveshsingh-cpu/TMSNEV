@@ -155,6 +155,20 @@ export interface SystemUser {
 }
 
 
+export type SessionMonthCode =
+  | 'apr'
+  | 'may'
+  | 'jun'
+  | 'jul'
+  | 'aug'
+  | 'sep'
+  | 'oct'
+  | 'nov'
+  | 'dec'
+  | 'jan'
+  | 'feb'
+  | 'mar';
+
 export interface SchoolConfig {
   schoolName: string;
   tagline: string;
@@ -169,6 +183,9 @@ export interface SchoolConfig {
   currency?: string;
   timezone?: string;
   campuses?: CampusMaster[];
+  attachedSessionMonths?: SessionMonthCode[];
+  effectiveBillingStartMonth?: string; // e.g. '2026-11'
+  lastAutoBilledMonth?: string;
 }
 
 export interface TransportStop {
@@ -176,6 +193,9 @@ export interface TransportStop {
   name: string;
   fee: number;
   distanceKm: number;
+  distanceRoute?: string; // e.g. "School - Chainpur"
+  selectedMonths?: SessionMonthCode[];
+  totalSessionFee?: number;
   landmark?: string;
   villageName?: string;
   stopId?: string;
@@ -188,8 +208,38 @@ export interface Village {
   id: string;
   name: string;
   distanceKm: number;
+  distanceRoute?: string; // e.g. "School - Chainpur"
+  selectedMonths?: SessionMonthCode[];
+  totalSessionFee?: number;
   stops: TransportStop[];
   monthlyRate?: number;
+}
+
+export interface MemberLifecycleRequest {
+  id: string;
+  requestType: 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER';
+  status: 'Pending Coordinator Approval' | 'Pending Admin Approval' | 'Approved' | 'Rejected';
+  requestedBy: string;
+  requestedByRole: UserRole;
+  requestedAt: string;
+  requestReason: string;
+  memberId?: string;
+  memberAdmissionNo?: string;
+  memberName: string;
+  memberClassSection?: string;
+  memberCampus?: string;
+  memberVillageName?: string;
+  memberStopName?: string;
+  memberRouteCode?: string;
+  memberMonthlyFee?: number;
+  leavingDate?: string;
+  memberPayload?: Partial<StudentMember>;
+  coordinatorApprovedBy?: string;
+  coordinatorApprovedAt?: string;
+  coordinatorRemarks?: string;
+  adminReviewedBy?: string;
+  adminReviewedAt?: string;
+  adminRemarks?: string;
 }
 
 export interface Vehicle {
@@ -514,6 +564,7 @@ export interface DailyTrip {
   outTime?: string;
   inStrength?: number;
   outStrength?: number;
+  strengthMismatchRemark?: string;
   morningBoardingCount?: number;
   notes?: string;
 }

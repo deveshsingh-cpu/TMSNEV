@@ -25,7 +25,10 @@ import {
   DashboardSummary,
   StudentMember,
   Vehicle,
+  Route,
   DailyTrip,
+  TripAttendanceRecord,
+  MemberLifecycleRequest,
   FeeReceipt,
   ExpenseRecord,
   MaintenanceRequest,
@@ -38,7 +41,10 @@ interface DashboardViewProps {
   summary: DashboardSummary | null;
   students: StudentMember[];
   vehicles: Vehicle[];
+  routes?: Route[];
   dailyTrips: DailyTrip[];
+  attendanceRecords?: TripAttendanceRecord[];
+  memberRequests?: MemberLifecycleRequest[];
   feeReceipts: FeeReceipt[];
   expenses: ExpenseRecord[];
   maintenance: MaintenanceRequest[];
@@ -64,13 +70,24 @@ interface DashboardViewProps {
   ) => Promise<void>;
   onAddMaintenance?: (data: Omit<MaintenanceRequest, 'id'>) => Promise<void>;
   onReviewSuspensionRequest?: (id: string, action: 'Approve' | 'Reject', reason?: string) => Promise<void>;
+  onCoordinatorReviewMemberRequest?: (
+    id: string,
+    payload: { action: 'Approve' | 'Reject'; remarks: string; reviewedBy?: string }
+  ) => Promise<any>;
+  onAdminReviewMemberRequest?: (
+    id: string,
+    payload: { action: 'Approve' | 'Reject'; remarks?: string; approvedBy?: string }
+  ) => Promise<any>;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   summary,
   students = [],
   vehicles = [],
+  routes = [],
   dailyTrips = [],
+  attendanceRecords = [],
+  memberRequests = [],
   feeReceipts = [],
   expenses = [],
   maintenance = [],
@@ -84,8 +101,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onUpdateMaintenanceStatus,
   onAddMaintenance,
   onReviewSuspensionRequest,
+  onCoordinatorReviewMemberRequest,
+  onAdminReviewMemberRequest,
 }) => {
   const today = new Date().toISOString().split('T')[0];
+  const [transitGraphMode, setTransitGraphMode] = useState<'routes' | 'vehicles'>('routes');
+  const [transitCampusFilter, setTransitCampusFilter] = useState<string>('all');
+  const [transitVehicleFilter, setTransitVehicleFilter] = useState<string>('all');
 
   // Overdue / Today Promise Date Follow-Up Recall Popup
   const overdueFollowUps = feeFollowUps.filter(
@@ -881,43 +903,112 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           })()}
         </div>
 
-        {/* Attendance & Route Boarding Graph */}
+        {/* Attendance & Route/Vehicle Boarding Summary Card */}
         <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="font-bold text-slate-900 text-sm">Daily Transit Attendance Graph</h3>
-              <p className="text-[11px] text-slate-500">Member boarding vs roster capacity across trips</p>
+              <h3 className="font-bold text-slate-900 text-sm">Daily Transit Attendance Summary</h3>
+              <p className="text-[11px] text-slate-500">
+                Real-time Arrival (In) &amp; Departure (Out) vs Assigned Roster ({today})
+              </p>
             </div>
             <button
               onClick={() => onNavigate('operations' as any, 'board')}
               className="text-xs font-bold text-emerald-600 hover:underline cursor-pointer"
             >
-              Attendance &rarr;
+              Mark Attendance &rarr;
             </button>
           </div>
 
-          <div className="space-y-3 pt-1 text-xs">
-            {dailyTrips.slice(0, 4).map((t) => {
-              const cap = Math.max(1, t.rosterCount || 30);
-              const present = t.morningBoardingCount || t.rosterCount || 0;
-              const pct = Math.min(100, Math.round((present / cap) * 100));
-              return (
-                <div key={t.id}>
-                  <div className="flex justify-between font-semibold mb-1">
-                    <span className="text-slate-800 truncate">{t.routeName} ({t.vehicleNumber})</span>
-                    <span className="font-mono text-slate-700">{present}/{cap} ({pct}%)</span>
+          {(() => {
+            const activeMembersList = students.filter((s) => s.transportStatus === 'Active');
+            const totalRoster = activeMembersList.length;
+            const todayTrips = dailyTrips.filter((t) => !t.date || t.date === today);
+            const todayTripIds = new Set(todayTrips.map((t) => t.id));
+            const todayAtt = attendanceRecords.filter((a) => todayTripIds.has(a.tripId));
+
+            // True Arrival Present: only count if trip has inTime or driverStatus === 'Present'
+            const arrivalPresentCount = todayTrips.reduce((sum, t) => {
+              if (typeof t.inStrength === 'number') return sum + t.inStrength;
+              if (!t.inTime) return sum;
+              const recPresent = todayAtt.filter(
+                (a) => a.tripId === t.id && a.driverStatus === 'Present'
+              ).length;
+              return sum + recPresent;
+            }, 0);
+
+            // True Departure Present: only count if trip has outTime or outStrength
+            const departurePresentCount = todayTrips.reduce((sum, t) => {
+              if (!t.outTime && typeof t.outStrength !== 'number') return sum;
+              if (typeof t.outStrength === 'number') return sum + t.outStrength;
+              const recPresent = todayAtt.filter(
+                (a) => a.tripId === t.id && a.assistantStatus === 'Present'
+              ).length;
+              return sum + recPresent;
+            }, 0);
+
+            const arrPct = totalRoster > 0 ? Math.min(100, Math.round((arrivalPresentCount / totalRoster) * 100)) : 0;
+            const depPct = totalRoster > 0 ? Math.min(100, Math.round((departurePresentCount / totalRoster) * 100)) : 0;
+            const markedArrRoutes = todayTrips.filter((t) => Boolean(t.inTime) || typeof t.inStrength === 'number').length;
+            const markedDepRoutes = todayTrips.filter((t) => Boolean(t.outTime) || typeof t.outStrength === 'number').length;
+
+            return (
+              <div className="space-y-3 pt-1 text-xs">
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase">Assigned Roster</div>
+                    <div className="font-mono font-bold text-base text-slate-900 mt-0.5">{totalRoster}</div>
+                    <div className="text-[10px] text-slate-400">{routes.length} Routes</div>
                   </div>
-                  <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-600 rounded-full" style={{ width: `${pct}%` }} />
+                  <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                    <div className="text-[10px] font-bold text-emerald-700 uppercase">Arrival (In)</div>
+                    <div className="font-mono font-bold text-base text-emerald-800 mt-0.5">
+                      {arrivalPresentCount} <span className="text-[11px]">({arrPct}%)</span>
+                    </div>
+                    <div className="text-[10px] text-emerald-600">{markedArrRoutes}/{routes.length} Marked</div>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-indigo-50/70 border border-indigo-200">
+                    <div className="text-[10px] font-bold text-indigo-700 uppercase">Departure (Out)</div>
+                    <div className="font-mono font-bold text-base text-indigo-800 mt-0.5">
+                      {departurePresentCount} <span className="text-[11px]">({depPct}%)</span>
+                    </div>
+                    <div className="text-[10px] text-indigo-600">{markedDepRoutes}/{routes.length} Marked</div>
                   </div>
                 </div>
-              );
-            })}
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
-              <span className="text-slate-500 font-semibold">Active Transit Members:</span>
-              <span className="font-mono font-bold text-emerald-700">{activeStudents} Active / {suspendedStudents} Suspended</span>
-            </div>
-          </div>
+
+                <div>
+                  <div className="flex justify-between font-semibold mb-1">
+                    <span className="text-emerald-800">Morning Arrival Boarding</span>
+                    <span className="font-mono text-emerald-700">
+                      {arrivalPresentCount}/{totalRoster} ({arrPct}%)
+                    </span>
+                  </div>
+                  <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${arrPct}%` }} />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between font-semibold mb-1">
+                    <span className="text-indigo-800">Afternoon Departure Boarding</span>
+                    <span className="font-mono text-indigo-700">
+                      {departurePresentCount}/{totalRoster} ({depPct}%)
+                    </span>
+                  </div>
+                  <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-indigo-600 rounded-full transition-all" style={{ width: `${depPct}%` }} />
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
+                  <span className="text-slate-500 font-semibold">Active Transit Members:</span>
+                  <span className="font-mono font-bold text-emerald-700">
+                    {activeStudents} Active / {suspendedStudents} Suspended
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* Upcoming Vehicle Renewals (Fitness, Insurance, Pollution, Road Tax) */}
@@ -981,6 +1072,409 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* =====================================================================
+          COMPREHENSIVE DAILY TRANSIT ATTENDANCE GRAPH (ALL ROUTES & ALL VEHICLES)
+         ===================================================================== */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-600 font-bold">
+              Live Fleet &amp; Route Boarding Analytics ({today})
+            </span>
+            <h3 className="text-base font-bold text-slate-900">
+              Daily Transit Attendance Graph — Route-Wise &amp; Vehicle-Wise Strength Comparison
+            </h3>
+            <p className="text-xs text-slate-500">
+              Compare Assigned Active Roster vs. Morning Arrival (In) &amp; Afternoon Departure (Out) across every route and vehicle. Unmarked trips accurately show 0 until attendance is recorded.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setTransitGraphMode('routes')}
+                className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                  transitGraphMode === 'routes'
+                    ? 'bg-slate-900 text-amber-400 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                All Routes ({routes.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setTransitGraphMode('vehicles')}
+                className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                  transitGraphMode === 'vehicles'
+                    ? 'bg-slate-900 text-amber-400 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                All Vehicles ({vehicles.length})
+              </button>
+            </div>
+
+            <select
+              value={transitCampusFilter}
+              onChange={(e) => setTransitCampusFilter(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+            >
+              <option value="all">Campus: All</option>
+              <option value="Jr">Jr Campus</option>
+              <option value="Sr">Sr Campus</option>
+            </select>
+
+            <select
+              value={transitVehicleFilter}
+              onChange={(e) => setTransitVehicleFilter(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+            >
+              <option value="all">Vehicle: All</option>
+              {vehicles.map((v) => (
+                <option key={v.id} value={v.registrationNumber}>
+                  {v.registrationNumber}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Legend */}
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700">
+              <span className="w-3 h-3 rounded-xs bg-slate-300 inline-block" />
+              <span>Assigned Active Roster</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700">
+              <span className="w-3 h-3 rounded-xs bg-emerald-500 inline-block" />
+              <span>Arrival Present (In)</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 font-semibold text-indigo-700">
+              <span className="w-3 h-3 rounded-xs bg-indigo-600 inline-block" />
+              <span>Departure Present (Out)</span>
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('operations' as any, 'summary')}
+            className="text-xs font-bold text-indigo-600 hover:underline cursor-pointer"
+          >
+            Open Transport Timings Clipboard &rarr;
+          </button>
+        </div>
+
+        {transitGraphMode === 'routes' ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto pr-1">
+            {routes
+              .filter((r) =>
+                transitCampusFilter === 'all'
+                  ? true
+                  : (r.campus || r.campusCode || '').toLowerCase() === transitCampusFilter.toLowerCase()
+              )
+              .filter((r) =>
+                transitVehicleFilter === 'all' ? true : r.vehicleNumber === transitVehicleFilter
+              )
+              .map((r) => {
+                const routeMembers = students.filter(
+                  (s) =>
+                    s.transportStatus === 'Active' &&
+                    (s.routeId === r.id || s.routeCode === r.code)
+                );
+                const rosterCount = routeMembers.length;
+                const matchingTrip = dailyTrips.find(
+                  (t) =>
+                    (t.routeId === r.id || t.routeName === r.code) &&
+                    (!t.date || t.date === today)
+                );
+                const tripAtt = matchingTrip
+                  ? attendanceRecords.filter((a) => a.tripId === matchingTrip.id)
+                  : [];
+
+                const inPresent = matchingTrip
+                  ? typeof matchingTrip.inStrength === 'number'
+                    ? matchingTrip.inStrength
+                    : matchingTrip.inTime
+                    ? tripAtt.filter((a) => a.driverStatus === 'Present').length
+                    : 0
+                  : 0;
+
+                const outPresent = matchingTrip
+                  ? typeof matchingTrip.outStrength === 'number'
+                    ? matchingTrip.outStrength
+                    : matchingTrip.outTime
+                    ? tripAtt.filter((a) => a.assistantStatus === 'Present').length
+                    : 0
+                  : 0;
+
+                const denom = Math.max(1, rosterCount);
+                const inPct = rosterCount > 0 ? Math.min(100, Math.round((inPresent / denom) * 100)) : 0;
+                const outPct = rosterCount > 0 ? Math.min(100, Math.round((outPresent / denom) * 100)) : 0;
+
+                return (
+                  <div
+                    key={r.id}
+                    className="p-3.5 rounded-xl bg-slate-50/80 border border-slate-200/90 space-y-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <span className="font-mono font-bold text-slate-900 text-sm">{r.code}</span>
+                        <span className="ml-2 px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono text-[10px] font-bold">
+                          Veh: {r.vehicleNumber}
+                        </span>
+                        <span className="ml-1.5 text-[11px] text-slate-500">
+                          ({(r.villageNames || []).slice(0, 3).join(', ')})
+                        </span>
+                      </div>
+                      <span className="font-mono font-bold text-slate-800 shrink-0">
+                        Roster: {rosterCount}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div>
+                        <div className="flex justify-between text-[11px] font-semibold mb-0.5">
+                          <span className="text-emerald-800">
+                            Arrival (In){' '}
+                            {matchingTrip?.inTime ? `@ ${matchingTrip.inTime}` : '(Not Marked)'}
+                          </span>
+                          <span className="font-mono text-emerald-700">
+                            {inPresent}/{rosterCount} ({inPct}%)
+                          </span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-500 rounded-full transition-all"
+                            style={{ width: `${inPct}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] font-semibold mb-0.5">
+                          <span className="text-indigo-800">
+                            Departure (Out){' '}
+                            {matchingTrip?.outTime ? `@ ${matchingTrip.outTime}` : '(Not Marked)'}
+                          </span>
+                          <span className="font-mono text-indigo-700">
+                            {outPresent}/{rosterCount} ({outPct}%)
+                          </span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-indigo-600 rounded-full transition-all"
+                            style={{ width: `${outPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
+            {vehicles
+              .filter((v) =>
+                transitVehicleFilter === 'all' ? true : v.registrationNumber === transitVehicleFilter
+              )
+              .map((v) => {
+                const vehRoutes = routes.filter(
+                  (r) => r.vehicleId === v.id || r.vehicleNumber === v.registrationNumber
+                );
+                const vehRouteIds = new Set(vehRoutes.map((r) => r.id));
+                const vehRouteCodes = new Set(vehRoutes.map((r) => r.code));
+                const vehMembers = students.filter(
+                  (s) =>
+                    s.transportStatus === 'Active' &&
+                    (vehRouteIds.has(s.routeId) || vehRouteCodes.has(s.routeCode))
+                );
+                const vehTrips = dailyTrips.filter(
+                  (t) =>
+                    (t.vehicleId === v.id || t.vehicleNumber === v.registrationNumber) &&
+                    (!t.date || t.date === today)
+                );
+                const vehIn = vehTrips.reduce((sum, t) => {
+                  if (typeof t.inStrength === 'number') return sum + t.inStrength;
+                  if (!t.inTime) return sum;
+                  return (
+                    sum +
+                    attendanceRecords.filter(
+                      (a) => a.tripId === t.id && a.driverStatus === 'Present'
+                    ).length
+                  );
+                }, 0);
+                const vehOut = vehTrips.reduce((sum, t) => {
+                  if (typeof t.outStrength === 'number') return sum + t.outStrength;
+                  if (!t.outTime) return sum;
+                  return (
+                    sum +
+                    attendanceRecords.filter(
+                      (a) => a.tripId === t.id && a.assistantStatus === 'Present'
+                    ).length
+                  );
+                }, 0);
+
+                const roster = vehMembers.length;
+                const denom = Math.max(1, roster);
+                const inPct = roster > 0 ? Math.min(100, Math.round((vehIn / denom) * 100)) : 0;
+                const outPct = roster > 0 ? Math.min(100, Math.round((vehOut / denom) * 100)) : 0;
+
+                return (
+                  <div
+                    key={v.id}
+                    className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-mono font-bold text-slate-900 text-sm">
+                          {v.registrationNumber}
+                        </span>
+                        <span className="ml-1.5 text-[11px] text-slate-500">
+                          ({vehRoutes.length} Routes • Cap {v.capacity})
+                        </span>
+                      </div>
+                      <span className="font-mono font-bold text-slate-800">
+                        Roster: {roster}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-500 truncate">
+                      Routes: {vehRoutes.map((r) => r.code).join(', ') || 'None'}
+                    </div>
+                    <div className="space-y-1.5">
+                      <div>
+                        <div className="flex justify-between text-[11px] font-semibold">
+                          <span className="text-emerald-800">Total Arrival (In)</span>
+                          <span className="font-mono text-emerald-700">
+                            {vehIn}/{roster} ({inPct}%)
+                          </span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                          <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${inPct}%` }} />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-[11px] font-semibold">
+                          <span className="text-indigo-800">Total Departure (Out)</span>
+                          <span className="font-mono text-indigo-700">
+                            {vehOut}/{roster} ({outPct}%)
+                          </span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                          <div className="h-full bg-indigo-600 rounded-full" style={{ width: `${outPct}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        )}
+      </div>
+
+      {/* =====================================================================
+          ADD / DROP / SUSPEND MEMBER WORKFLOW REQUESTS AWAITING APPROVAL
+         ===================================================================== */}
+      {memberRequests.some(
+        (r) =>
+          r.status === 'Pending Coordinator Approval' || r.status === 'Pending Admin Approval'
+      ) && (
+        <div className="bg-white rounded-2xl border-2 border-indigo-300 shadow-2xs overflow-hidden">
+          <div className="bg-indigo-50 px-5 py-3.5 border-b border-indigo-200 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <ShieldAlert className="w-5 h-5 text-indigo-700" />
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Member Add / Drop (Left School) / Suspend Approval Queue
+                </h3>
+                <p className="text-[11px] text-slate-600">
+                  3-Stage Workflow: Transport Assistant Request &rarr; Transport Coordinator Remarks &amp; Approval &rarr; Admin Final Approval
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => onNavigate('members', 'requests')}
+              className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-xl text-xs font-bold cursor-pointer"
+            >
+              Open Full Approval Queue &rarr;
+            </button>
+          </div>
+          <div className="divide-y divide-slate-100 text-xs">
+            {memberRequests
+              .filter(
+                (r) =>
+                  r.status === 'Pending Coordinator Approval' ||
+                  r.status === 'Pending Admin Approval'
+              )
+              .map((req) => (
+                <div
+                  key={req.id}
+                  className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-900 font-bold text-[10px] uppercase">
+                        {req.requestType}
+                      </span>
+                      <span className="font-bold text-slate-900 text-sm">{req.memberName}</span>
+                      <span className="font-mono text-slate-500">({req.admissionNo || 'New'})</span>
+                      <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]">
+                        {req.status}
+                      </span>
+                    </div>
+                    <div className="text-slate-600">
+                      Reason: <strong>{req.reason}</strong> &bull; Raised by {req.requestedBy} ({req.requestedByRole})
+                    </div>
+                    {req.coordinatorRemarks && (
+                      <div className="text-sky-800 font-semibold">
+                        Coordinator Remarks: &ldquo;{req.coordinatorRemarks}&rdquo;
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isAdmin && onAdminReviewMemberRequest ? (
+                      <>
+                        <button
+                          onClick={() =>
+                            onAdminReviewMemberRequest(req.id, {
+                              action: 'Approve',
+                              remarks: 'Approved by Admin from Dashboard',
+                            })
+                          }
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold cursor-pointer flex items-center gap-1"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Admin Approve</span>
+                        </button>
+                        <button
+                          onClick={() =>
+                            onAdminReviewMemberRequest(req.id, {
+                              action: 'Reject',
+                              remarks: 'Rejected by Admin from Dashboard',
+                            })
+                          }
+                          className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold cursor-pointer flex items-center gap-1"
+                        >
+                          <Ban className="w-3.5 h-3.5" />
+                          <span>Reject</span>
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => onNavigate('members', 'requests')}
+                        className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl font-bold cursor-pointer"
+                      >
+                        Review &amp; Enter Remarks &rarr;
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* =====================================================================
           MEMBER SUSPENSION REQUESTS AWAITING ADMIN APPROVAL

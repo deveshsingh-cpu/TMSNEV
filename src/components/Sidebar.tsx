@@ -151,13 +151,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'members_group',
-      label: '2- Members & Add Member',
+      label: '2- Members (Add / Drop)',
       icon: <Users className="w-5 h-5" />,
       defaultNavKey: 'members',
       defaultSubTab: 'all',
       subItems: [
-        { id: 'as-mem-all', label: '1- Member Directory & Add', navKey: 'members', subTab: 'all' },
-        { id: 'as-mem-disc', label: '2- Behaviour & Discipline', navKey: 'members', subTab: 'discipline' },
+        { id: 'as-mem-all', label: '1- Member Directory & Add/Drop', navKey: 'members', subTab: 'all' },
+        { id: 'as-mem-req', label: '2- Add / Drop Approval Status', navKey: 'members', subTab: 'requests' },
+        { id: 'as-mem-disc', label: '3- Behaviour & Discipline', navKey: 'members', subTab: 'discipline' },
       ],
     },
     {
@@ -197,7 +198,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'fees_group',
-      label: '5- Receive Fees & Follow-Up',
+      label: '5- Receive Fees & Financial',
       icon: <CreditCard className="w-5 h-5" />,
       defaultNavKey: 'fees',
       defaultSubTab: 'collect',
@@ -209,12 +210,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'expenses_group',
-      label: '6- Raise Expense Entry',
+      label: '6- Expense Bills & Day Book',
       icon: <BookOpenCheck className="w-5 h-5" />,
       defaultNavKey: 'expenses',
       defaultSubTab: 'expenses',
       subItems: [
-        { id: 'as-ex-expenses', label: '1- Raise Expense Entry', navKey: 'expenses', subTab: 'expenses' },
+        { id: 'as-ex-expenses', label: '1- Enter Expense Bills', navKey: 'expenses', subTab: 'expenses' },
+        { id: 'as-ex-daybook', label: '2- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
+        { id: 'as-ac-stu', label: '3- Member Fee Ledger (View)', navKey: 'accounts', subTab: 'student_ledger' },
+        { id: 'as-ac-veh', label: '4- Vehicle Cost Ledger (View)', navKey: 'accounts', subTab: 'vehicle_ledger' },
       ],
     },
     {
@@ -254,8 +258,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'mem-all', label: '1- Member Directory', navKey: 'members', subTab: 'all' },
         {
+          id: 'mem-requests',
+          label: '2- Add / Drop / Suspend Approvals',
+          navKey: 'members',
+          subTab: 'requests',
+        },
+        {
           id: 'mem-suspended',
-          label: '2- Suspended & Permission',
+          label: '3- Suspended & Permission',
           navKey: 'members',
           subTab: 'Suspended',
           badge: suspendedCount > 0 ? suspendedCount : undefined,
@@ -263,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         },
         {
           id: 'mem-discipline',
-          label: '3- Behaviour & Discipline',
+          label: '4- Behaviour & Discipline',
           navKey: 'members',
           subTab: 'discipline',
         },
@@ -300,7 +310,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '4- Payroll & Advances',
           navKey: 'staff',
           subTab: 'payroll',
-          allowedRoles: ['Admin'],
+          allowedRoles: ['Admin', 'Transport Coordinator'],
         },
       ],
     },
@@ -347,7 +357,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'expenses_group',
-      label: currentRole === 'Admin' ? '7- Income, Expense & Day Book' : '7- Operational Expenses',
+      label: '7- Income, Expense & Day Book',
       icon: <BookOpenCheck className="w-5 h-5" />,
       defaultNavKey: 'expenses',
       defaultSubTab: 'expenses',
@@ -366,7 +376,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '3- Other Income & Heads',
           navKey: 'accounts',
           subTab: 'income',
-          allowedRoles: ['Admin'],
+          allowedRoles: ['Admin', 'Transport Coordinator'],
         },
         {
           id: 'ex-daybook',
@@ -378,10 +388,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'accounts_group',
-      label: currentRole === 'Admin' ? '8- Ledger and Accounts' : '8- Log Book & Fee Ledger',
+      label: '8- Ledger and Accounts',
       icon: <Landmark className="w-5 h-5" />,
-      defaultNavKey: currentRole === 'Admin' ? 'accounts' : 'vehicles',
-      defaultSubTab: currentRole === 'Admin' ? 'vehicle_ledger' : 'odometer',
+      defaultNavKey: 'accounts',
+      defaultSubTab: 'vehicle_ledger',
       allowedRoles: ['Admin', 'Transport Coordinator'],
       subItems: [
         {
@@ -389,7 +399,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '1- Vehicle Ledger & Expenses',
           navKey: 'accounts',
           subTab: 'vehicle_ledger',
-          allowedRoles: ['Admin'],
         },
         { id: 'ac-odo', label: '2- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
         { id: 'ac-fuel', label: '3- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
@@ -399,25 +408,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '5- Vouchers & Chart of A/C',
           navKey: 'accounts',
           subTab: 'vouchers',
-          allowedRoles: ['Admin'],
         },
         {
           id: 'ac-tb',
           label: '6- Trial Balance',
           navKey: 'accounts',
           subTab: 'trial_balance',
-          allowedRoles: ['Admin'],
         },
       ],
     },
     {
       key: 'masters_group',
-      label: '9- Masters & Users (Admin Only)',
+      label: '9- Masters & Fees Setup',
       icon: <Layers className="w-5 h-5" />,
       defaultNavKey: 'masters',
-      defaultSubTab: 'users',
-      allowedRoles: ['Admin'],
+      defaultSubTab: 'fees_setup',
+      allowedRoles: ['Admin', 'Transport Coordinator'],
       subItems: [
+        {
+          id: 'm-fees-setup',
+          label: 'Fees Setup (Session Months)',
+          navKey: 'masters',
+          subTab: 'fees_setup',
+        },
         {
           id: 'm-users',
           label: 'Users & Passwords (RBAC)',
@@ -434,35 +447,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: 'Campuses',
           navKey: 'masters',
           subTab: 'campuses',
-          allowedRoles: ['Admin'],
         },
         {
           id: 'm-member-types',
           label: 'Member Types',
           navKey: 'masters',
           subTab: 'member_types',
-          allowedRoles: ['Admin'],
         },
         {
           id: 'm-trips',
           label: 'Trips',
           navKey: 'masters',
           subTab: 'trips',
-          allowedRoles: ['Admin'],
         },
         {
           id: 'm-classes',
           label: 'Classes & Sections',
           navKey: 'masters',
           subTab: 'classes',
-          allowedRoles: ['Admin'],
         },
         {
           id: 'm-designations',
           label: 'Designations & Roles',
           navKey: 'masters',
           subTab: 'designations',
-          allowedRoles: ['Admin'],
         },
         {
           id: 'm-institute',

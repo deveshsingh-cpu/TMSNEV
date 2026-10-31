@@ -1049,7 +1049,13 @@ export const api = {
     verifiedBy: string,
     notes?: string,
     statusOverride?: 'Arrived' | 'Departed' | 'Completed',
-    timingPayload?: { inTime?: string; outTime?: string; inStrength?: number; outStrength?: number }
+    timingPayload?: {
+      inTime?: string;
+      outTime?: string;
+      inStrength?: number;
+      outStrength?: number;
+      strengthMismatchRemark?: string;
+    }
   ): Promise<DailyTrip> => {
     const res = await fetch(`/api/trips/${tripId}/verify`, {
       method: 'POST',
@@ -1088,4 +1094,82 @@ export const api = {
     const res = await fetch('/api/reports/summary');
     return res.json();
   },
+  updateFeesSetup: async (payload: {
+    attachedSessionMonths?: string[];
+    effectiveBillingStartMonth?: string;
+    applyMonthsToAllStops?: boolean;
+    villageId?: string;
+    stopId?: string;
+    transportName?: string;
+    distanceRoute?: string;
+    selectedMonths?: string[];
+    monthlyFee?: number;
+  }) => {
+    const res = await fetch('/api/masters/fees-setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to update Fees Setup');
+    }
+    return res.json();
+  },
+  getMemberRequests: async () => {
+    const res = await fetch('/api/member-requests');
+    return res.json();
+  },
+  createMemberRequest: async (payload: {
+    requestType: 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER';
+    requestedBy: string;
+    requestedByRole: string;
+    requestReason: string;
+    memberId?: string;
+    leavingDate?: string;
+    memberPayload?: any;
+    coordinatorRemarks?: string;
+  }) => {
+    const res = await fetch('/api/member-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to submit member request');
+    }
+    return res.json();
+  },
+  coordinatorReviewMemberRequest: async (
+    requestId: string,
+    payload: { action: 'Approve' | 'Reject'; coordinatorName?: string; remarks: string }
+  ) => {
+    const res = await fetch(`/api/member-requests/${requestId}/coordinator-review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to save Coordinator review');
+    }
+    return res.json();
+  },
+  adminReviewMemberRequest: async (
+    requestId: string,
+    payload: { action: 'Approve' | 'Reject'; adminName?: string; remarks?: string }
+  ) => {
+    const res = await fetch(`/api/member-requests/${requestId}/admin-review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to save Admin review');
+    }
+    return res.json();
+  },
 };
+

@@ -861,12 +861,13 @@ apiRouter.post('/attendance/:id/resolve', async (req: Request, res: Response) =>
 });
 apiRouter.post('/trips/:id/verify', async (req: Request, res: Response) => {
   try {
-    const { verifiedBy, notes, statusOverride, inTime, outTime, inStrength, outStrength } = req.body;
+    const { verifiedBy, notes, statusOverride, inTime, outTime, inStrength, outStrength, strengthMismatchRemark } = req.body;
     const trip = await sheetsDb.verifyTrip(req.params.id, verifiedBy, notes, statusOverride, {
       inTime,
       outTime,
       inStrength,
       outStrength,
+      strengthMismatchRemark,
     });
     res.json(trip);
   } catch (err: any) {
@@ -948,3 +949,46 @@ apiRouter.get('/reports/summary', (_req: Request, res: Response) => {
     accountsOverview: accounts,
   });
 });
+
+// 13. Session Months Attachment & Edit Transport Fees Setup
+apiRouter.post('/masters/fees-setup', async (req: Request, res: Response) => {
+  try {
+    const result = await sheetsDb.updateFeesSetup(req.body || {});
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 14. Multi-Stage Member Lifecycle Approval Requests (Add / Drop Left School / Suspend)
+apiRouter.get('/member-requests', (_req: Request, res: Response) => {
+  res.json(sheetsDb.getMemberRequests());
+});
+
+apiRouter.post('/member-requests', async (req: Request, res: Response) => {
+  try {
+    const created = await sheetsDb.createMemberLifecycleRequest(req.body || {});
+    res.json(created);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/member-requests/:id/coordinator-review', async (req: Request, res: Response) => {
+  try {
+    const updated = await sheetsDb.coordinatorReviewMemberRequest(req.params.id, req.body || {});
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/member-requests/:id/admin-review', async (req: Request, res: Response) => {
+  try {
+    const updated = await sheetsDb.adminReviewMemberRequest(req.params.id, req.body || {});
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+

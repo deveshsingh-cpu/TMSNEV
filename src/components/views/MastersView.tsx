@@ -3,12 +3,12 @@ import {
   Building2, Truck, Route as RouteIcon, MapPin, 
   Layers, UserCheck, Plus, Trash2, Edit2, CheckCircle, 
   AlertTriangle, Save, X, Users, Landmark, FileText, Upload, Eye, Printer,
-  LayoutGrid, List, Search, ArrowDownAZ, ArrowRight
+  LayoutGrid, List, Search, ArrowDownAZ, ArrowRight, IndianRupee, Calendar
 } from 'lucide-react';
 import { 
   SchoolConfig, Vehicle, Village, Route, TripMaster, 
   DesignationMaster, CampusId, CampusMaster, MemberTypeMaster,
-  Employee, VehicleAssignmentRecord, SystemUser, UserRole, StudentMember
+  Employee, VehicleAssignmentRecord, SystemUser, UserRole, StudentMember, SessionMonthCode
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
@@ -56,7 +56,18 @@ interface MastersViewProps {
   onSaveUser?: (data: Partial<SystemUser>) => Promise<any>;
   onDeleteUser?: (id: string) => Promise<any>;
   isAdmin?: boolean;
+  currentRole?: UserRole;
   initialSubTab?: string;
+  onUpdateFeesSetup?: (payload: {
+    attachedSessionMonths?: SessionMonthCode[];
+    applyToAllStops?: boolean;
+    stopId?: string;
+    villageId?: string;
+    transportName?: string;
+    distanceRoute?: string;
+    selectedMonths?: SessionMonthCode[];
+    monthlyFee?: number;
+  }) => Promise<any>;
 }
 
 export const MastersView: React.FC<MastersViewProps> = ({
@@ -102,12 +113,19 @@ export const MastersView: React.FC<MastersViewProps> = ({
   onSaveUser,
   onDeleteUser,
   isAdmin = true,
+  currentRole = 'Admin',
   initialSubTab,
+  onUpdateFeesSetup,
 }) => {
-  const resolveMasterTab = (sub?: string): 'users' | 'routes' | 'vehicles' | 'vehicle_assignments' | 'villages' | 'campuses' | 'memberTypes' | 'trips' | 'classes' | 'designations' | 'branding' => {
+  const ALL_SESSION_MONTHS: SessionMonthCode[] = [
+    'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'jan', 'feb', 'mar'
+  ];
+
+  const resolveMasterTab = (sub?: string): 'users' | 'fees_setup' | 'routes' | 'vehicles' | 'vehicle_assignments' | 'villages' | 'campuses' | 'memberTypes' | 'trips' | 'classes' | 'designations' | 'branding' => {
     if (!sub) return isAdmin ? 'users' : 'routes';
     const validTabs = [
       'users',
+      'fees_setup',
       'routes',
       'vehicles',
       'vehicle_assignments',
@@ -119,6 +137,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
       'designations',
       'branding',
     ];
+    if (sub === 'fees_setup' || sub === 'fees') return 'fees_setup';
     if (sub === 'member_types') return 'memberTypes';
     if (sub === 'institute' || sub === 'system') return 'branding';
     if (
@@ -136,7 +155,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
   };
 
   const [activeTab, setActiveTab] = useState<
-    'users' | 'routes' | 'vehicles' | 'vehicle_assignments' | 'villages' | 'campuses' | 'memberTypes' | 'trips' | 'classes' | 'designations' | 'branding'
+    'users' | 'fees_setup' | 'routes' | 'vehicles' | 'vehicle_assignments' | 'villages' | 'campuses' | 'memberTypes' | 'trips' | 'classes' | 'designations' | 'branding'
   >(() => resolveMasterTab(initialSubTab));
 
   useEffect(() => {
@@ -144,6 +163,62 @@ export const MastersView: React.FC<MastersViewProps> = ({
       setActiveTab(resolveMasterTab(initialSubTab));
     }
   }, [initialSubTab]);
+
+  // --- Fees Setup (Session Months & Edit Transport Fees) State ---
+  const defaultChainpurVil =
+    villages.find((v) => v.name.toLowerCase() === 'chainpur') || villages[0];
+  const [feeSetupVillageId, setFeeSetupVillageId] = useState<string>(defaultChainpurVil?.id || '');
+  const [feeSetupStopId, setFeeSetupStopId] = useState<string>(defaultChainpurVil?.stops?.[0]?.id || '');
+  const [feeSetupTransportName, setFeeSetupTransportName] = useState<string>(
+    defaultChainpurVil?.name || 'Chainpur'
+  );
+  const [feeSetupDistanceRoute, setFeeSetupDistanceRoute] = useState<string>(
+    defaultChainpurVil?.distanceRoute || `School - ${defaultChainpurVil?.name || 'Chainpur'}`
+  );
+  const [feeSetupMonths, setFeeSetupMonths] = useState<SessionMonthCode[]>(
+    defaultChainpurVil?.selectedMonths && defaultChainpurVil.selectedMonths.length > 0
+      ? defaultChainpurVil.selectedMonths
+      : config.attachedSessionMonths && config.attachedSessionMonths.length > 0
+      ? config.attachedSessionMonths
+      : ['apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct']
+  );
+  const [feeSetupMonthlyFee, setFeeSetupMonthlyFee] = useState<number>(
+    defaultChainpurVil?.monthlyRate ?? 525
+  );
+  const [sessionGlobalMonths, setSessionGlobalMonths] = useState<SessionMonthCode[]>(
+    config.attachedSessionMonths && config.attachedSessionMonths.length > 0
+      ? config.attachedSessionMonths
+      : ['nov', 'dec', 'jan', 'feb', 'mar']
+  );
+  const [feeSetupSavedMsg, setFeeSetupSavedMsg] = useState<string | null>(null);
+  const [feeSetupSearch, setFeeSetupSearch] = useState<string>('');
+
+  useEffect(() => {
+    if (config.attachedSessionMonths && config.attachedSessionMonths.length > 0) {
+      setSessionGlobalMonths(config.attachedSessionMonths);
+    }
+  }, [config.attachedSessionMonths]);
+
+  const handleSelectTransportForFeeSetup = (vil: Village, stopId?: string) => {
+    const stp = (vil.stops || []).find((s) => s.id === stopId) || vil.stops?.[0];
+    setFeeSetupVillageId(vil.id);
+    setFeeSetupStopId(stp?.id || '');
+    const tName = stp && stp.name.toLowerCase() !== vil.name.toLowerCase() ? `${vil.name} (${stp.name})` : vil.name;
+    setFeeSetupTransportName(tName);
+    setFeeSetupDistanceRoute(
+      stp?.distanceRoute || vil.distanceRoute || `School - ${vil.name}`
+    );
+    const months =
+      (stp?.selectedMonths && stp.selectedMonths.length > 0
+        ? stp.selectedMonths
+        : vil.selectedMonths && vil.selectedMonths.length > 0
+        ? vil.selectedMonths
+        : config.attachedSessionMonths && config.attachedSessionMonths.length > 0
+        ? config.attachedSessionMonths
+        : ['nov', 'dec', 'jan', 'feb', 'mar']) as SessionMonthCode[];
+    setFeeSetupMonths(months);
+    setFeeSetupMonthlyFee(stp?.fee ?? vil.monthlyRate ?? 525);
+  };
 
   // --- User & Password Management State ---
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -2365,6 +2440,471 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: FEES SETUP (SESSION MONTHS ATTACHMENT & EDIT TRANSPORT FEES) */}
+      {activeTab === 'fees_setup' && (
+        <div className="space-y-6">
+          {/* Top Session-Wide Months Attachment & Automatic 1st-of-Month Billing Policy Card */}
+          <div className="bg-slate-900 text-white rounded-2xl p-5 border border-slate-800 shadow-xs space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                  Masters &rarr; Fees Setup &bull; Academic Session {config.currentAcademicSession || config.academicYear || '2026-2027'}
+                </span>
+                <h2 className="text-base font-bold text-white mt-0.5">
+                  Attach Session Months &amp; Edit Transport Fees (Auto-Applied on 1st of Every Attached Month)
+                </h2>
+                <p className="text-xs text-slate-300 mt-1">
+                  Transport fees are applied automatically on the <strong className="text-amber-300">1st date of every month</strong> ONLY for the months attached below.{' '}
+                  <strong className="text-emerald-300">October 2026 monthly fees have been removed</strong> (effective software start: November 2026 — auto-invoiced on <strong className="font-mono text-amber-300">01.11.2026</strong>). Previous Dues from old software remain 100% intact.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <span className="px-3 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
+                  Oct 2026 Fees: Removed (₹0)
+                </span>
+                <span className="px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-bold font-mono">
+                  Next Auto-Billing: 01.11.2026 (Nov 2026)
+                </span>
+              </div>
+            </div>
+
+            {/* Single-Screen Session Months Attachment Bar */}
+            <div className="bg-slate-800/90 rounded-xl p-4 border border-slate-700 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-amber-300">
+                    Single-Screen Session Months Attachment (Session {config.currentAcademicSession || '2026-2027'})
+                  </div>
+                  <div className="text-[11px] text-slate-300">
+                    Select the active billing months for the session and click &ldquo;Attach Months to Entire Session&rdquo; so transport fee is applied on the 1st of only these months.
+                  </div>
+                </div>
+                <label className="inline-flex items-center gap-2 text-xs font-bold text-white cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    checked={sessionGlobalMonths.length === ALL_SESSION_MONTHS.length}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSessionGlobalMonths([...ALL_SESSION_MONTHS]);
+                      } else {
+                        setSessionGlobalMonths([]);
+                      }
+                    }}
+                    className="w-4 h-4 accent-rose-600 rounded cursor-pointer"
+                  />
+                  <span>Select All 12 Months</span>
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {ALL_SESSION_MONTHS.map((m) => {
+                  const isSelected = sessionGlobalMonths.includes(m);
+                  const isOct = m === 'oct';
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      disabled={!isAdmin}
+                      onClick={() => {
+                        setSessionGlobalMonths((prev) =>
+                          prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]
+                        );
+                      }}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-all cursor-pointer flex items-center gap-1.5 ${
+                        isSelected
+                          ? 'bg-red-500 text-white shadow-xs ring-2 ring-red-400/50'
+                          : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      }`}
+                      title={isOct ? 'Note: October 2026 fees are suppressed per November 2026 go-live policy' : `Toggle ${m.toUpperCase()}`}
+                    >
+                      <span>{m}</span>
+                      {isSelected && <span className="text-[10px] opacity-90">&times;</span>}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {isAdmin && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700/80">
+                  <span className="text-[11px] text-slate-300">
+                    Attached Session Months ({sessionGlobalMonths.length}):{' '}
+                    <strong className="text-amber-300 uppercase">
+                      {sessionGlobalMonths.join(', ') || 'None'}
+                    </strong>
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const novToMar: SessionMonthCode[] = ['nov', 'dec', 'jan', 'feb', 'mar'];
+                        setSessionGlobalMonths(novToMar);
+                        setFeeSetupMonths(novToMar);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-semibold cursor-pointer"
+                    >
+                      Preset: Nov 2026 &ndash; Mar 2027 (5 Months)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        runMasterAction(async () => {
+                          if (!onUpdateFeesSetup) return;
+                          await onUpdateFeesSetup({
+                            attachedSessionMonths: sessionGlobalMonths,
+                            applyToAllStops: true,
+                          });
+                          setFeeSetupMonths(sessionGlobalMonths);
+                          setFeeSetupSavedMsg(
+                            `Attached [${sessionGlobalMonths.map((x) => x.toUpperCase()).join(', ')}] across the entire session and all villages/stops. Fees will be auto-applied on the 1st of these months starting 01.11.2026.`
+                          );
+                        })
+                      }
+                      className="px-4 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold shadow-xs cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Attach Months to Entire Session &amp; All Villages</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {feeSetupSavedMsg && (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{feeSetupSavedMsg}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setFeeSetupSavedMsg(null)}
+                className="text-emerald-700 hover:underline cursor-pointer ml-3"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* EXACT "Edit Transport Fees" Card matching reference image */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+              <h3 className="text-lg font-bold text-slate-800">Edit Transport Fees</h3>
+              <span className="text-xs text-slate-500">
+                Select any Village / Stop below to configure its Distance/Route, Attached Months, Monthly Fees &amp; Total Fees
+              </span>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!isAdmin) return;
+                runMasterAction(async () => {
+                  if (!onUpdateFeesSetup) return;
+                  await onUpdateFeesSetup({
+                    villageId: feeSetupVillageId || undefined,
+                    stopId: feeSetupStopId || undefined,
+                    transportName: feeSetupTransportName.trim(),
+                    distanceRoute: feeSetupDistanceRoute.trim(),
+                    selectedMonths: feeSetupMonths,
+                    monthlyFee: Number(feeSetupMonthlyFee) || 0,
+                  });
+                  setFeeSetupSavedMsg(
+                    `Updated Transport Fees for "${feeSetupTransportName}": ₹${Number(feeSetupMonthlyFee) || 0}/mo × ${feeSetupMonths.length} months = ₹${(Number(feeSetupMonthlyFee) || 0) * feeSetupMonths.length}.`
+                  );
+                });
+              }}
+              className="space-y-5"
+            >
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {/* Select transport * */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Select transport <span className="text-rose-600">*</span>
+                  </label>
+                  <select
+                    value={feeSetupVillageId}
+                    disabled={!isAdmin}
+                    onChange={(e) => {
+                      const vil = villages.find((v) => v.id === e.target.value);
+                      if (vil) {
+                        handleSelectTransportForFeeSetup(vil);
+                      }
+                    }}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700 font-medium focus:outline-none focus:border-slate-400"
+                  >
+                    {villages.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Distance/route * */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Distance/route <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={!isAdmin}
+                    value={feeSetupDistanceRoute}
+                    onChange={(e) => setFeeSetupDistanceRoute(e.target.value)}
+                    placeholder="e.g. School - Chainpur"
+                    className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-lg text-sm text-slate-800 focus:outline-none focus:border-slate-400"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+                {/* Select Months * */}
+                <div className="md:col-span-6">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-700">
+                      Select Months <span className="text-rose-600">*</span>
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 text-sm text-slate-700 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        disabled={!isAdmin}
+                        checked={feeSetupMonths.length === ALL_SESSION_MONTHS.length}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setFeeSetupMonths([...ALL_SESSION_MONTHS]);
+                          } else {
+                            setFeeSetupMonths([]);
+                          }
+                        }}
+                        className="w-4 h-4 rounded border-slate-300 accent-red-500 cursor-pointer"
+                      />
+                      <span>Select All</span>
+                    </label>
+                  </div>
+
+                  {/* Red Tag Box matching screenshot */}
+                  <div className="min-h-[44px] w-full p-2 bg-white border border-slate-300 rounded-md flex flex-wrap items-center gap-1.5">
+                    {feeSetupMonths.map((m) => (
+                      <span
+                        key={m}
+                        onClick={() => {
+                          if (!isAdmin) return;
+                          setFeeSetupMonths((prev) => prev.filter((x) => x !== m));
+                        }}
+                        className="px-2.5 py-1 rounded bg-red-500 hover:bg-red-600 text-white text-xs font-medium cursor-pointer select-none inline-flex items-center gap-1"
+                        title="Click to remove month"
+                      >
+                        <span>{m}</span>
+                      </span>
+                    ))}
+                    {feeSetupMonths.length === 0 && (
+                      <span className="text-xs text-slate-400 px-1">
+                        Click months below to attach...
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Quick Month Picker Bar for adding/toggling months */}
+                  <div className="flex flex-wrap items-center gap-1 mt-2">
+                    {ALL_SESSION_MONTHS.map((m) => {
+                      const active = feeSetupMonths.includes(m);
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          disabled={!isAdmin}
+                          onClick={() => {
+                            setFeeSetupMonths((prev) =>
+                              prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]
+                            );
+                          }}
+                          className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition-colors ${
+                            active
+                              ? 'bg-red-100 text-red-700 border border-red-300'
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200'
+                          }`}
+                        >
+                          {active ? `✓ ${m}` : `+ ${m}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Monthly Fees * */}
+                <div className="md:col-span-3">
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Monthly Fees <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    required
+                    disabled={!isAdmin}
+                    value={feeSetupMonthlyFee}
+                    onChange={(e) => setFeeSetupMonthlyFee(Number(e.target.value) || 0)}
+                    className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-lg text-sm text-slate-800 focus:outline-none focus:border-slate-400"
+                  />
+                </div>
+
+                {/* Total Fees * */}
+                <div className="md:col-span-3">
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Total Fees <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    readOnly
+                    value={(Number(feeSetupMonthlyFee) || 0) * feeSetupMonths.length}
+                    className="w-full px-3.5 py-2.5 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-600 font-medium cursor-not-allowed"
+                  />
+                </div>
+              </div>
+
+              {isAdmin && (
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs rounded-xl shadow-xs cursor-pointer flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>Save Transport Fees &amp; Attached Months</span>
+                  </button>
+                </div>
+              )}
+            </form>
+          </div>
+
+          {/* Complete Directory of All Transport Villages / Stops & Attached Session Months */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Session Transport Fee Schedule &amp; Attached Months ({villages.length} Villages)
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Click &ldquo;Edit Fees &amp; Months&rdquo; on any village to load it into the Edit Transport Fees form above
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="relative w-56">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={feeSetupSearch}
+                    onChange={(e) => setFeeSetupSearch(e.target.value)}
+                    placeholder="Search transport village..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+                <PrintExportToolbar
+                  title="Session Transport Fees & Attached Months Schedule"
+                  filename="transport_fees_setup"
+                  schoolName={config.schoolName}
+                  filteredData={villages}
+                  allData={villages}
+                  hasActiveFilters={false}
+                  columns={[
+                    { header: 'Transport / Village', accessor: (v) => v.name },
+                    { header: 'Distance / Route', accessor: (v) => v.distanceRoute || `School - ${v.name}` },
+                    {
+                      header: 'Attached Months',
+                      accessor: (v) =>
+                        (v.selectedMonths && v.selectedMonths.length > 0
+                          ? v.selectedMonths
+                          : sessionGlobalMonths
+                        )
+                          .map((m) => m.toUpperCase())
+                          .join(', '),
+                    },
+                    { header: 'Monthly Fees', accessor: (v) => v.monthlyRate },
+                    {
+                      header: 'Total Session Fees',
+                      accessor: (v) =>
+                        v.monthlyRate *
+                        (v.selectedMonths && v.selectedMonths.length > 0
+                          ? v.selectedMonths.length
+                          : sessionGlobalMonths.length),
+                    },
+                  ]}
+                />
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase">
+                  <tr>
+                    <th className="py-3 px-4">Select Transport (Village)</th>
+                    <th className="py-3 px-3">Distance / Route</th>
+                    <th className="py-3 px-3">Attached Session Months</th>
+                    <th className="py-3 px-3">Monthly Fees</th>
+                    <th className="py-3 px-3">Total Fees</th>
+                    <th className="py-3 px-4 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {villages
+                    .filter((v) =>
+                      !feeSetupSearch.trim()
+                        ? true
+                        : v.name.toLowerCase().includes(feeSetupSearch.toLowerCase())
+                    )
+                    .map((v) => {
+                      const vMonths =
+                        v.selectedMonths && v.selectedMonths.length > 0
+                          ? v.selectedMonths
+                          : sessionGlobalMonths;
+                      const totalFee = (v.monthlyRate || 0) * vMonths.length;
+                      return (
+                        <tr key={v.id} className="hover:bg-slate-50/80">
+                          <td className="py-3 px-4 font-bold text-slate-900">{v.name}</td>
+                          <td className="py-3 px-3 text-slate-600">
+                            {v.distanceRoute || `School - ${v.name}`}
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="flex flex-wrap gap-1">
+                              {vMonths.map((m) => (
+                                <span
+                                  key={m}
+                                  className="px-2 py-0.5 rounded bg-red-500 text-white text-[10px] font-semibold"
+                                >
+                                  {m}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-slate-900">
+                            ₹{(v.monthlyRate || 0).toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-emerald-700">
+                            ₹{totalFee.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSelectTransportForFeeSetup(v);
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                              <span>Edit Transport Fees</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

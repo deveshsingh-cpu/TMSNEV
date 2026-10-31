@@ -22,7 +22,7 @@ import {
   CandidateResume, ScheduledService, SuspensionAndPermissionEvent,
   VehicleAssignmentRecord, DisciplineRecord, ExpenseHead, IncomeHead, IncomeRecord,
   StaffAttendanceRecord, StaffAttendanceStatus, StaffAdvanceRecord, StaffPayrollRecord, HolidayRecord,
-  SystemUser, UserRole
+  SystemUser, UserRole, SessionMonthCode, MemberLifecycleRequest
 } from '../../types/index.js';
 
 export const ALL_ERP_SHEET_TABS = [
@@ -144,6 +144,7 @@ export class SheetsDatabaseManager {
   private disciplineRecords: DisciplineRecord[] = [...initialDisciplineRecords];
   private accounts: AccountHead[] = [...initialAccountHeads];
   private vouchers: JournalVoucher[] = [...initialJournalVouchers];
+  private memberRequests: MemberLifecycleRequest[] = [];
 
   private writeQueue: Promise<any> = Promise.resolve();
   private isGoogleConfigured = false;
@@ -242,6 +243,7 @@ export class SheetsDatabaseManager {
           if (Array.isArray(parsed.disciplineRecords)) this.disciplineRecords = parsed.disciplineRecords;
           if (Array.isArray(parsed.accounts)) this.accounts = parsed.accounts;
           if (Array.isArray(parsed.vouchers)) this.vouchers = parsed.vouchers;
+          if (Array.isArray(parsed.memberRequests)) this.memberRequests = parsed.memberRequests;
           this.ensureSeededRouteMembers();
         }
       } else {
@@ -294,6 +296,7 @@ export class SheetsDatabaseManager {
         disciplineRecords: this.disciplineRecords,
         accounts: this.accounts,
         vouchers: this.vouchers,
+        memberRequests: this.memberRequests,
       };
       fs.writeFileSync(DB_SNAPSHOT_FILE, JSON.stringify(payload), 'utf-8');
     } catch (err) {
@@ -843,6 +846,7 @@ export class SheetsDatabaseManager {
   }
 
   public getBootstrapSnapshot() {
+    this.runAutoFirstOfMonthBillingIfDue();
     const students = this.getStudents();
     const trips = this.getTrips();
     const vehicles = this.getVehicles();
@@ -913,6 +917,7 @@ export class SheetsDatabaseManager {
       staffAdvances: [...this.getStaffAdvances()],
       staffPayrolls: [...this.getStaffPayrolls()],
       holidays: [...this.getHolidays()],
+      memberRequests: [...this.getMemberRequests()],
     };
   }
 
@@ -3170,6 +3175,62 @@ export class SheetsDatabaseManager {
     return result;
   }
 
+  public monthStrToSessionCode(monthStr: string): SessionMonthCode | null {
+    const clean = String(monthStr || '').trim().toLowerCase();
+    const mapByNum: Record<string, SessionMonthCode> = {
+      '04': 'apr',
+      '05': 'may',
+      '06': 'jun',
+      '07': 'jul',
+      '08': 'aug',
+      '09': 'sep',
+      '10': 'oct',
+      '11': 'nov',
+      '12': 'dec',
+      '01': 'jan',
+      '02': 'feb',
+      '03': 'mar',
+    };
+    if (/^\d{4}-\d{2}$/.test(clean)) {
+      const mm = clean.split('-')[1];
+      return mapByNum[mm] || null;
+    }
+    const validCodes: SessionMonthCode[] = [
+      'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'jan', 'feb', 'mar',
+    ];
+    for (const code of validCodes) {
+      if (clean === code || clean.startsWith(code)) return code;
+    }
+    return null;
+  }
+
+  public isMonthAttachedForStudent(student: StudentMember, targetYearMonth: string): boolean {
+    // Effective adoption starts November 2026 ('2026-11'); never auto-apply October 2026 or earlier months
+    const effectiveStart = this.config.effectiveBillingStartMonth || '2026-11';
+    if (/^\d{4}-\d{2}$/.test(targetYearMonth) && targetYearMonth < effectiveStart) {
+      return false;
+    }
+    const code = this.monthStrToSessionCode(targetYearMonth);
+    if (!code) return false;
+
+    const vil = this.villages.find(
+      v => v.id === student.villageId || v.name.trim().toLowerCase() === (student.villageName || '').trim().toLowerCase()
+    );
+    const stp = vil?.stops.find(
+      s => s.id === student.pickupDropStopId || s.name.trim().toLowerCase() === (student.pickupDropStopName || '').trim().toLowerCase()
+    );
+
+    const stopMonths = stp?.selectedMonths && stp.selectedMonths.length > 0 ? stp.selectedMonths : undefined;
+    const vilMonths = vil?.selectedMonths && vil.selectedMonths.length > 0 ? vil.selectedMonths : undefined;
+    const sessionMonths =
+      this.config.attachedSessionMonths && this.config.attachedSessionMonths.length > 0
+        ? this.config.attachedSessionMonths
+        : (['nov', 'dec', 'jan', 'feb', 'mar'] as SessionMonthCode[]);
+
+    const activeMonths = stopMonths || vilMonths || sessionMonths;
+    return activeMonths.includes(code);
+  }
+
   private ensureAutoFeeForMember(student: StudentMember, targetMonth?: string) {
     // Auto-calculate monthly fee for both Active and Suspended members (exclude only 'Left' or 'Needs Setup')
     if (student.transportStatus !== 'Active' && student.transportStatus !== 'Suspended') {
@@ -3179,6 +3240,11 @@ export class SheetsDatabaseManager {
     if (baseFee <= 0) return;
 
     const currentMonth = targetMonth || new Date().toISOString().slice(0, 7);
+    // Only apply monthly fee if this month is >= effectiveBillingStartMonth ('2026-11') and is attached in Fees Setup
+    if (!this.isMonthAttachedForStudent(student, currentMonth)) {
+      return;
+    }
+
     const hasInvoiceForCurrentMonth = this.invoices.some(
       i =>
         i.studentId === student.id &&
@@ -3208,6 +3274,110 @@ export class SheetsDatabaseManager {
       this.invoices.unshift(inv);
       student.balanceDue = (Number(student.balanceDue) || 0) + net;
     }
+  }
+
+  public runAutoFirstOfMonthBillingIfDue(): boolean {
+    const now = new Date();
+    const yearMonth = now.toISOString().slice(0, 7); // e.g. '2026-11' on 01.11.2026
+    const effectiveStart = this.config.effectiveBillingStartMonth || '2026-11';
+    if (yearMonth < effectiveStart) {
+      return false;
+    }
+    let anyCreated = false;
+    for (const student of this.students) {
+      if (student.transportStatus !== 'Active' && student.transportStatus !== 'Suspended') continue;
+      if (!this.isMonthAttachedForStudent(student, yearMonth)) continue;
+      const beforeCount = this.invoices.length;
+      this.ensureAutoFeeForMember(student, yearMonth);
+      if (this.invoices.length > beforeCount) {
+        anyCreated = true;
+      }
+    }
+    if (anyCreated) {
+      this.config.lastAutoBilledMonth = yearMonth;
+      this.saveLocalSnapshot();
+    }
+    return anyCreated;
+  }
+
+  public purgeOctober2026AppliedFeesAndSyncBalances(): boolean {
+    let changed = false;
+    // Initialize default session months attachment (Nov 2026 - Mar 2027) if not yet configured
+    if (!this.config.effectiveBillingStartMonth) {
+      this.config.effectiveBillingStartMonth = '2026-11';
+      changed = true;
+    }
+    if (!this.config.attachedSessionMonths || this.config.attachedSessionMonths.length === 0) {
+      this.config.attachedSessionMonths = ['nov', 'dec', 'jan', 'feb', 'mar'];
+      changed = true;
+    }
+
+    // Ensure every village and stop has default distanceRoute & selectedMonths initialized
+    for (const vil of this.villages) {
+      if (!vil.distanceRoute) {
+        vil.distanceRoute = `School - ${vil.name}`;
+        changed = true;
+      }
+      if (!vil.selectedMonths || vil.selectedMonths.length === 0) {
+        vil.selectedMonths = [...this.config.attachedSessionMonths];
+        changed = true;
+      }
+      const vilRate = Number(vil.stops?.[0]?.fee ?? vil.monthlyRate ?? 0);
+      vil.totalSessionFee = vilRate * vil.selectedMonths.length;
+      for (const st of vil.stops || []) {
+        if (!st.distanceRoute) {
+          st.distanceRoute = `School - ${st.name}`;
+          changed = true;
+        }
+        if (!st.selectedMonths || st.selectedMonths.length === 0) {
+          st.selectedMonths = [...vil.selectedMonths];
+          changed = true;
+        }
+        st.totalSessionFee = (Number(st.fee) || 0) * st.selectedMonths.length;
+      }
+    }
+
+    // Remove all October 2026 ('2026-10' / 'October 2026') monthly transport fee invoices while preserving Previous Dues
+    const beforeInvLen = this.invoices.length;
+    this.invoices = this.invoices.filter(inv => {
+      const m = String(inv.month || '').trim().toLowerCase();
+      const key = String(inv.idempotencyKey || '').trim();
+      // Always keep Previous Dues invoices intact
+      if (key.startsWith('PREV-DUES-') || m.includes('previous dues')) {
+        return true;
+      }
+      if (
+        m === '2026-10' ||
+        m === 'october 2026' ||
+        m === 'oct 2026' ||
+        m === 'oct' ||
+        key.startsWith('BILL-2026-10-') ||
+        key.startsWith('BILL-October 2026-')
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (this.invoices.length !== beforeInvLen) {
+      changed = true;
+    }
+
+    // Ensure Previous Dues invoices are intact and recalculate every student's balanceDue accurately
+    for (const st of this.students) {
+      if ((Number(st.previousDues) || 0) > 0) {
+        this.syncPreviousDuesInvoiceForStudent(st, st.previousDues, st.previousDuesRemarks);
+      }
+      const recalculatedDue = this.invoices
+        .filter(inv => inv.studentId === st.id && inv.status !== 'Paid')
+        .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+      if (Number(st.balanceDue) !== recalculatedDue) {
+        st.balanceDue = recalculatedDue;
+        changed = true;
+      }
+    }
+
+    return changed;
   }
 
   public inferCampusFromClass(className: string, fallback = 'Sr'): string {
@@ -7913,6 +8083,13 @@ export class SheetsDatabaseManager {
       }
     }
 
+    if (this.purgeOctober2026AppliedFeesAndSyncBalances()) {
+      changed = true;
+    }
+    if (this.runAutoFirstOfMonthBillingIfDue()) {
+      changed = true;
+    }
+
     if (changed) {
       this.rebuildScheduledServices();
       this.saveLocalSnapshot();
@@ -9335,6 +9512,10 @@ export class SheetsDatabaseManager {
       trip.rosterCount = existingAtt.length;
       trip.presentCountDriver = existingAtt.filter(a => a.driverStatus === 'Present').length;
       trip.presentCountAssistant = existingAtt.filter(a => a.assistantStatus === 'Present').length;
+      const anyArrivalMarkedInit = existingAtt.some(a => a.driverStatus && a.driverStatus !== 'Pending');
+      const anyDepartureMarkedInit = existingAtt.some(a => a.assistantStatus && a.assistantStatus !== 'Pending');
+      trip.inStrength = anyArrivalMarkedInit ? trip.presentCountDriver : undefined;
+      trip.outStrength = anyDepartureMarkedInit ? trip.presentCountAssistant : undefined;
       trip.presentCount = existingAtt.filter(
         a => a.resolvedStatus === 'Present' || a.driverStatus === 'Present' || a.assistantStatus === 'Present'
       ).length;
@@ -9484,6 +9665,10 @@ export class SheetsDatabaseManager {
         trip.rosterCount = Math.max(trip.rosterCount || 0, tripAtts.length);
         trip.presentCountDriver = tripAtts.filter(a => a.driverStatus === 'Present').length;
         trip.presentCountAssistant = tripAtts.filter(a => a.assistantStatus === 'Present').length;
+        const anyArrivalMarked = tripAtts.some(a => a.driverStatus && a.driverStatus !== 'Pending');
+        const anyDepartureMarked = tripAtts.some(a => a.assistantStatus && a.assistantStatus !== 'Pending');
+        trip.inStrength = anyArrivalMarked ? trip.presentCountDriver : undefined;
+        trip.outStrength = anyDepartureMarked ? trip.presentCountAssistant : undefined;
         trip.presentCount = tripAtts.filter(
           a => a.resolvedStatus === 'Present' || a.driverStatus === 'Present' || a.assistantStatus === 'Present'
         ).length;
@@ -9499,6 +9684,13 @@ export class SheetsDatabaseManager {
             a.assistantStatus !== 'Pending' &&
             a.driverStatus !== a.assistantStatus
         ).length;
+        const memberMismatchNotes = tripAtts
+          .filter(a => a.driverStatus !== 'Pending' && a.assistantStatus !== 'Pending' && a.driverStatus !== a.assistantStatus && (a.resolutionReason || a.notes))
+          .map(a => `${a.studentName.split(' ')[0]}: ${a.resolutionReason || a.notes}`)
+          .join('; ');
+        if (memberMismatchNotes && !trip.strengthMismatchRemark) {
+          trip.strengthMismatchRemark = memberMismatchNotes;
+        }
       }
 
       await this.internalSyncToGoogleSheets();
@@ -9511,7 +9703,13 @@ export class SheetsDatabaseManager {
     verifiedBy: string,
     notes?: string,
     statusOverride?: 'Arrived' | 'Departed' | 'Completed',
-    timingPayload?: { inTime?: string; outTime?: string; inStrength?: number; outStrength?: number }
+    timingPayload?: {
+      inTime?: string;
+      outTime?: string;
+      inStrength?: number;
+      outStrength?: number;
+      strengthMismatchRemark?: string;
+    }
   ) {
     return this.enqueueWrite(async () => {
       let trip = this.trips.find(t => t.id === tripId);
@@ -9551,19 +9749,32 @@ export class SheetsDatabaseManager {
       if (statusOverride) trip.status = statusOverride;
       if (notes !== undefined) trip.notes = notes;
       const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      const tripAtts = this.attendance.filter(a => a.tripId === trip!.id);
+      const anyArrivalMarked = tripAtts.some(a => a.driverStatus && a.driverStatus !== 'Pending');
+      const anyDepartureMarked = tripAtts.some(a => a.assistantStatus && a.assistantStatus !== 'Pending');
+
       if (statusOverride === 'Arrived' && !trip.inTime && !timingPayload?.inTime) {
         trip.inTime = nowTime;
-        trip.inStrength = trip.presentCount || trip.rosterCount;
       }
       if (statusOverride === 'Departed' && !trip.outTime && !timingPayload?.outTime) {
         trip.outTime = nowTime;
-        trip.outStrength = trip.presentCount || trip.rosterCount;
       }
       if (timingPayload) {
         if (timingPayload.inTime !== undefined) trip.inTime = timingPayload.inTime;
         if (timingPayload.outTime !== undefined) trip.outTime = timingPayload.outTime;
-        if (timingPayload.inStrength !== undefined) trip.inStrength = Number(timingPayload.inStrength);
-        if (timingPayload.outStrength !== undefined) trip.outStrength = Number(timingPayload.outStrength);
+        if (timingPayload.inStrength !== undefined) {
+          trip.inStrength = Number(timingPayload.inStrength);
+        } else if (anyArrivalMarked) {
+          trip.inStrength = tripAtts.filter(a => a.driverStatus === 'Present').length;
+        }
+        if (timingPayload.outStrength !== undefined) {
+          trip.outStrength = Number(timingPayload.outStrength);
+        } else if (anyDepartureMarked) {
+          trip.outStrength = tripAtts.filter(a => a.assistantStatus === 'Present').length;
+        }
+        if (timingPayload.strengthMismatchRemark !== undefined) {
+          trip.strengthMismatchRemark = timingPayload.strengthMismatchRemark.trim();
+        }
       }
       await this.internalSyncToGoogleSheets();
       return trip;
@@ -10022,6 +10233,378 @@ export class SheetsDatabaseManager {
       }
       return { created, updated: 0, conflicted: 0, needsSetup: 0, summary: `Imported ${created} records.` };
     });
+  }
+
+  // --- Masters: Session Fees Setup (Single-Screen Session Months Attachment + Edit Transport Fees) ---
+  public async updateFeesSetup(payload: {
+    attachedSessionMonths?: SessionMonthCode[];
+    effectiveBillingStartMonth?: string;
+    applyMonthsToAllStops?: boolean;
+    villageId?: string;
+    stopId?: string;
+    transportName?: string;
+    distanceRoute?: string;
+    selectedMonths?: SessionMonthCode[];
+    monthlyFee?: number;
+  }) {
+    return this.enqueueWrite(async () => {
+      if (payload.effectiveBillingStartMonth) {
+        this.config.effectiveBillingStartMonth = payload.effectiveBillingStartMonth;
+      }
+      if (Array.isArray(payload.attachedSessionMonths) && payload.attachedSessionMonths.length > 0) {
+        this.config.attachedSessionMonths = payload.attachedSessionMonths;
+        if (payload.applyMonthsToAllStops) {
+          for (const vil of this.villages) {
+            vil.selectedMonths = [...payload.attachedSessionMonths];
+            const vRate = Number(vil.stops?.[0]?.fee ?? vil.monthlyRate ?? 0);
+            vil.totalSessionFee = vRate * vil.selectedMonths.length;
+            for (const st of vil.stops || []) {
+              st.selectedMonths = [...payload.attachedSessionMonths];
+              st.totalSessionFee = (Number(st.fee) || 0) * st.selectedMonths.length;
+            }
+          }
+        }
+      }
+
+      // Specific Transport / Village / Stop edit (matching "Edit Transport Fees" screen)
+      if (payload.villageId || payload.transportName) {
+        const vil = this.villages.find(
+          v =>
+            (payload.villageId && v.id === payload.villageId) ||
+            (payload.transportName && v.name.trim().toLowerCase() === payload.transportName.trim().toLowerCase())
+        );
+        if (vil) {
+          const months =
+            payload.selectedMonths && payload.selectedMonths.length > 0
+              ? payload.selectedMonths
+              : vil.selectedMonths || this.config.attachedSessionMonths || ['nov', 'dec', 'jan', 'feb', 'mar'];
+          const distRoute = payload.distanceRoute?.trim() || vil.distanceRoute || `School - ${vil.name}`;
+          const newFee =
+            payload.monthlyFee !== undefined && !isNaN(Number(payload.monthlyFee))
+              ? Math.max(0, Number(payload.monthlyFee))
+              : Number(vil.stops?.[0]?.fee ?? vil.monthlyRate ?? 0);
+
+          vil.distanceRoute = distRoute;
+          vil.selectedMonths = [...months];
+          vil.monthlyRate = newFee;
+          vil.totalSessionFee = newFee * months.length;
+
+          for (const st of vil.stops || []) {
+            if (!payload.stopId || st.id === payload.stopId || vil.stops.length === 1) {
+              st.fee = newFee;
+              st.distanceRoute = distRoute;
+              st.selectedMonths = [...months];
+              st.totalSessionFee = newFee * months.length;
+            }
+          }
+
+          // Also sync monthlyFee for active/suspended members belonging to this village/stop
+          for (const stu of this.students) {
+            const matchesVil =
+              stu.villageId === vil.id ||
+              stu.villageName.trim().toLowerCase() === vil.name.trim().toLowerCase();
+            const matchesStop =
+              !payload.stopId ||
+              stu.pickupDropStopId === payload.stopId ||
+              vil.stops.length <= 1;
+            if (matchesVil && matchesStop && stu.transportStatus !== 'Left') {
+              stu.monthlyFee = newFee;
+            }
+          }
+        }
+      }
+
+      this.purgeOctober2026AppliedFeesAndSyncBalances();
+      this.runAutoFirstOfMonthBillingIfDue();
+      await this.internalSyncToGoogleSheets();
+      return {
+        config: this.config,
+        villages: this.villages,
+      };
+    });
+  }
+
+  // --- Member Add / Drop ("Left School") / Suspend Multi-Stage Approval Requests ---
+  public getMemberRequests(): MemberLifecycleRequest[] {
+    return this.memberRequests;
+  }
+
+  public async createMemberLifecycleRequest(payload: {
+    requestType: 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER';
+    requestedBy: string;
+    requestedByRole: UserRole;
+    requestReason: string;
+    memberId?: string;
+    leavingDate?: string;
+    memberPayload?: Partial<StudentMember>;
+    coordinatorRemarks?: string;
+  }): Promise<MemberLifecycleRequest> {
+    return this.enqueueWrite(async () => {
+      const today = new Date().toISOString().split('T')[0];
+      const role = payload.requestedByRole || 'Transport Assistant';
+      const reason = (payload.requestReason || '').trim();
+      if (!reason || reason.length < 3) {
+        throw new Error('Please provide a valid reason / remark for this request.');
+      }
+
+      if (payload.requestType === 'SUSPEND_MEMBER' && role === 'Transport Assistant') {
+        throw new Error('Transport Assistant cannot raise a suspension request. Only Transport Coordinator can raise a suspension request for Admin approval.');
+      }
+
+      let targetStudent: StudentMember | undefined;
+      if (payload.requestType === 'DROP_MEMBER' || payload.requestType === 'SUSPEND_MEMBER') {
+        targetStudent = this.students.find(s => s.id === payload.memberId);
+        if (!targetStudent) {
+          throw new Error('Selected member was not found.');
+        }
+      } else if (payload.requestType === 'ADD_MEMBER') {
+        if (!payload.memberPayload?.name?.trim()) {
+          throw new Error('Member Full Name is mandatory to raise an Add Member request.');
+        }
+      }
+
+      // Determine initial workflow stage:
+      // - Transport Assistant raises ADD_MEMBER or DROP_MEMBER -> 'Pending Coordinator Approval'
+      // - Transport Coordinator raises SUSPEND_MEMBER (or ADD/DROP directly) -> 'Pending Admin Approval'
+      // - Admin -> immediately 'Approved' and executed
+      const initialStatus: MemberLifecycleRequest['status'] =
+        role === 'Admin'
+          ? 'Approved'
+          : role === 'Transport Coordinator'
+          ? 'Pending Admin Approval'
+          : 'Pending Coordinator Approval';
+
+      const req: MemberLifecycleRequest = {
+        id: `mreq-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        requestType: payload.requestType,
+        status: initialStatus,
+        requestedBy: payload.requestedBy || role,
+        requestedByRole: role,
+        requestedAt: today,
+        requestReason: reason,
+        memberId: targetStudent?.id,
+        memberAdmissionNo: targetStudent?.admissionNo || payload.memberPayload?.admissionNo || '',
+        memberName: targetStudent?.name || payload.memberPayload?.name?.trim() || 'New Member',
+        memberClassSection: targetStudent
+          ? `${targetStudent.class}-${targetStudent.section}`
+          : `${payload.memberPayload?.class || 'Class I'}-${payload.memberPayload?.section || 'A'}`,
+        memberCampus: targetStudent?.campus || payload.memberPayload?.campus || 'Sr',
+        memberVillageName: targetStudent?.villageName || payload.memberPayload?.villageName || '',
+        memberStopName: targetStudent?.pickupDropStopName || payload.memberPayload?.pickupDropStopName || '',
+        memberRouteCode: targetStudent?.routeCode || payload.memberPayload?.routeCode || '',
+        memberMonthlyFee: targetStudent?.monthlyFee ?? payload.memberPayload?.monthlyFee ?? 0,
+        leavingDate: payload.leavingDate || today,
+        memberPayload: payload.memberPayload,
+        ...(role === 'Transport Coordinator'
+          ? {
+              coordinatorApprovedBy: payload.requestedBy || 'Transport Coordinator',
+              coordinatorApprovedAt: today,
+              coordinatorRemarks: payload.coordinatorRemarks || reason,
+            }
+          : {}),
+        ...(role === 'Admin'
+          ? {
+              coordinatorApprovedBy: 'Admin (Direct)',
+              coordinatorApprovedAt: today,
+              coordinatorRemarks: reason,
+              adminReviewedBy: 'Admin',
+              adminReviewedAt: today,
+              adminRemarks: reason,
+            }
+          : {}),
+      };
+
+      this.memberRequests.unshift(req);
+
+      // If SUSPEND_MEMBER raised by Coordinator, also tag student.pendingSuspensionRequest so both tables stay in sync
+      if (payload.requestType === 'SUSPEND_MEMBER' && targetStudent && initialStatus === 'Pending Admin Approval') {
+        targetStudent.pendingSuspensionRequest = {
+          id: req.id,
+          requestedBy: req.requestedBy,
+          requestedAt: today,
+          reason,
+          status: 'Pending Approval',
+        };
+      }
+
+      // If Admin submitted directly, execute immediately
+      if (initialStatus === 'Approved') {
+        await this.executeApprovedMemberRequestInternal(req);
+      }
+
+      await this.internalSyncToGoogleSheets();
+      return req;
+    });
+  }
+
+  public async coordinatorReviewMemberRequest(
+    requestId: string,
+    payload: {
+      action: 'Approve' | 'Reject';
+      coordinatorName?: string;
+      remarks: string;
+    }
+  ): Promise<MemberLifecycleRequest> {
+    return this.enqueueWrite(async () => {
+      const req = this.memberRequests.find(r => r.id === requestId);
+      if (!req) throw new Error('Member request not found.');
+      if (req.status !== 'Pending Coordinator Approval') {
+        throw new Error(`Request is currently in "${req.status}" state and cannot be reviewed at Coordinator stage.`);
+      }
+      const cleanRemarks = (payload.remarks || '').trim();
+      if (!cleanRemarks || cleanRemarks.length < 2) {
+        throw new Error('Transport Coordinator remarks are mandatory to approve or reject this request.');
+      }
+      const today = new Date().toISOString().split('T')[0];
+      req.coordinatorApprovedBy = payload.coordinatorName || 'Transport Coordinator';
+      req.coordinatorApprovedAt = today;
+      req.coordinatorRemarks = cleanRemarks;
+      req.status = payload.action === 'Approve' ? 'Pending Admin Approval' : 'Rejected';
+
+      await this.internalSyncToGoogleSheets();
+      return req;
+    });
+  }
+
+  public async adminReviewMemberRequest(
+    requestId: string,
+    payload: {
+      action: 'Approve' | 'Reject';
+      adminName?: string;
+      remarks?: string;
+    }
+  ): Promise<MemberLifecycleRequest> {
+    return this.enqueueWrite(async () => {
+      const req = this.memberRequests.find(r => r.id === requestId);
+      if (!req) throw new Error('Member request not found.');
+      if (req.status === 'Approved' || req.status === 'Rejected') {
+        throw new Error(`Request has already been ${req.status.toLowerCase()}.`);
+      }
+      const today = new Date().toISOString().split('T')[0];
+      req.adminReviewedBy = payload.adminName || 'Admin';
+      req.adminReviewedAt = today;
+      req.adminRemarks = (payload.remarks || '').trim() || (payload.action === 'Approve' ? 'Approved by Admin' : 'Rejected by Admin');
+
+      if (payload.action === 'Approve') {
+        req.status = 'Approved';
+        await this.executeApprovedMemberRequestInternal(req);
+      } else {
+        req.status = 'Rejected';
+        if (req.requestType === 'SUSPEND_MEMBER' && req.memberId) {
+          const st = this.students.find(s => s.id === req.memberId);
+          if (st && st.pendingSuspensionRequest) {
+            st.pendingSuspensionRequest.status = 'Rejected';
+            st.pendingSuspensionRequest.reviewedBy = 'Admin';
+            st.pendingSuspensionRequest.reviewedAt = today;
+            st.pendingSuspensionRequest.rejectionReason = req.adminRemarks;
+          }
+        }
+      }
+
+      await this.internalSyncToGoogleSheets();
+      return req;
+    });
+  }
+
+  private async executeApprovedMemberRequestInternal(req: MemberLifecycleRequest) {
+    const today = new Date().toISOString().split('T')[0];
+    if (req.requestType === 'ADD_MEMBER' && req.memberPayload) {
+      const data = req.memberPayload;
+      const matchedVil =
+        this.villages.find(v => v.id === data.villageId) ||
+        (data.villageName
+          ? this.villages.find(v => v.name.trim().toLowerCase() === data.villageName!.trim().toLowerCase())
+          : undefined) ||
+        this.villages[0];
+      const firstStop =
+        matchedVil?.stops.find(s => s.id === data.pickupDropStopId || s.name === data.pickupDropStopName) ||
+        matchedVil?.stops?.[0];
+      const matchedRoute =
+        this.routes.find(r => r.id === data.routeId || r.code === data.routeCode) ||
+        this.routes.find(r => matchedVil && r.villageIds.includes(matchedVil.id)) ||
+        this.routes[0];
+
+      const feeVal =
+        data.monthlyFee !== undefined && Number(data.monthlyFee) >= 0
+          ? Number(data.monthlyFee)
+          : Number(firstStop?.fee ?? matchedVil?.monthlyRate ?? 0);
+
+      const newStudent: StudentMember = {
+        id: `stu-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        admissionNo: (data.admissionNo || '').trim(),
+        name: (data.name || req.memberName).trim(),
+        profilePhoto: data.profilePhoto || '',
+        memberType: (data.memberType || 'Student') as any,
+        class: (data.class || 'Class I').trim(),
+        section: (data.section || 'A').trim(),
+        gender: data.gender || 'M',
+        campus: (data.campus || matchedRoute?.campus || 'Sr') as any,
+        academicSession: this.config.currentAcademicSession || '2026-2027',
+        fatherName: (data.fatherName || '').trim(),
+        mobile: (data.mobile || '').trim(),
+        address: (data.address || matchedVil?.name || '').trim(),
+        routeId: matchedRoute?.id || '',
+        routeCode: matchedRoute?.code || '',
+        villageId: matchedVil?.id || '',
+        villageName: matchedVil?.name || data.villageName || '',
+        pickupDropStopId: firstStop?.id || '',
+        pickupDropStopName: firstStop?.name || data.pickupDropStopName || matchedVil?.name || '',
+        morningStopId: firstStop?.id || '',
+        morningStopName: firstStop?.name || data.pickupDropStopName || matchedVil?.name || '',
+        eveningStopId: firstStop?.id || '',
+        eveningStopName: firstStop?.name || data.pickupDropStopName || matchedVil?.name || '',
+        serviceType: 'both',
+        transportStatus: 'Active',
+        statusReason: `Added after Coordinator (${req.coordinatorApprovedBy || 'Coordinator'}) & Admin Approval on ${today}`,
+        emergencyContact: (data.emergencyContact || data.mobile || '').trim(),
+        monthlyFee: feeVal,
+        concessionAmount: Number(data.concessionAmount) || 0,
+        previousDues: data.previousDues ? Math.max(0, Number(data.previousDues) || 0) : 0,
+        previousDuesRemarks: data.previousDuesRemarks || '',
+        balanceDue: 0,
+        joiningDate: data.joiningDate || today,
+        documents: data.documents || [],
+        specialHistory: [],
+        version: 1,
+      };
+      this.students.unshift(newStudent);
+      req.memberId = newStudent.id;
+      this.ensureAutoFeeForMember(newStudent);
+      if (newStudent.previousDues && newStudent.previousDues > 0) {
+        this.syncPreviousDuesInvoiceForStudent(newStudent, newStudent.previousDues, newStudent.previousDuesRemarks);
+      }
+      this.rebuildScheduledServices();
+    } else if (req.requestType === 'DROP_MEMBER' && req.memberId) {
+      const student = this.students.find(s => s.id === req.memberId);
+      if (student) {
+        student.transportStatus = 'Left';
+        student.statusReason = `Dropped (Left School/Transport) w.e.f ${req.leavingDate || today}. Reason: ${req.requestReason} | Coordinator: ${req.coordinatorRemarks || 'Approved'} | Admin: ${req.adminRemarks || 'Approved'}`;
+        student.version = (student.version || 1) + 1;
+        this.rebuildScheduledServices();
+      }
+    } else if (req.requestType === 'SUSPEND_MEMBER' && req.memberId) {
+      const student = this.students.find(s => s.id === req.memberId);
+      if (student) {
+        student.transportStatus = 'Suspended';
+        student.statusReason = req.requestReason;
+        student.activePermissionLetter = undefined;
+        if (student.pendingSuspensionRequest) {
+          student.pendingSuspensionRequest.status = 'Approved';
+          student.pendingSuspensionRequest.reviewedBy = 'Admin';
+          student.pendingSuspensionRequest.reviewedAt = today;
+        }
+        const evt: SuspensionAndPermissionEvent = {
+          id: `spc-${Date.now()}`,
+          date: today,
+          eventType: 'Suspended',
+          reason: `${req.requestReason} (Approved by Admin)`,
+          authorizedBy: 'Admin',
+          overdueAmountAtTime: student.balanceDue,
+        };
+        student.specialHistory = [evt, ...(student.specialHistory || [])];
+        student.version = (student.version || 1) + 1;
+      }
+    }
   }
 }
 

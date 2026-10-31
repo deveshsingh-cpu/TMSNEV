@@ -72,7 +72,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
     else if (initialSubTab === 'collect') setActiveTab('receipts');
   }, [initialSubTab]);
 
-  const [selectedMonth, setSelectedMonth] = useState('2026-10');
+  const [selectedMonth, setSelectedMonth] = useState('2026-11');
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
   const [isRunningBilling, setIsRunningBilling] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
@@ -161,9 +161,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
       : selectedMember && selectedMember.balanceDue > 0
       ? [
           {
-            id: `syn-${selectedMember.id}-oct`,
-            month: 'October 2026',
-            description: `October 2026 — Transport Dues (${selectedMember.pickupDropStopName || 'Stop'})`,
+            id: `syn-${selectedMember.id}-prev`,
+            month: 'Previous Dues (Old Software)',
+            description: `Previous Dues (Old Software) — Opening Transport Arrears (${selectedMember.pickupDropStopName || 'Stop'})`,
             duesAmount: selectedMember.balanceDue,
             isSynthetic: true,
           },

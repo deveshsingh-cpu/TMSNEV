@@ -7,7 +7,7 @@ import {
 import {
   StudentMember, CampusId, Village, Route, CampusMaster, MemberTypeMaster,
   FeeInvoice, FeeReceipt, TripAttendanceRecord, DocumentAttachment,
-  FeeFollowUpRecord, DisciplineRecord, Vehicle, UserRole
+  FeeFollowUpRecord, DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview, FilterPopover } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
@@ -55,6 +55,28 @@ interface MembersViewProps {
   onDeleteDisciplineRecord?: (id: string) => Promise<void>;
   onQuickCollectFeeForMember?: (memberId: string) => void;
   onNavigateToMasters?: () => void;
+  onAddClass?: (name: string) => Promise<any>;
+  onAddSection?: (name: string) => Promise<any>;
+  onAddCampus?: (data: Partial<CampusMaster>) => Promise<any>;
+  onAddMemberType?: (name: string) => Promise<any>;
+  memberRequests?: MemberLifecycleRequest[];
+  onCreateMemberRequest?: (payload: {
+    requestType: 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER';
+    memberId?: string;
+    memberData?: Partial<StudentMember>;
+    reason?: string;
+    effectiveDate?: string;
+    requestedBy?: string;
+    requestedByRole?: UserRole;
+  }) => Promise<any>;
+  onCoordinatorReviewMemberRequest?: (
+    id: string,
+    payload: { action: 'Approve' | 'Reject'; remarks: string; reviewedBy?: string }
+  ) => Promise<any>;
+  onAdminReviewMemberRequest?: (
+    id: string,
+    payload: { action: 'Approve' | 'Reject'; remarks?: string; approvedBy?: string }
+  ) => Promise<any>;
 }
 
 type ProfileTabKey =
@@ -99,18 +121,41 @@ export const MembersView: React.FC<MembersViewProps> = ({
   onAddDisciplineRecord,
   onDeleteDisciplineRecord,
   onQuickCollectFeeForMember,
+  memberRequests = [],
+  onCreateMemberRequest,
+  onCoordinatorReviewMemberRequest,
+  onAdminReviewMemberRequest,
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
   const canInitiateSuspension = currentRole === 'Admin' || currentRole === 'Transport Coordinator';
 
-  // Mode: 'directory' vs 'suspended' vs 'discipline'
-  const [subModule, setSubModule] = useState<'directory' | 'suspended' | 'discipline'>(
+  // Mode: 'directory' vs 'suspended' vs 'discipline' vs 'requests'
+  const [subModule, setSubModule] = useState<'directory' | 'suspended' | 'discipline' | 'requests'>(
     initialStatusFilter === 'discipline'
       ? 'discipline'
       : initialStatusFilter === 'Suspended'
       ? 'suspended'
+      : initialStatusFilter === 'requests'
+      ? 'requests'
       : 'directory'
   );
+
+  // Drop Member (Left School) Request Modal state
+  const [showDropMemberModal, setShowDropMemberModal] = useState(false);
+  const [dropTargetMemberId, setDropTargetMemberId] = useState<string>('');
+  const [dropReasonInput, setDropReasonInput] = useState<string>('');
+  const [dropEffectiveDate, setDropEffectiveDate] = useState<string>(todayStr);
+  const [dropMemberSearch, setDropMemberSearch] = useState<string>('');
+  const [dropModalError, setDropModalError] = useState<string | null>(null);
+  const [lifecycleBannerMsg, setLifecycleBannerMsg] = useState<string | null>(null);
+
+  // Coordinator Review Remarks Modal state
+  const [coordReviewReq, setCoordReviewReq] = useState<MemberLifecycleRequest | null>(null);
+  const [coordReviewAction, setCoordReviewAction] = useState<'Approve' | 'Reject'>('Approve');
+  const [coordReviewRemarks, setCoordReviewRemarks] = useState<string>('');
+  const [coordReviewError, setCoordReviewError] = useState<string | null>(null);
+  const [reqFilterType, setReqFilterType] = useState<'all' | 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER'>('all');
+  const [reqFilterStatus, setReqFilterStatus] = useState<'all' | 'Pending Coordinator Approval' | 'Pending Admin Approval' | 'Approved' | 'Rejected'>('all');
 
   // Directory Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -137,6 +182,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
       setSubModule('discipline');
     } else if (initialStatusFilter === 'Suspended') {
       setSubModule('suspended');
+    } else if (initialStatusFilter === 'requests') {
+      setSubModule('requests');
     } else {
       setSubModule('directory');
       setStatusFilter('all');
@@ -451,13 +498,80 @@ export const MembersView: React.FC<MembersViewProps> = ({
     }
     setSubmitting(true);
     try {
-      if (onSuspendStudent) {
+      if (isAdmin && onSuspendStudent) {
+        await onSuspendStudent(suspendTargetMemberId, cleanReason);
+      } else if (onCreateMemberRequest) {
+        await onCreateMemberRequest({
+          requestType: 'SUSPEND_MEMBER',
+          memberId: suspendTargetMemberId,
+          reason: cleanReason,
+          effectiveDate: todayStr,
+          requestedByRole: currentRole,
+        });
+        setLifecycleBannerMsg(
+          'Suspension request raised by Transport Coordinator and forwarded to Admin for approval.'
+        );
+      } else if (onSuspendStudent) {
         await onSuspendStudent(suspendTargetMemberId, cleanReason);
       }
       setShowSuspendModal(false);
       setSuspendModalReason('');
     } catch (err: any) {
       setSuspendModalError(err.message || 'Failed to submit suspension');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openDropMemberModal = (memberId?: string) => {
+    const defaultMember =
+      students.find(s => s.id === memberId) ||
+      students.find(s => s.transportStatus === 'Active') ||
+      students[0];
+    setDropTargetMemberId(defaultMember?.id || '');
+    setDropReasonInput('');
+    setDropEffectiveDate(todayStr);
+    setDropMemberSearch('');
+    setDropModalError(null);
+    setShowDropMemberModal(true);
+  };
+
+  const handleConfirmDropMemberModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDropModalError(null);
+    if (!dropTargetMemberId) {
+      setDropModalError('Please select a member to drop (Left School).');
+      return;
+    }
+    const cleanReason = dropReasonInput.trim();
+    if (cleanReason.length < 4) {
+      setDropModalError('Please enter a valid reason / remarks for dropping this member (Left School).');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      if (onCreateMemberRequest) {
+        await onCreateMemberRequest({
+          requestType: 'DROP_MEMBER',
+          memberId: dropTargetMemberId,
+          reason: cleanReason,
+          effectiveDate: dropEffectiveDate || todayStr,
+          requestedByRole: currentRole,
+        });
+        setLifecycleBannerMsg(
+          isAdmin
+            ? 'Member dropped (marked Left School) immediately by Admin.'
+            : currentRole === 'Transport Assistant'
+            ? 'Drop Member (Left School) request raised by Transport Assistant -> Pending Transport Coordinator Approval.'
+            : 'Drop Member (Left School) request approved by Coordinator -> Pending Admin Approval.'
+        );
+      } else if (isAdmin && onChangeMemberStatus) {
+        await onChangeMemberStatus(dropTargetMemberId, 'Left', cleanReason);
+      }
+      setShowDropMemberModal(false);
+      setDropReasonInput('');
+    } catch (err: any) {
+      setDropModalError(err.message || 'Failed to submit Drop Member request');
     } finally {
       setSubmitting(false);
     }
@@ -813,7 +927,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
       const existingDocs = existingMember?.documents || [];
       const updatedDocs = schoolIdDoc ? [schoolIdDoc, ...existingDocs] : existingDocs;
 
-      await onSaveStudent({
+      const memberPayload: Partial<StudentMember> = {
         id: editingId || undefined,
         admissionNo: admissionNo.trim(),
         name: name.trim(),
@@ -842,7 +956,27 @@ export const MembersView: React.FC<MembersViewProps> = ({
         previousDuesRemarks: previousDuesRemarks.trim() || undefined,
         transportStatus: memberStatusInput,
         documents: updatedDocs,
-      });
+      };
+
+      // If non-Admin is adding a new member, route through the 3-stage Approval Workflow
+      if (!editingId && !isAdmin && onCreateMemberRequest) {
+        await onCreateMemberRequest({
+          requestType: 'ADD_MEMBER',
+          memberData: memberPayload,
+          reason: `New Member Enrollment Request (${memberPayload.name} — ${memberPayload.villageName}, Route ${memberPayload.routeCode})`,
+          effectiveDate: todayStr,
+          requestedByRole: currentRole,
+        });
+        setLifecycleBannerMsg(
+          currentRole === 'Transport Assistant'
+            ? `Add Member request for "${memberPayload.name}" raised by Transport Assistant -> Sent to Transport Coordinator for approval & remarks, then Admin approval.`
+            : `Add Member request for "${memberPayload.name}" raised by Transport Coordinator -> Sent to Admin for final approval.`
+        );
+        setShowAddModal(false);
+        return;
+      }
+
+      await onSaveStudent(memberPayload);
       if (editingId && existingMember && existingMember.transportStatus !== memberStatusInput && onChangeMemberStatus) {
         await onChangeMemberStatus(editingId, memberStatusInput, `Status updated to ${memberStatusInput} via Member Info Edit`);
       }
@@ -1108,12 +1242,308 @@ export const MembersView: React.FC<MembersViewProps> = ({
     });
   };
 
+  const pendingRequestsCount = memberRequests.filter(
+    r => r.status === 'Pending Coordinator Approval' || r.status === 'Pending Admin Approval'
+  ).length;
+
   return (
     <div className="space-y-6">
+      {lifecycleBannerMsg && (
+        <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold flex items-center justify-between shadow-2xs">
+          <span>{lifecycleBannerMsg}</span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setSubModule('requests')}
+              className="px-3 py-1 rounded-lg bg-emerald-700 text-white font-bold cursor-pointer"
+            >
+              View Approval Queue ({pendingRequestsCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setLifecycleBannerMsg(null)}
+              className="text-emerald-700 hover:underline cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* =====================================================================
-          SUB-MODULE 3: COMBINED DISCIPLINE & BEHAVIOUR REGISTER
+          SUB-MODULE 4: MULTI-STAGE APPROVAL WORKFLOW (ADD / DROP / SUSPEND MEMBERS)
          ===================================================================== */}
-      {subModule === 'discipline' ? (
+      {subModule === 'requests' ? (
+        <div className="space-y-4">
+          <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 shadow-xs space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                  3-Stage Member Lifecycle Approval Workflow ({currentRole})
+                </span>
+                <h2 className="text-base font-bold text-white mt-0.5">
+                  Add Member, Drop Member (Left School) &amp; Suspension Approval Register
+                </h2>
+                <p className="text-xs text-slate-300 mt-1">
+                  <strong className="text-amber-300">Add / Drop Member:</strong> 1. Transport Assistant raises request &rarr; 2. Transport Coordinator approves with mandatory remarks &rarr; 3. Admin approves (effective only after Admin approval).{' '}
+                  <strong className="text-rose-300">Suspension:</strong> Transport Coordinator raises request &rarr; Effective after Admin approval.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={openNewModal}
+                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{isAdmin ? '+ Add Member' : '+ Raise Add Member Request'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openDropMemberModal()}
+                  className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                  <span>{isAdmin ? 'Drop Member (Left School)' : 'Raise Drop Member Request'}</span>
+                </button>
+                {canInitiateSuspension && (
+                  <button
+                    type="button"
+                    onClick={() => openSuspendMemberModal()}
+                    className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5" />
+                    <span>{isAdmin ? 'Suspend Member' : 'Raise Suspension Request'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSubModule('directory')}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 cursor-pointer"
+                >
+                  &larr; Back to Directory
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={reqFilterType}
+                onChange={e => setReqFilterType(e.target.value as any)}
+                className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Request Type: All ({memberRequests.length})</option>
+                <option value="ADD_MEMBER">Add Member Requests</option>
+                <option value="DROP_MEMBER">Drop Member (Left School)</option>
+                <option value="SUSPEND_MEMBER">Suspension Requests</option>
+              </select>
+
+              <select
+                value={reqFilterStatus}
+                onChange={e => setReqFilterStatus(e.target.value as any)}
+                className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">Stage / Status: All</option>
+                <option value="Pending Coordinator Approval">1. Pending Coordinator Approval</option>
+                <option value="Pending Admin Approval">2. Pending Admin Approval</option>
+                <option value="Approved">3. Final Approved &amp; Applied</option>
+                <option value="Rejected">Rejected</option>
+              </select>
+            </div>
+            <div className="text-xs text-slate-500 font-semibold">
+              Logged in as: <span className="text-slate-900 font-bold">{currentRole}</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase">
+                  <tr>
+                    <th className="py-3.5 px-4">Request ID &amp; Date</th>
+                    <th className="py-3.5 px-3">Type</th>
+                    <th className="py-3.5 px-3">Member &amp; Route Details</th>
+                    <th className="py-3.5 px-3">Raised By &amp; Reason</th>
+                    <th className="py-3.5 px-3">Coordinator Remarks</th>
+                    <th className="py-3.5 px-3">Current Approval Stage</th>
+                    <th className="py-3.5 px-4 text-right">Workflow Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {memberRequests
+                    .filter(r => (reqFilterType === 'all' ? true : r.requestType === reqFilterType))
+                    .filter(r => (reqFilterStatus === 'all' ? true : r.status === reqFilterStatus))
+                    .map(req => {
+                      const canCoordReview =
+                        (currentRole === 'Transport Coordinator' || isAdmin) &&
+                        req.status === 'Pending Coordinator Approval';
+                      const canAdminReview =
+                        isAdmin &&
+                        (req.status === 'Pending Admin Approval' ||
+                          req.status === 'Pending Coordinator Approval');
+                      return (
+                        <tr key={req.id} className="hover:bg-slate-50/80">
+                          <td className="py-3.5 px-4">
+                            <div className="font-mono font-bold text-slate-900">{req.id}</div>
+                            <div className="text-[11px] text-slate-500">{req.requestedAt}</div>
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <span
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase ${
+                                req.requestType === 'ADD_MEMBER'
+                                  ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'
+                                  : req.requestType === 'DROP_MEMBER'
+                                  ? 'bg-rose-50 text-rose-800 border border-rose-200'
+                                  : 'bg-amber-50 text-amber-900 border border-amber-200'
+                              }`}
+                            >
+                              {req.requestType === 'ADD_MEMBER'
+                                ? 'Add Member'
+                                : req.requestType === 'DROP_MEMBER'
+                                ? 'Drop (Left School)'
+                                : 'Suspend Member'}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <div className="font-bold text-slate-900">{req.memberName}</div>
+                            <div className="text-[11px] text-slate-500">
+                              ID: {req.admissionNo || 'New'} &bull; {req.className}-{req.section} &bull; {req.villageName} ({req.routeCode})
+                            </div>
+                            {req.requestType === 'ADD_MEMBER' && req.memberData && (
+                              <div className="text-[10px] text-emerald-700 font-semibold mt-0.5">
+                                Fee: ₹{req.memberData.monthlyFee ?? 0}/mo &bull; Prev Dues: ₹{req.memberData.previousDues ?? 0}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-3 max-w-xs">
+                            <div className="font-semibold text-slate-800">{req.reason}</div>
+                            <div className="text-[10px] text-slate-500 mt-0.5">
+                              By: {req.requestedBy} ({req.requestedByRole})
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-3 max-w-xs">
+                            {req.coordinatorRemarks ? (
+                              <div>
+                                <div className="font-semibold text-sky-900">{req.coordinatorRemarks}</div>
+                                <div className="text-[10px] text-slate-500">
+                                  By {req.coordinatorApprovedBy || 'Coordinator'} on {req.coordinatorApprovedAt}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 italic">Awaiting Coordinator Remarks</span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <span
+                              className={`inline-flex px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                                req.status === 'Approved'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  : req.status === 'Rejected'
+                                  ? 'bg-rose-50 text-rose-800 border-rose-200'
+                                  : req.status === 'Pending Admin Approval'
+                                  ? 'bg-amber-50 text-amber-900 border-amber-300'
+                                  : 'bg-sky-50 text-sky-900 border-sky-200'
+                              }`}
+                            >
+                              {req.status}
+                            </span>
+                            {req.adminRemarks && (
+                              <div className="text-[10px] text-slate-500 mt-1">
+                                Admin: {req.adminRemarks}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                              {canCoordReview && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setCoordReviewReq(req);
+                                      setCoordReviewAction('Approve');
+                                      setCoordReviewRemarks('');
+                                      setCoordReviewError(null);
+                                    }}
+                                    className="px-2.5 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                                  >
+                                    Coordinator Approve + Remarks
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setCoordReviewReq(req);
+                                      setCoordReviewAction('Reject');
+                                      setCoordReviewRemarks('');
+                                      setCoordReviewError(null);
+                                    }}
+                                    className="px-2.5 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 rounded-lg text-[11px] font-bold cursor-pointer"
+                                  >
+                                    Reject
+                                  </button>
+                                </>
+                              )}
+                              {canAdminReview && onAdminReviewMemberRequest && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onAdminReviewMemberRequest(req.id, {
+                                        action: 'Approve',
+                                        remarks: 'Approved by Admin',
+                                      })
+                                    }
+                                    className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer flex items-center gap-1"
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                    <span>Admin Approve</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onAdminReviewMemberRequest(req.id, {
+                                        action: 'Reject',
+                                        remarks: 'Rejected by Admin',
+                                      })
+                                    }
+                                    className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold cursor-pointer flex items-center gap-1"
+                                  >
+                                    <Ban className="w-3.5 h-3.5" />
+                                    <span>Admin Reject</span>
+                                  </button>
+                                </>
+                              )}
+                              {!canCoordReview && !canAdminReview && (
+                                <span className="text-[11px] text-slate-400">
+                                  {req.status === 'Approved'
+                                    ? 'Applied'
+                                    : req.status === 'Rejected'
+                                    ? 'Closed'
+                                    : req.status === 'Pending Coordinator Approval'
+                                    ? 'Waiting for Coordinator'
+                                    : 'Waiting for Admin'}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  {memberRequests.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="py-12 text-center text-slate-400 text-xs">
+                        No Add / Drop / Suspend member approval requests raised yet. Use the buttons above to raise a request.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : subModule === 'discipline' ? (
         <div className="space-y-4">
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
@@ -1826,26 +2256,44 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 />
 
                 <button
-                  onClick={() => {
-                    const first = students[0];
-                    setPrevDuesMemberId(first?.id || '');
-                    setPrevDuesAmount(String(first?.previousDues ?? ''));
-                    setPrevDuesNote(first?.previousDuesRemarks || 'Previous Dues (Old Software)');
-                    setPrevDuesSearch('');
-                    setShowPrevDuesModal(true);
-                  }}
-                  className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                  onClick={() => setSubModule('requests')}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
                 >
-                  <IndianRupee className="w-3.5 h-3.5" />
-                  <span>+ Previous Dues</span>
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  <span>Approvals ({pendingRequestsCount})</span>
                 </button>
+
+                <button
+                  onClick={() => openDropMemberModal()}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                  <span>Drop Member</span>
+                </button>
+
+                {isAdmin && (
+                  <button
+                    onClick={() => {
+                      const first = students[0];
+                      setPrevDuesMemberId(first?.id || '');
+                      setPrevDuesAmount(String(first?.previousDues ?? ''));
+                      setPrevDuesNote(first?.previousDuesRemarks || 'Previous Dues (Old Software)');
+                      setPrevDuesSearch('');
+                      setShowPrevDuesModal(true);
+                    }}
+                    className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                  >
+                    <IndianRupee className="w-3.5 h-3.5" />
+                    <span>+ Previous Dues</span>
+                  </button>
+                )}
 
                 <button
                   onClick={openNewModal}
                   className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Add Member</span>
+                  <span>{isAdmin ? 'Add Member' : 'Request Add Member'}</span>
                 </button>
               </div>
             </div>
@@ -2084,21 +2532,23 @@ export const MembersView: React.FC<MembersViewProps> = ({
                             <Eye className="w-3.5 h-3.5" />
                             <span>Profile</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(s)}
-                            className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-[11px] font-semibold cursor-pointer flex items-center gap-1"
-                            title="Edit Member Details"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                            <span>Edit</span>
-                          </button>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(s)}
+                              className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-[11px] font-semibold cursor-pointer flex items-center gap-1"
+                              title="Edit Member Details (Admin Only)"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                              <span>Edit</span>
+                            </button>
+                          )}
                           {isAdmin && (
                             <button
                               type="button"
                               onClick={() => onDeleteStudent(s.id)}
                               className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
-                              title="Delete Member"
+                              title="Delete Member (Admin Only)"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -2239,17 +2689,19 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   <Gavel className="w-3.5 h-3.5 text-rose-400" />
                   <span>Discipline Irregularity Reporting</span>
                 </button>
-                <button
-                  onClick={() => {
-                    const memberToEdit = activeProfileMember;
-                    setProfileMemberId(null);
-                    openEditModal(memberToEdit);
-                  }}
-                  className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl text-xs border border-slate-700 flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Edit2 className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Edit General Info</span>
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => {
+                      const memberToEdit = activeProfileMember;
+                      setProfileMemberId(null);
+                      openEditModal(memberToEdit);
+                    }}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl text-xs border border-slate-700 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Edit2 className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Edit General Info</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -2286,16 +2738,18 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 <div className="space-y-5">
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-bold text-slate-900">Recorded Member Information</h4>
-                    <button
-                      onClick={() => {
-                        setProfileMemberId(null);
-                        openEditModal(activeProfileMember);
-                      }}
-                      className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold cursor-pointer"
-                    >
-                      <Edit2 className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Edit Info</span>
-                    </button>
+                    {isAdmin && (
+                      <button
+                        onClick={() => {
+                          setProfileMemberId(null);
+                          openEditModal(activeProfileMember);
+                        }}
+                        className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold cursor-pointer"
+                      >
+                        <Edit2 className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Edit Info</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-50 p-5 rounded-2xl border border-slate-200 text-xs">
@@ -4221,6 +4675,239 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl cursor-pointer shadow-xs"
                 >
                   {submitting ? 'Saving...' : 'Save Previous Dues'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          DROP MEMBER (LEFT SCHOOL) FORM & APPROVAL REQUEST MODAL
+         ===================================================================== */}
+      {showDropMemberModal && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full overflow-hidden">
+            <div className="bg-rose-900 text-white px-6 py-4 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-rose-200 font-bold">
+                  {isAdmin
+                    ? 'Direct Admin Action'
+                    : '3-Stage Approval Workflow (Assistant -> Coordinator -> Admin)'}
+                </span>
+                <h3 className="text-base font-bold text-white">
+                  Drop Member (Left School / Discontinue Transport)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDropMemberModal(false)}
+                className="p-1.5 rounded-lg bg-rose-800 text-rose-200 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmDropMemberModal} className="p-6 space-y-4 text-xs">
+              {dropModalError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 font-semibold">
+                  {dropModalError}
+                </div>
+              )}
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
+                <strong>Workflow Rule:</strong> Transport Assistant raises the Drop Member request &rarr; Transport Coordinator approves it with remarks &rarr; Admin approves it. Only after Admin approval is the member marked <strong>Left (Left School)</strong>.
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Search Member</label>
+                <input
+                  type="text"
+                  value={dropMemberSearch}
+                  onChange={e => setDropMemberSearch(e.target.value)}
+                  placeholder="Filter by name, admission no, village..."
+                  className="w-full p-2 border border-slate-300 rounded-xl mb-2"
+                />
+                <label className="block font-bold text-slate-700 mb-1">Select Member to Drop *</label>
+                <select
+                  required
+                  value={dropTargetMemberId}
+                  onChange={e => setDropTargetMemberId(e.target.value)}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-semibold"
+                >
+                  {students
+                    .filter(s => s.transportStatus !== 'Left')
+                    .filter(s => {
+                      if (!dropMemberSearch.trim()) return true;
+                      const q = dropMemberSearch.toLowerCase();
+                      return (
+                        s.name.toLowerCase().includes(q) ||
+                        s.admissionNo.toLowerCase().includes(q) ||
+                        s.villageName.toLowerCase().includes(q)
+                      );
+                    })
+                    .map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.admissionNo}) — {s.class}-{s.section} • {s.villageName} • Route {s.routeCode} • Due: ₹{s.balanceDue}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Effective Leaving Date *</label>
+                <input
+                  type="date"
+                  required
+                  value={dropEffectiveDate}
+                  min={isAdmin ? undefined : todayStr}
+                  max={isAdmin ? undefined : todayStr}
+                  onChange={e => setDropEffectiveDate(e.target.value)}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Reason for Dropping / Leaving School *
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={dropReasonInput}
+                  onChange={e => setDropReasonInput(e.target.value)}
+                  placeholder="Enter reason (e.g. TC issued / Left school / Shifted residence / Own arrangement)..."
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDropMemberModal(false)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl cursor-pointer shadow-xs"
+                >
+                  {submitting
+                    ? 'Submitting...'
+                    : isAdmin
+                    ? 'Confirm Drop Member (Left School)'
+                    : 'Submit Drop Request for Approval'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          COORDINATOR APPROVAL & MANDATORY REMARKS MODAL
+         ===================================================================== */}
+      {coordReviewReq && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-sky-400 font-bold">
+                  Stage 2: Transport Coordinator Review
+                </span>
+                <h3 className="text-base font-bold text-white">
+                  {coordReviewAction === 'Approve'
+                    ? 'Approve & Forward to Admin'
+                    : 'Reject Member Request'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCoordReviewReq(null)}
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async e => {
+                e.preventDefault();
+                if (!coordReviewRemarks.trim()) {
+                  setCoordReviewError('Coordinator remarks are mandatory before forwarding to Admin.');
+                  return;
+                }
+                if (!onCoordinatorReviewMemberRequest) return;
+                setSubmitting(true);
+                try {
+                  await onCoordinatorReviewMemberRequest(coordReviewReq.id, {
+                    action: coordReviewAction,
+                    remarks: coordReviewRemarks.trim(),
+                  });
+                  setCoordReviewReq(null);
+                  setCoordReviewRemarks('');
+                } catch (err: any) {
+                  setCoordReviewError(err.message || 'Failed to save Coordinator review');
+                } finally {
+                  setSubmitting(false);
+                }
+              }}
+              className="p-6 space-y-4 text-xs"
+            >
+              {coordReviewError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 font-semibold">
+                  {coordReviewError}
+                </div>
+              )}
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="font-bold text-slate-900">
+                  {coordReviewReq.requestType}: {coordReviewReq.memberName} ({coordReviewReq.admissionNo || 'New'})
+                </div>
+                <div className="text-slate-600">
+                  Village: {coordReviewReq.villageName} &bull; Route: {coordReviewReq.routeCode}
+                </div>
+                <div className="text-slate-500">Reason: {coordReviewReq.reason}</div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Transport Coordinator Verification Remarks *
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={coordReviewRemarks}
+                  onChange={e => setCoordReviewRemarks(e.target.value)}
+                  placeholder="Enter mandatory Coordinator remarks (seat availability, route verification, dues check)..."
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCoordReviewReq(null)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className={`px-5 py-2 font-bold rounded-xl cursor-pointer shadow-xs text-white ${
+                    coordReviewAction === 'Approve'
+                      ? 'bg-sky-600 hover:bg-sky-700'
+                      : 'bg-rose-600 hover:bg-rose-700'
+                  }`}
+                >
+                  {submitting
+                    ? 'Saving...'
+                    : coordReviewAction === 'Approve'
+                    ? 'Approve & Send to Admin'
+                    : 'Reject Request'}
                 </button>
               </div>
             </form>
