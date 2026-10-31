@@ -394,6 +394,7 @@ export function App() {
         'fees',
         'expenses',
         'vehicles',
+        'accounts',
       ];
       if (!allowedAssistantNavs.includes(normalizedKey)) {
         normalizedKey = 'dashboard';
@@ -402,19 +403,21 @@ export function App() {
         targetSubTab = 'attendance';
       } else if (normalizedKey === 'expenses') {
         targetSubTab = 'expenses';
+      } else if (normalizedKey === 'accounts') {
+        if (
+          targetSubTab !== 'day_book' &&
+          targetSubTab !== 'student_ledger' &&
+          targetSubTab !== 'vehicle_ledger'
+        ) {
+          targetSubTab = 'day_book';
+        }
       } else if (normalizedKey === 'members' && !targetSubTab) {
         targetSubTab = 'all';
       }
     } else if (activeRole === 'Transport Coordinator') {
       if (normalizedKey === 'staff' && targetSubTab === 'payroll') {
         targetSubTab = 'employees';
-      } else if (
-        normalizedKey === 'accounts' &&
-        (targetSubTab === 'vouchers' ||
-          targetSubTab === 'trial_balance' ||
-          targetSubTab === 'vehicle_ledger' ||
-          targetSubTab === 'income')
-      ) {
+      } else if (normalizedKey === 'accounts' && !targetSubTab) {
         targetSubTab = 'day_book';
       }
     }
@@ -1415,6 +1418,7 @@ export function App() {
                       ? 'trial_balance'
                       : 'day_book'
                   }
+                  onTabChange={(tab) => setActiveSubTab(tab)}
                   accounts={accounts}
                   vouchers={vouchers}
                   vehicles={vehicles}
@@ -1429,6 +1433,7 @@ export function App() {
                   onDeleteIncomeHead={handleDeleteIncomeHead}
                   onAddIncome={handleAddOtherIncome}
                   onDeleteIncome={handleDeleteOtherIncome}
+                  onDeleteExpense={handleDeleteExpense}
                   onCreateVoucher={handleCreateVoucher}
                 />
               )}

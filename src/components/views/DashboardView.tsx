@@ -325,6 +325,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>Receive Resume</span>
             </button>
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-800/80">
+            <button
+              onClick={() => onNavigate('accounts' as any, 'day_book')}
+              className="py-2 px-3 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 font-bold text-xs rounded-xl border border-indigo-400/30 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <IndianRupee className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>Print / View Day Book (View Only)</span>
+            </button>
+            <button
+              onClick={() => onNavigate('accounts' as any, 'student_ledger')}
+              className="py-2 px-3 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 font-bold text-xs rounded-xl border border-indigo-400/30 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Users className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Member Fee Ledger (View Only)</span>
+            </button>
+            <button
+              onClick={() => onNavigate('accounts' as any, 'vehicle_ledger')}
+              className="py-2 px-3 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 font-bold text-xs rounded-xl border border-indigo-400/30 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Bus className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span>Vehicle Cost Ledger (View Only)</span>
+            </button>
+          </div>
         </div>
 
         {/* Assistant 4-Card Field KPI Grid */}
