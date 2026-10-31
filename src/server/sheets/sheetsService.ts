@@ -69,6 +69,7 @@ export interface SheetsConnectionStatus {
   cellUsageEstimate: number;
   totalTabs: number;
   provisionedTabs?: string[];
+  tabList?: { title: string; headersCount: number; rowCount: number }[];
   lastError: string | null;
   activeWriterQueueLength: number;
 }
@@ -3374,6 +3375,19 @@ export class SheetsDatabaseManager {
       if (Number(st.balanceDue) !== recalculatedDue) {
         st.balanceDue = recalculatedDue;
         changed = true;
+      }
+    }
+
+    // Clear any stale inTime / outTime on trips whose status is still Ready or Planned
+    for (const tr of this.trips) {
+      if (tr.status === 'Ready' || tr.status === 'Planned') {
+        if (tr.inTime || tr.outTime) {
+          tr.inTime = undefined;
+          tr.outTime = undefined;
+          tr.inStrength = undefined;
+          tr.outStrength = undefined;
+          changed = true;
+        }
       }
     }
 
@@ -9609,13 +9623,35 @@ export class SheetsDatabaseManager {
 
       if (!rec) throw new Error('Record not found');
 
+      const tripForValidation = this.trips.find(t => t.id === rec!.tripId);
       if (source === 'driver') {
+        if (
+          !tripForValidation ||
+          !tripForValidation.inTime ||
+          tripForValidation.status === 'Ready' ||
+          tripForValidation.status === 'Planned'
+        ) {
+          throw new Error(
+            'Arrival attendance cannot be marked without marking Arrival (In) Time first.'
+          );
+        }
         rec.driverStatus = value as any;
         if (reason !== undefined) {
           rec.resolutionReason = reason;
           rec.notes = reason;
         }
       } else if (source === 'assistant') {
+        if (
+          !tripForValidation ||
+          !tripForValidation.outTime ||
+          (tripForValidation.status !== 'Departed' &&
+            tripForValidation.status !== 'Completed' &&
+            tripForValidation.status !== 'Verified')
+        ) {
+          throw new Error(
+            'Departure attendance cannot be marked without marking Departure (Out) Time first.'
+          );
+        }
         rec.assistantStatus = value as any;
         if (reason !== undefined) {
           rec.resolutionReason = reason;
@@ -10040,8 +10076,11 @@ export class SheetsDatabaseManager {
   }
 
   // --- Staff Attendance, Holidays, Advances & Monthly Payroll ---
-  public getStaffAttendance() {
-    return this.staffAttendance;
+  public getStaffAttendance(date?: string, month?: string) {
+    let list = [...this.staffAttendance];
+    if (date) list = list.filter(a => a.date === date);
+    if (month) list = list.filter(a => a.date.startsWith(month));
+    return list;
   }
 
   public async markStaffAttendance(payload: {
@@ -10164,7 +10203,8 @@ export class SheetsDatabaseManager {
     });
   }
 
-  public getStaffPayrolls() {
+  public getStaffPayrolls(month?: string) {
+    if (month) return this.staffPayrolls.filter(p => p.month === month);
     return this.staffPayrolls;
   }
 

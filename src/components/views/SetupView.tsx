@@ -19,6 +19,7 @@ interface SetupViewProps {
   onUpdateConfig: (newCfg: Partial<SchoolConfig>) => Promise<any>;
   onProvisionSheets: () => Promise<any>;
   onSyncSheets: () => Promise<any>;
+  onConfigureCredentials?: (creds: any) => Promise<any>;
 }
 
 export const SetupView: React.FC<SetupViewProps> = ({

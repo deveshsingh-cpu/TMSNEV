@@ -476,7 +476,7 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                 ]}
               />
               <button
-                onClick={() => handleOpenFuelModal()}
+                onClick={() => handleOpenGiveFuelAdvance()}
                 className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
               >
                 <Plus className="w-4 h-4" />

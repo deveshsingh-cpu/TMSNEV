@@ -64,7 +64,23 @@ import {
   MemberLifecycleRequest,
   SessionMonthCode,
 } from './types/index.js';
-import { Bus, RefreshCw, AlertCircle, CheckCircle2, Shield, LogOut, KeyRound, UserCheck } from 'lucide-react';
+import {
+  Bus,
+  RefreshCw,
+  AlertCircle,
+  CheckCircle2,
+  Shield,
+  LogOut,
+  KeyRound,
+  UserCheck,
+  Smartphone,
+  Download,
+  Copy,
+  Check,
+  ExternalLink,
+  X,
+  QrCode,
+} from 'lucide-react';
 
 const AUTH_STORAGE_KEY = 'tms_authenticated_user_v2';
 
@@ -87,6 +103,45 @@ export function App() {
   const [unauthScreen, setUnauthScreen] = useState<'public_website' | 'transport_login'>('public_website');
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Android PWA / APK Installer State
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isAndroidModalOpen, setIsAndroidModalOpen] = useState<boolean>(false);
+  const [isAppInstalled, setIsAppInstalled] = useState<boolean>(false);
+  const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
+
+  useEffect(() => {
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (window.navigator as any).standalone === true;
+    setIsAppInstalled(isStandalone);
+
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    const handleAppInstalled = () => {
+      setIsAppInstalled(true);
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  const handleInstallAndroidApp = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const choiceResult = await deferredPrompt.userChoice;
+      if (choiceResult?.outcome === 'accepted') {
+        setDeferredPrompt(null);
+      }
+    }
+  };
 
   const activeRole: UserRole = currentUser?.role || 'Admin';
   const isAdmin = activeRole === 'Admin';
@@ -626,13 +681,20 @@ export function App() {
     requestType: 'ADD_MEMBER' | 'DROP_MEMBER' | 'SUSPEND_MEMBER';
     memberId?: string;
     memberData?: Partial<StudentMember>;
+    memberPayload?: Partial<StudentMember>;
     reason?: string;
+    requestReason?: string;
     effectiveDate?: string;
+    leavingDate?: string;
     requestedBy?: string;
     requestedByRole?: UserRole;
   }) => {
     const res = await api.createMemberRequest({
-      ...payload,
+      requestType: payload.requestType,
+      memberId: payload.memberId,
+      memberPayload: payload.memberPayload || payload.memberData,
+      requestReason: payload.requestReason || payload.reason || 'Member lifecycle request',
+      leavingDate: payload.leavingDate || payload.effectiveDate,
       requestedBy: payload.requestedBy || currentUser?.fullName || activeRole,
       requestedByRole: payload.requestedByRole || activeRole,
     });
@@ -646,11 +708,13 @@ export function App() {
       action: 'Approve' | 'Reject';
       remarks: string;
       reviewedBy?: string;
+      coordinatorName?: string;
     }
   ) => {
     const res = await api.coordinatorReviewMemberRequest(id, {
-      ...payload,
-      reviewedBy: payload.reviewedBy || currentUser?.fullName || 'Transport Coordinator',
+      action: payload.action,
+      remarks: payload.remarks,
+      coordinatorName: payload.coordinatorName || payload.reviewedBy || currentUser?.fullName || 'Transport Coordinator',
     });
     await loadAllData();
     return res;
@@ -662,11 +726,13 @@ export function App() {
       action: 'Approve' | 'Reject';
       remarks?: string;
       approvedBy?: string;
+      adminName?: string;
     }
   ) => {
     const res = await api.adminReviewMemberRequest(id, {
-      ...payload,
-      approvedBy: payload.approvedBy || currentUser?.fullName || 'Admin',
+      action: payload.action,
+      remarks: payload.remarks,
+      adminName: payload.adminName || payload.approvedBy || currentUser?.fullName || 'Admin',
     });
     await loadAllData();
     return res;
@@ -1006,6 +1072,16 @@ export function App() {
                 {activeRole}
               </span>
             </div>
+
+            {/* Android App / APK Installer Button */}
+            <button
+              onClick={() => setIsAndroidModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer shadow-2xs"
+              title="Install Android App (WebAPK) or Download Android APK Package"
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>{isAppInstalled ? 'Android App Active' : 'Android App / APK'}</span>
+            </button>
 
             {/* Admin Quick Button: Manage Users & Passwords */}
             {isAdmin && (
@@ -1393,6 +1469,153 @@ export function App() {
           )}
         </main>
       </div>
+
+      {/* Android App (WebAPK) & Standalone APK Installer Modal */}
+      {isAndroidModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-xl w-full overflow-hidden">
+            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
+                  <Smartphone className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold">Install Android App &amp; APK Package</h3>
+                  <p className="text-xs text-slate-300">
+                    Install Narendra Edu Valley Transit ERP on any Android smartphone or tablet
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsAndroidModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs text-slate-700">
+              {/* Option 1: Direct 1-Tap Android WebAPK Install (Recommended) */}
+              <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded-md bg-emerald-700 text-white text-[10px] font-bold uppercase tracking-wider mb-1">
+                      Option 1 • Direct Android WebAPK (No Unknown-Sources Warning)
+                    </span>
+                    <h4 className="text-sm font-bold text-slate-900">
+                      1-Tap Native Android App Installation
+                    </h4>
+                    <p className="text-slate-600 mt-0.5">
+                      Android Chrome automatically compiles and installs this app as a signed Android WebAPK in your phone&apos;s app drawer with full-screen standalone mode and automatic live updates.
+                    </p>
+                  </div>
+                </div>
+
+                {deferredPrompt ? (
+                  <button
+                    onClick={handleInstallAndroidApp}
+                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Install Android App Now (1-Tap)</span>
+                  </button>
+                ) : (
+                  <div className="bg-white/90 rounded-lg p-3 border border-emerald-200 text-slate-700 space-y-1.5">
+                    <p className="font-bold text-slate-900">How to install directly on any Android device:</p>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-700">
+                      <li>Open the app link below in <strong>Google Chrome</strong> on your Android phone.</li>
+                      <li>Tap the <strong>⋮ (Three Dots Menu)</strong> at the top-right corner of Chrome.</li>
+                      <li>Tap <strong>&quot;Install app&quot;</strong> (or <strong>&quot;Add to Home screen&quot;</strong>) and confirm.</li>
+                    </ol>
+                  </div>
+                )}
+              </div>
+
+              {/* Shareable App URL + QR Code for Android Phones */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
+                <div className="bg-white p-2 rounded-xl border border-slate-200 shrink-0">
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
+                      window.location.origin
+                    )}`}
+                    alt="Scan QR to open on Android"
+                    className="w-28 h-28 rounded-lg"
+                  />
+                </div>
+                <div className="flex-1 space-y-2 w-full">
+                  <div className="flex items-center gap-1.5 font-bold text-slate-900 text-xs">
+                    <QrCode className="w-4 h-4 text-slate-700" />
+                    <span>Scan QR Code or Copy Link for Android Device</span>
+                  </div>
+                  <p className="text-slate-600">
+                    Scan with your Android camera or share this URL on WhatsApp to open and install immediately:
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={window.location.origin}
+                      className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white font-mono text-[11px] text-slate-800"
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(window.location.origin);
+                        setCopiedUrl(true);
+                        setTimeout(() => setCopiedUrl(false), 2500);
+                      }}
+                      className="px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                    >
+                      {copiedUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedUrl ? 'Copied' : 'Copy Link'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Option 2: Download Standalone .APK File via PWABuilder */}
+              <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2.5">
+                <div>
+                  <span className="inline-block px-2 py-0.5 rounded-md bg-amber-500 text-slate-950 text-[10px] font-bold uppercase tracking-wider mb-1">
+                    Option 2 • Standalone .APK File Download
+                  </span>
+                  <h4 className="text-sm font-bold text-slate-900">
+                    Generate &amp; Download Signed Android `.apk` File
+                  </h4>
+                  <p className="text-slate-600 mt-0.5">
+                    This app is configured with a verified Web App Manifest (`/manifest.webmanifest`), 512×512 maskable icons, and Service Worker (`/sw.js`). Click below to package and download the standalone `.apk` file via Microsoft PWABuilder for offline distribution on WhatsApp or USB:
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                  <a
+                    href={`https://www.pwabuilder.com/reportcard?site=${encodeURIComponent(
+                      window.location.origin
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-2 shadow-2xs"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Open APK Packager (Download .APK for {window.location.hostname})</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  On PWABuilder, click <strong>&quot;Package for stores&quot; → &quot;Android&quot; → &quot;Download Package&quot;</strong> to get the ready-to-install `.apk` file.
+                </p>
+              </div>
+            </div>
+
+            <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end">
+              <button
+                onClick={() => setIsAndroidModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

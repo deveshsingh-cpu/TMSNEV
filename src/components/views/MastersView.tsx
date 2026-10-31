@@ -240,7 +240,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
     setUserFormRole(u.role);
     setUserFormCampus(u.campus || 'All Campuses');
     setUserFormMobile(u.mobile || '');
-    setUserFormStatus(u.status);
+    setUserFormStatus(u.status === 'Active' ? 'Active' : 'Disabled');
     setMasterError(null);
   };
 
@@ -2828,7 +2828,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     {
                       header: 'Total Session Fees',
                       accessor: (v) =>
-                        v.monthlyRate *
+                        (v.monthlyRate || 0) *
                         (v.selectedMonths && v.selectedMonths.length > 0
                           ? v.selectedMonths.length
                           : sessionGlobalMonths.length),

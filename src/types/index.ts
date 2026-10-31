@@ -3,15 +3,20 @@ export type CampusId = string;
 export type NavigationTab =
   | 'dashboard'
   | 'students'
+  | 'members'
   | 'staff'
+  | 'resumes'
+  | 'routes'
   | 'vehicles'
   | 'daily_ops'
+  | 'operations'
   | 'fees'
   | 'expenses'
   | 'accounts'
   | 'masters'
   | 'reports'
-  | 'sheets_sync';
+  | 'sheets_sync'
+  | 'setup';
 
 export interface CampusMaster {
   id: string;
@@ -149,7 +154,7 @@ export interface SystemUser {
   campus?: string;
   mobile?: string;
   email?: string;
-  status: 'Active' | 'Disabled';
+  status: 'Active' | 'Disabled' | 'Inactive';
   lastLoginAt?: string;
   createdAt: string;
 }
@@ -223,17 +228,24 @@ export interface MemberLifecycleRequest {
   requestedByRole: UserRole;
   requestedAt: string;
   requestReason: string;
+  reason?: string;
   memberId?: string;
   memberAdmissionNo?: string;
+  admissionNo?: string;
   memberName: string;
   memberClassSection?: string;
+  className?: string;
+  section?: string;
   memberCampus?: string;
   memberVillageName?: string;
+  villageName?: string;
   memberStopName?: string;
   memberRouteCode?: string;
+  routeCode?: string;
   memberMonthlyFee?: number;
   leavingDate?: string;
   memberPayload?: Partial<StudentMember>;
+  memberData?: Partial<StudentMember>;
   coordinatorApprovedBy?: string;
   coordinatorApprovedAt?: string;
   coordinatorRemarks?: string;
@@ -265,6 +277,7 @@ export interface Vehicle {
   assignedHelperId?: string;
   assignedHelperName?: string;
   nickname?: string;
+  vehicleCode?: string;
   baselineMileageKmPerLitre?: number;
   expectedMileageKmPerL?: number;
   contractTerms?: string;
@@ -278,6 +291,12 @@ export interface Vehicle {
   rentAgreementDoc?: DocumentAttachment;
   ownerAadhaarDoc?: DocumentAttachment;
   ownerPanDoc?: DocumentAttachment;
+  rentAgreementAttachment?: string;
+  rentAgreementFileName?: string;
+  ownerAadhaarAttachment?: string;
+  ownerAadhaarFileName?: string;
+  ownerPanAttachment?: string;
+  ownerPanFileName?: string;
 }
 
 export interface VehicleAssignmentRecord {
@@ -321,6 +340,8 @@ export interface Route {
   stops?: TransportStop[];
   departureTime?: string;
   arrivalTime?: string;
+  driverName?: string;
+  assistantName?: string;
 }
 
 export type RouteMaster = Route;
@@ -393,6 +414,7 @@ export interface StudentMember {
   villageName: string;
   pickupDropStopId: string; // Combined pickup & drop point
   pickupDropStopName: string;
+  pickupStopName?: string;
   morningStopId?: string;
   morningStopName?: string;
   eveningStopId?: string;
@@ -816,10 +838,12 @@ export interface FuelAdvanceAndPurchase {
   advanceAmount: number;
   advanceGiven?: number;
   litresPurchased: number;
+  litres?: number;
   ratePerLitre: number;
   fuelRate?: number;
   actualBillAmount: number;
   fuelBillAmount?: number;
+  totalAmount?: number;
   cashReturned?: number;
   unsettledAdvance?: number;
   odometerReading: number;

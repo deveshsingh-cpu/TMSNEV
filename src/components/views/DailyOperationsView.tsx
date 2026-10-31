@@ -379,8 +379,17 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       activeBoardStatus(a) !== 'Holiday'
   ).length;
 
-  const isArrivalTimeMarked = Boolean(matchedTripForRouteAndDate?.inTime);
-  const isDepartureTimeMarked = Boolean(matchedTripForRouteAndDate?.outTime);
+  const isArrivalTimeMarked = Boolean(
+    matchedTripForRouteAndDate?.inTime &&
+      matchedTripForRouteAndDate?.status !== 'Ready' &&
+      matchedTripForRouteAndDate?.status !== 'Planned'
+  );
+  const isDepartureTimeMarked = Boolean(
+    matchedTripForRouteAndDate?.outTime &&
+      (matchedTripForRouteAndDate?.status === 'Departed' ||
+        matchedTripForRouteAndDate?.status === 'Completed' ||
+        matchedTripForRouteAndDate?.status === 'Verified')
+  );
 
   // Separate Arrival vs Departure counts for current route/trip
   const arrivalMarkedRecordsCount = tripAttendanceList.filter(

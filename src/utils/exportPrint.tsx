@@ -180,12 +180,21 @@ export function buildPrintableHtml<T>(options: {
 </html>`;
 }
 
-export function openHtmlPrintPreview(options: {
-  title: string;
-  subtitle?: string;
-  html: string;
-  filename?: string;
-}) {
+export function openHtmlPrintPreview(
+  optionsOrHtml:
+    | {
+        title: string;
+        subtitle?: string;
+        html: string;
+        filename?: string;
+      }
+    | string,
+  legacyTitle?: string
+) {
+  const options =
+    typeof optionsOrHtml === 'string'
+      ? { html: optionsOrHtml, title: legacyTitle || 'Document Preview' }
+      : optionsOrHtml;
   const { title, subtitle, html, filename } = options;
 
   // Create an immediate, visible full-screen Print Preview Modal in DOM so it works reliably even in sandboxed iframes
@@ -389,6 +398,7 @@ export function PrintExportToolbar<T>({
 
 export interface FilterPopoverProps {
   isFiltered?: boolean;
+  activeCount?: number;
   onReset?: () => void;
   label?: string;
   children: React.ReactNode;
@@ -396,11 +406,13 @@ export interface FilterPopoverProps {
 
 export const FilterPopover: React.FC<FilterPopoverProps> = ({
   isFiltered = false,
+  activeCount,
   onReset,
   label = 'Filters',
   children,
 }) => {
   const [open, setOpen] = useState(false);
+  const effectiveFiltered = isFiltered || (activeCount !== undefined && activeCount > 0);
 
   return (
     <div className="relative inline-block shrink-0">
@@ -408,15 +420,15 @@ export const FilterPopover: React.FC<FilterPopoverProps> = ({
         type="button"
         onClick={() => setOpen((prev) => !prev)}
         className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
-          isFiltered || open
+          effectiveFiltered || open
             ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
             : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 shadow-2xs'
         }`}
         title="Filter records"
       >
-        <SlidersHorizontal className={`w-3.5 h-3.5 ${isFiltered || open ? 'text-amber-400' : 'text-slate-600'}`} />
+        <SlidersHorizontal className={`w-3.5 h-3.5 ${effectiveFiltered || open ? 'text-amber-400' : 'text-slate-600'}`} />
         <span>{label}</span>
-        {isFiltered && (
+        {effectiveFiltered && (
           <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
         )}
       </button>
@@ -434,7 +446,7 @@ export const FilterPopover: React.FC<FilterPopoverProps> = ({
                 <span>Filter Options</span>
               </span>
               <div className="flex items-center gap-2">
-                {isFiltered && onReset && (
+                {effectiveFiltered && onReset && (
                   <button
                     type="button"
                     onClick={() => {
