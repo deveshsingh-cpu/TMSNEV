@@ -243,7 +243,42 @@ export const StaffView: React.FC<StaffViewProps> = ({
   const isDriver = editingEmployee?.isDriver ?? editingEmployee?.designation?.toLowerCase().includes('driver');
   const documentsList = editingEmployee?.documents || [];
 
-  // --- Attendance Helpers ---
+  // --- Attendance Helpers & Draft / Saved Record Protection ---
+  const [staffDraftAttendance, setStaffDraftAttendance] = useState<Record<string, StaffAttendanceStatus>>({});
+  const [isSavingStaffAttendance, setIsSavingStaffAttendance] = useState(false);
+  const [staffFeedback, setStaffFeedback] = useState<string | null>(null);
+  const [staffSavedChangeModal, setStaffSavedChangeModal] = useState<{
+    emp: Employee;
+    savedStatus: StaffAttendanceStatus;
+    newStatus: StaffAttendanceStatus;
+  } | null>(null);
+  const [staffLockedModal, setStaffLockedModal] = useState<{
+    emp: Employee;
+    savedStatus: StaffAttendanceStatus;
+  } | null>(null);
+
+  const staffTouchStartRef = React.useRef<{ x: number; y: number } | null>(null);
+  const staffTouchMovedRef = React.useRef<boolean>(false);
+
+  const handleStaffTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches?.[0];
+    if (t) {
+      staffTouchStartRef.current = { x: t.clientX, y: t.clientY };
+      staffTouchMovedRef.current = false;
+    }
+  };
+
+  const handleStaffTouchMove = (e: React.TouchEvent) => {
+    const t = e.touches?.[0];
+    if (t && staffTouchStartRef.current) {
+      const dx = Math.abs(t.clientX - staffTouchStartRef.current.x);
+      const dy = Math.abs(t.clientY - staffTouchStartRef.current.y);
+      if (dx > 6 || dy > 6) {
+        staffTouchMovedRef.current = true;
+      }
+    }
+  };
+
   const isHolidayDate = (dateStr: string) => {
     const d = new Date(dateStr + 'T00:00:00');
     const isSunday = d.getDay() === 0;
@@ -251,12 +286,101 @@ export const StaffView: React.FC<StaffViewProps> = ({
     return { isHoliday: isSunday || !!explicitHoliday, occasion: explicitHoliday?.occasion || (isSunday ? 'Sunday Weekly Off' : '') };
   };
 
+  const getSavedStaffRecord = (empId: string, dateStr: string): StaffAttendanceRecord | undefined =>
+    staffAttendance.find(a => a.employeeId === empId && a.date === dateStr);
+
   const getEmployeeStatusForDate = (empId: string, dateStr: string): StaffAttendanceStatus => {
-    const explicit = staffAttendance.find(a => a.employeeId === empId && a.date === dateStr);
+    const draftVal = staffDraftAttendance[`${dateStr}:${empId}`];
+    if (draftVal) return draftVal;
+    const explicit = getSavedStaffRecord(empId, dateStr);
     if (explicit) return explicit.status;
     const hol = isHolidayDate(dateStr);
     if (hol.isHoliday) return 'H';
     return 'P';
+  };
+
+  const handleStaffAttendanceButtonClick = (emp: Employee, newStatus: StaffAttendanceStatus) => {
+    if (staffTouchMovedRef.current) {
+      staffTouchMovedRef.current = false;
+      return;
+    }
+    const key = `${attDate}:${emp.id}`;
+    const savedRec = getSavedStaffRecord(emp.id, attDate);
+
+    if (savedRec) {
+      if (newStatus === savedRec.status) {
+        setStaffDraftAttendance(prev => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        return;
+      }
+      if (!isAdmin) {
+        setStaffLockedModal({ emp, savedStatus: savedRec.status });
+        return;
+      }
+      setStaffSavedChangeModal({
+        emp,
+        savedStatus: savedRec.status,
+        newStatus,
+      });
+      return;
+    }
+
+    setStaffDraftAttendance(prev => ({
+      ...prev,
+      [key]: newStatus,
+    }));
+  };
+
+  const handleSaveStaffAttendanceBatch = async () => {
+    if (!onMarkStaffAttendance) return;
+    const toSave = attFilteredEmployees.filter(emp => {
+      const key = `${attDate}:${emp.id}`;
+      const draftVal = staffDraftAttendance[key];
+      const savedRec = getSavedStaffRecord(emp.id, attDate);
+      if (draftVal) {
+        return !savedRec || savedRec.status !== draftVal;
+      }
+      return false;
+    });
+
+    if (toSave.length === 0) return;
+
+    setIsSavingStaffAttendance(true);
+    try {
+      for (const emp of toSave) {
+        const key = `${attDate}:${emp.id}`;
+        const st = staffDraftAttendance[key];
+        if (st) {
+          await onMarkStaffAttendance(emp.id, attDate, st);
+        }
+      }
+      setStaffDraftAttendance(prev => {
+        const next = { ...prev };
+        for (const emp of toSave) {
+          delete next[`${attDate}:${emp.id}`];
+        }
+        return next;
+      });
+      setStaffFeedback(`✓ Saved & Finalized Staff Attendance for ${toSave.length} employee(s) on ${attDate}.`);
+      setTimeout(() => setStaffFeedback(null), 4000);
+    } finally {
+      setIsSavingStaffAttendance(false);
+    }
+  };
+
+  const handleDiscardStaffDraft = () => {
+    setStaffDraftAttendance(prev => {
+      const next = { ...prev };
+      for (const emp of attFilteredEmployees) {
+        delete next[`${attDate}:${emp.id}`];
+      }
+      return next;
+    });
+    setStaffFeedback('Discarded unsaved staff attendance changes.');
+    setTimeout(() => setStaffFeedback(null), 3500);
   };
 
   const getDaysInYearMonth = (ym: string): { count: number; dates: string[] } => {
@@ -598,89 +722,336 @@ export const StaffView: React.FC<StaffViewProps> = ({
           </div>
 
           {/* MODE 1: DAILY STAFF ATTENDANCE MARKING */}
-          {attViewMode === 'daily' && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase">
-                      <th className="py-3 px-4">Emp Code</th>
-                      <th className="py-3 px-4">Employee Name</th>
-                      <th className="py-3 px-3">Designation</th>
-                      <th className="py-3 px-3">Campus</th>
-                      <th className="py-3 px-3">Current Status ({attDate})</th>
-                      <th className="py-3 px-4 text-right">Mark Attendance (P / L / A / H)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {attFilteredEmployees.map(emp => {
-                      const st = getEmployeeStatusForDate(emp.id, attDate);
-                      return (
-                        <tr key={emp.id} className="hover:bg-slate-50/80">
-                          <td className="py-3 px-4 font-mono font-bold text-slate-700">{emp.employeeCode}</td>
-                          <td className="py-3 px-4 font-bold text-slate-900">{emp.name}</td>
-                          <td className="py-3 px-3 font-medium text-slate-700">{emp.designation}</td>
-                          <td className="py-3 px-3">
-                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold text-[11px]">
-                              {emp.campus || 'Sr'}
-                            </span>
-                          </td>
-                          <td className="py-3 px-3">
-                            <span
-                              className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
-                                st === 'P'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : st === 'L'
-                                  ? 'bg-amber-100 text-amber-900'
-                                  : st === 'H'
-                                  ? 'bg-indigo-100 text-indigo-800'
-                                  : 'bg-rose-100 text-rose-800'
-                              }`}
-                            >
-                              {st === 'P'
-                                ? 'P — Present'
-                                : st === 'L'
-                                ? 'L — Casual Leave'
-                                : st === 'H'
-                                ? 'H — Paid Holiday'
-                                : 'A — Unauthorised Absent'}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-right">
-                            <div className="inline-flex items-center gap-1.5">
-                              {(
-                                [
-                                  { code: 'P', label: 'P (Present)', activeCls: 'bg-emerald-600 text-white' },
-                                  { code: 'L', label: 'L (Leave)', activeCls: 'bg-amber-500 text-slate-950' },
-                                  { code: 'A', label: 'A (Absent)', activeCls: 'bg-rose-600 text-white' },
-                                  { code: 'H', label: 'H (Holiday)', activeCls: 'bg-indigo-600 text-white' },
-                                ] as const
-                              ).map(btn => (
-                                <button
-                                  key={btn.code}
-                                  type="button"
-                                  onClick={() =>
-                                    onMarkStaffAttendance && onMarkStaffAttendance(emp.id, attDate, btn.code)
-                                  }
-                                  className={`px-2.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
-                                    st === btn.code
-                                      ? `${btn.activeCls} shadow-2xs`
-                                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                                  }`}
-                                >
-                                  {btn.label}
-                                </button>
-                              ))}
-                            </div>
-                          </td>
+          {attViewMode === 'daily' && (() => {
+            const unsavedStaffList = attFilteredEmployees.filter(emp => {
+              const draftVal = staffDraftAttendance[`${attDate}:${emp.id}`];
+              const savedRec = getSavedStaffRecord(emp.id, attDate);
+              return Boolean(draftVal && (!savedRec || savedRec.status !== draftVal));
+            });
+            const savedStaffCount = attFilteredEmployees.filter(emp =>
+              Boolean(getSavedStaffRecord(emp.id, attDate))
+            ).length;
+
+            return (
+              <div className="space-y-4">
+                {staffFeedback && (
+                  <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between">
+                    <span>{staffFeedback}</span>
+                    <button
+                      type="button"
+                      onClick={() => setStaffFeedback(null)}
+                      className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {/* Save Staff Attendance Action Bar */}
+                <div
+                  className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                    unsavedStaffList.length > 0
+                      ? 'bg-amber-50 border-amber-300'
+                      : 'bg-white border-slate-200'
+                  }`}
+                >
+                  <div className="text-xs font-medium text-slate-700">
+                    {unsavedStaffList.length > 0 ? (
+                      <span className="font-bold text-amber-950">
+                        ● {unsavedStaffList.length} Unsaved Staff Selection(s) — click{' '}
+                        <strong>Save Attendance</strong> to finalize.
+                      </span>
+                    ) : (
+                      <span>
+                        Saved &amp; Finalized ({attDate}): <strong>{savedStaffCount}</strong> of{' '}
+                        <strong>{attFilteredEmployees.length}</strong> staff member(s)
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {savedStaffCount < attFilteredEmployees.length && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStaffDraftAttendance(prev => {
+                            const next = { ...prev };
+                            for (const emp of attFilteredEmployees) {
+                              if (!getSavedStaffRecord(emp.id, attDate) && !next[`${attDate}:${emp.id}`]) {
+                                next[`${attDate}:${emp.id}`] = 'P';
+                              }
+                            }
+                            return next;
+                          });
+                        }}
+                        className="px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs cursor-pointer"
+                      >
+                        Mark Unsaved as Present (P)
+                      </button>
+                    )}
+                    {unsavedStaffList.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isSavingStaffAttendance}
+                        onClick={handleDiscardStaffDraft}
+                        className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer"
+                      >
+                        Back / Discard
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={unsavedStaffList.length === 0 || isSavingStaffAttendance}
+                      onClick={handleSaveStaffAttendanceBatch}
+                      className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
+                        unsavedStaffList.length > 0
+                          ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
+                          : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                      }`}
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>
+                        {isSavingStaffAttendance
+                          ? 'Saving...'
+                          : unsavedStaffList.length > 0
+                          ? `Save Attendance (${unsavedStaffList.length})`
+                          : 'Save Attendance'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden"
+                  onTouchStart={handleStaffTouchStart}
+                  onTouchMove={handleStaffTouchMove}
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase">
+                          <th className="py-3 px-4">Emp Code</th>
+                          <th className="py-3 px-4">Employee Name</th>
+                          <th className="py-3 px-3">Designation</th>
+                          <th className="py-3 px-3">Campus</th>
+                          <th className="py-3 px-3">Current Status ({attDate})</th>
+                          <th className="py-3 px-4 text-right">Mark Attendance (P / L / A / H)</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {attFilteredEmployees.map(emp => {
+                          const savedRec = getSavedStaffRecord(emp.id, attDate);
+                          const draftVal = staffDraftAttendance[`${attDate}:${emp.id}`];
+                          const isDraftModified = Boolean(
+                            draftVal && (!savedRec || savedRec.status !== draftVal)
+                          );
+                          const st = draftVal || savedRec?.status || (isHolidayDate(attDate).isHoliday ? 'H' : 'P');
+                          const hasSelection = Boolean(draftVal || savedRec);
+
+                          return (
+                            <tr
+                              key={emp.id}
+                              className={`hover:bg-slate-50/80 ${isDraftModified ? 'bg-amber-50/40' : ''}`}
+                            >
+                              <td className="py-3 px-4 font-mono font-bold text-slate-700">{emp.employeeCode}</td>
+                              <td className="py-3 px-4 font-bold text-slate-900">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span>{emp.name}</span>
+                                  {isDraftModified ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                      Unsaved
+                                    </span>
+                                  ) : savedRec ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                      ✓ Saved
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 font-medium text-slate-700">{emp.designation}</td>
+                              <td className="py-3 px-3">
+                                <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold text-[11px]">
+                                  {emp.campus || 'Sr'}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3">
+                                {hasSelection ? (
+                                  <span
+                                    className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                                      st === 'P'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : st === 'L'
+                                        ? 'bg-amber-100 text-amber-900'
+                                        : st === 'H'
+                                        ? 'bg-indigo-100 text-indigo-800'
+                                        : 'bg-rose-100 text-rose-800'
+                                    }`}
+                                  >
+                                    {st === 'P'
+                                      ? 'P — Present'
+                                      : st === 'L'
+                                      ? 'L — Casual Leave'
+                                      : st === 'H'
+                                      ? 'H — Paid Holiday'
+                                      : 'A — Unauthorised Absent'}
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-slate-100 text-slate-500">
+                                    Not Saved Yet
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 text-right">
+                                <div className="inline-flex items-center gap-1.5">
+                                  {(
+                                    [
+                                      { code: 'P', label: 'P (Present)', activeCls: 'bg-emerald-600 text-white' },
+                                      { code: 'L', label: 'L (Leave)', activeCls: 'bg-amber-500 text-slate-950' },
+                                      { code: 'A', label: 'A (Absent)', activeCls: 'bg-rose-600 text-white' },
+                                      { code: 'H', label: 'H (Holiday)', activeCls: 'bg-indigo-600 text-white' },
+                                    ] as const
+                                  ).map(btn => {
+                                    const isSelected = hasSelection && st === btn.code;
+                                    const isLocked = Boolean(savedRec && !isAdmin && !isSelected);
+                                    return (
+                                      <button
+                                        key={btn.code}
+                                        type="button"
+                                        onTouchStart={handleStaffTouchStart}
+                                        onTouchMove={handleStaffTouchMove}
+                                        onClick={() => handleStaffAttendanceButtonClick(emp, btn.code)}
+                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all touch-manipulation select-none ${
+                                          isSelected
+                                            ? `${btn.activeCls} shadow-2xs`
+                                            : isLocked
+                                            ? 'bg-slate-100 text-slate-400 opacity-60'
+                                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                                        }`}
+                                      >
+                                        {btn.label}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Admin Confirmation Modal for Staff Saved Record Change */}
+                {staffSavedChangeModal && (
+                  <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl border border-amber-300 shadow-2xl max-w-md w-full overflow-hidden">
+                      <div className="bg-amber-500 text-slate-950 px-5 py-4 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-5 h-5 text-slate-950 shrink-0" />
+                          <h3 className="text-sm font-black uppercase tracking-wide">
+                            You are trying to change a saved record
+                          </h3>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setStaffSavedChangeModal(null)}
+                          className="text-slate-900 hover:text-slate-950 p-1 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <div className="p-5 space-y-4 text-xs">
+                        <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 space-y-1.5 text-amber-950">
+                          <p className="font-bold text-sm text-slate-900">
+                            You are trying to change a saved attendance record.
+                          </p>
+                          <p>
+                            Staff Member: <strong>{staffSavedChangeModal.emp.name}</strong> (
+                            {staffSavedChangeModal.emp.employeeCode})
+                          </p>
+                          <p>
+                            Saved Status: <strong>{staffSavedChangeModal.savedStatus}</strong> → New Status:{' '}
+                            <strong>{staffSavedChangeModal.newStatus}</strong>
+                          </p>
+                          <p className="pt-1 text-slate-700">
+                            Press <strong>Yes / Continue</strong> to continue with the changes, or{' '}
+                            <strong>Back / Discard</strong> to discard the changes.
+                          </p>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setStaffSavedChangeModal(null)}
+                            className="px-4 py-2 rounded-xl border border-slate-300 bg-white text-slate-800 font-bold text-xs cursor-pointer"
+                          >
+                            Back / Discard
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const { emp, newStatus } = staffSavedChangeModal;
+                              setStaffSavedChangeModal(null);
+                              setStaffDraftAttendance(prev => ({
+                                ...prev,
+                                [`${attDate}:${emp.id}`]: newStatus,
+                              }));
+                            }}
+                            className="px-5 py-2 rounded-xl bg-slate-900 text-amber-400 font-bold text-xs cursor-pointer"
+                          >
+                            Yes / Continue
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Non-Admin Locked Modal for Staff Saved Record */}
+                {staffLockedModal && (
+                  <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl border border-rose-200 shadow-2xl max-w-md w-full overflow-hidden">
+                      <div className="bg-rose-600 text-white px-5 py-4 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-5 h-5 text-white shrink-0" />
+                          <h3 className="text-sm font-black uppercase tracking-wide">
+                            Saved Record Locked — Admin Only
+                          </h3>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setStaffLockedModal(null)}
+                          className="text-white/80 hover:text-white p-1 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <div className="p-5 space-y-4 text-xs">
+                        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 space-y-1.5 text-rose-950">
+                          <p className="font-bold text-sm">
+                            Saved attendance record can be changed by Admin only.
+                          </p>
+                          <p>
+                            Attendance for <strong>{staffLockedModal.emp.name}</strong> (
+                            {staffLockedModal.emp.employeeCode}) is already saved and finalized as{' '}
+                            <strong>{staffLockedModal.savedStatus}</strong>.
+                          </p>
+                        </div>
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => setStaffLockedModal(null)}
+                            className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs cursor-pointer"
+                          >
+                            Back
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* MODE 2: MONTHLY ATTENDANCE REGISTER (P, A, L, H Matrix) */}
           {attViewMode === 'register' && (

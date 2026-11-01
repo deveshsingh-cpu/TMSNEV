@@ -841,10 +841,22 @@ apiRouter.post('/trips/for-route', async (req: Request, res: Response) => {
 apiRouter.get('/trips/:id/attendance', (req: Request, res: Response) => {
   res.json(sheetsDb.getTripAttendance(req.params.id));
 });
+apiRouter.post('/attendance/batch-save', async (req: Request, res: Response) => {
+  try {
+    const { entries, role } = req.body;
+    if (!Array.isArray(entries)) {
+      return res.status(400).json({ error: 'Entries array is required' });
+    }
+    const updated = await sheetsDb.batchSaveAttendanceObservations(entries, role);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 apiRouter.post('/attendance/:id/mark', async (req: Request, res: Response) => {
   try {
-    const { source, value, reason } = req.body;
-    const updated = await sheetsDb.updateAttendanceObservation(req.params.id, source, value, undefined, reason);
+    const { source, value, reason, role } = req.body;
+    const updated = await sheetsDb.updateAttendanceObservation(req.params.id, source, value, undefined, reason, role);
     res.json(updated);
   } catch (err: any) {
     res.status(400).json({ error: err.message });

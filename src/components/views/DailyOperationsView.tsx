@@ -25,6 +25,14 @@ interface DailyOperationsViewProps {
   onSelectTrip: (tripId: string) => void;
   onSelectRouteForDate?: (date: string, routeId: string) => Promise<void>;
   onMarkAttendance: (recordId: string, source: 'driver' | 'assistant', value: string, reason?: string) => Promise<any>;
+  onBatchSaveAttendance?: (
+    entries: Array<{
+      recordId: string;
+      source: 'driver' | 'assistant';
+      value: string;
+      reason?: string;
+    }>
+  ) => Promise<any>;
   onResolveMismatch: (recordId: string, value: string, reason: string) => Promise<any>;
   onVerifyTrip: (
     tripId: string,
@@ -92,6 +100,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   onSelectTrip,
   onSelectRouteForDate,
   onMarkAttendance,
+  onBatchSaveAttendance,
   onVerifyTrip,
   onOpenPrintPack,
   onSaveAbsenteeCall,
@@ -169,10 +178,65 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const [timeRequiredPrompt, setTimeRequiredPrompt] = useState<{
     mode: 'arrival' | 'departure';
     pendingAction?: {
-      type: 'single' | 'all_holiday';
+      type: 'single' | 'all_holiday' | 'mark_pending_present' | 'save_batch';
       rec?: TripAttendanceRecord;
       statusVal?: string;
     };
+  } | null>(null);
+
+  // Touch-slide guard to prevent accidental button activation while scrolling with finger on APK/mobile
+  const touchStartPosRef = React.useRef<{ x: number; y: number } | null>(null);
+  const touchMovedRef = React.useRef<boolean>(false);
+
+  const handleAttendanceTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches?.[0];
+    if (t) {
+      touchStartPosRef.current = { x: t.clientX, y: t.clientY };
+      touchMovedRef.current = false;
+    }
+  };
+
+  const handleAttendanceTouchMove = (e: React.TouchEvent) => {
+    const t = e.touches?.[0];
+    if (t && touchStartPosRef.current) {
+      const dx = Math.abs(t.clientX - touchStartPosRef.current.x);
+      const dy = Math.abs(t.clientY - touchStartPosRef.current.y);
+      if (dx > 6 || dy > 6) {
+        touchMovedRef.current = true;
+      }
+    }
+  };
+
+  // Unsaved Draft Attendance State (finalized only when "Save Attendance" is clicked)
+  const [draftAttendance, setDraftAttendance] = useState<
+    Record<
+      string,
+      {
+        status: string;
+        reason?: string;
+        earlyArrivalConfirmed?: boolean;
+        earlyArrivalRemarks?: string;
+      }
+    >
+  >({});
+  const [isSavingAttendanceBatch, setIsSavingAttendanceBatch] = useState<boolean>(false);
+
+  // Modal when Admin tries to change an already-saved attendance record
+  const [savedRecordChangeModal, setSavedRecordChangeModal] = useState<{
+    mode: 'arrival' | 'departure';
+    actionType: 'single' | 'all_holiday';
+    rec?: TripAttendanceRecord;
+    savedStatus?: string;
+    newStatus?: string;
+    affectedCount?: number;
+  } | null>(null);
+
+  // Modal when non-Admin tries to change an already-saved attendance record
+  const [lockedRecordModal, setLockedRecordModal] = useState<{
+    studentName: string;
+    admissionNo: string;
+    savedStatus: string;
+    mode: 'arrival' | 'departure';
   } | null>(null);
 
   // Strength mismatch remark input in Attendance window
@@ -394,8 +458,45 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     };
   });
 
-  const activeBoardStatus = (rec: TripAttendanceRecord) =>
-    boardMode === 'arrival' ? rec.driverStatus : rec.assistantStatus;
+  const getSavedStatusForMode = (rec: TripAttendanceRecord, mode: 'arrival' | 'departure' = boardMode) =>
+    (mode === 'arrival' ? rec.driverStatus : rec.assistantStatus) || 'Pending';
+
+  const getDraftKey = (recId: string, mode: 'arrival' | 'departure' = boardMode) =>
+    `${mode}:${recId}`;
+
+  const activeBoardStatus = (rec: TripAttendanceRecord) => {
+    const dEntry = draftAttendance[getDraftKey(rec.id, boardMode)];
+    if (dEntry && dEntry.status) return dEntry.status;
+    return getSavedStatusForMode(rec, boardMode);
+  };
+
+  const getEffectiveArrivalStatus = (rec: TripAttendanceRecord) => {
+    const dArr = draftAttendance[getDraftKey(rec.id, 'arrival')];
+    if (dArr && dArr.status) return dArr.status;
+    return rec.driverStatus || 'Pending';
+  };
+
+  const getEffectiveDepartureStatus = (rec: TripAttendanceRecord) => {
+    const dDep = draftAttendance[getDraftKey(rec.id, 'departure')];
+    if (dDep && dDep.status) return dDep.status;
+    return rec.assistantStatus || 'Pending';
+  };
+
+  // Unsaved draft records for current route & boardMode
+  const unsavedDraftEntriesForCurrentBoard = tripAttendanceList.filter((rec) => {
+    const dEntry = draftAttendance[getDraftKey(rec.id, boardMode)];
+    const savedSt = getSavedStatusForMode(rec, boardMode);
+    return Boolean(dEntry && dEntry.status && dEntry.status !== savedSt);
+  });
+
+  const unsavedModifiedSavedRecordsCount = unsavedDraftEntriesForCurrentBoard.filter((rec) => {
+    const savedSt = getSavedStatusForMode(rec, boardMode);
+    return savedSt !== 'Pending';
+  }).length;
+
+  const savedRecordsOnCurrentBoardCount = tripAttendanceList.filter(
+    (rec) => getSavedStatusForMode(rec, boardMode) !== 'Pending'
+  ).length;
 
   const presentCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Present').length;
   const absentCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Absent').length;
@@ -423,16 +524,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   // Separate Arrival vs Departure counts for current route/trip
   const arrivalMarkedRecordsCount = tripAttendanceList.filter(
-    (a) => a.driverStatus && a.driverStatus !== 'Pending'
+    (a) => getEffectiveArrivalStatus(a) !== 'Pending'
   ).length;
   const departureMarkedRecordsCount = tripAttendanceList.filter(
-    (a) => a.assistantStatus && a.assistantStatus !== 'Pending'
+    (a) => getEffectiveDepartureStatus(a) !== 'Pending'
   ).length;
   const arrivalPresentStrength = tripAttendanceList.filter(
-    (a) => a.driverStatus === 'Present'
+    (a) => getEffectiveArrivalStatus(a) === 'Present'
   ).length;
   const departurePresentStrength = tripAttendanceList.filter(
-    (a) => a.assistantStatus === 'Present'
+    (a) => getEffectiveDepartureStatus(a) === 'Present'
   ).length;
   const hasStrengthMismatchOnBoard =
     arrivalMarkedRecordsCount > 0 &&
@@ -440,20 +541,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     arrivalPresentStrength !== departurePresentStrength;
 
   const autoDerivedMismatchSummary = tripAttendanceList
-    .filter(
-      (a) =>
-        a.driverStatus &&
-        a.driverStatus !== 'Pending' &&
-        a.assistantStatus &&
-        a.assistantStatus !== 'Pending' &&
-        a.driverStatus !== a.assistantStatus
-    )
-    .map(
-      (a) =>
-        `${a.studentName.split(' ')[0]}(${a.driverStatus[0]}→${a.assistantStatus[0]}${
-          a.resolutionReason || a.notes ? ': ' + (a.resolutionReason || a.notes) : ''
-        })`
-    )
+    .filter((a) => {
+      const arr = getEffectiveArrivalStatus(a);
+      const dep = getEffectiveDepartureStatus(a);
+      return arr !== 'Pending' && dep !== 'Pending' && arr !== dep;
+    })
+    .map((a) => {
+      const arr = getEffectiveArrivalStatus(a);
+      const dep = getEffectiveDepartureStatus(a);
+      const dDep = draftAttendance[getDraftKey(a.id, 'departure')];
+      const rmk = dDep?.reason || a.resolutionReason || a.notes || '';
+      return `${a.studentName.split(' ')[0]}(${arr[0]}→${dep[0]}${rmk ? ': ' + rmk : ''})`;
+    })
     .join('; ');
 
   const handleSaveTripStrengthRemark = async () => {
@@ -464,6 +563,92 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     });
     setStatusFeedback(`Saved Strength Mismatch Remark: "${summarizeRemarkForTable(cleanRemark, 40)}"`);
     setTimeout(() => setStatusFeedback(null), 3500);
+  };
+
+  const stageSingleDraftAttendance = (
+    rec: TripAttendanceRecord,
+    mode: 'arrival' | 'departure',
+    statusVal: string,
+    extra?: { reason?: string; earlyArrivalConfirmed?: boolean; earlyArrivalRemarks?: string }
+  ) => {
+    const key = getDraftKey(rec.id, mode);
+    const savedSt = getSavedStatusForMode(rec, mode);
+    setDraftAttendance((prev) => {
+      const next = { ...prev };
+      if (statusVal === savedSt && !extra?.reason) {
+        delete next[key];
+      } else {
+        next[key] = {
+          status: statusVal,
+          reason: extra?.reason,
+          earlyArrivalConfirmed: extra?.earlyArrivalConfirmed,
+          earlyArrivalRemarks: extra?.earlyArrivalRemarks,
+        };
+      }
+      return next;
+    });
+  };
+
+  const proceedWithAttendanceSelectionAfterSavedCheck = (
+    rec: TripAttendanceRecord,
+    mode: 'arrival' | 'departure',
+    newStatus: string
+  ) => {
+    const earlyStu = checkRequiresEarlyArrivalConfirmation(rec, newStatus);
+    if (earlyStu) {
+      setEarlyArrivalModal({
+        student: earlyStu,
+        record: rec,
+        mode,
+        remarks:
+          mode === 'arrival'
+            ? `Arrived early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`
+            : `Departed / Present early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
+      });
+      return;
+    }
+
+    if (mode === 'departure') {
+      const arrStatus = getEffectiveArrivalStatus(rec);
+      if (arrStatus !== 'Pending' && arrStatus !== newStatus) {
+        setMismatchError(null);
+        const existingDraft = draftAttendance[getDraftKey(rec.id, 'departure')];
+        setMismatchPopup({
+          recordId: rec.id,
+          studentName: rec.studentName,
+          admissionNo: rec.admissionNo,
+          arrivalStatus: arrStatus,
+          departureStatus: newStatus,
+          reason: existingDraft?.reason || rec.resolutionReason || rec.notes || '',
+        });
+        return;
+      }
+    }
+
+    stageSingleDraftAttendance(rec, mode, newStatus);
+  };
+
+  const applyAllHolidayToDraft = (mode: 'arrival' | 'departure', includeSavedRecords: boolean) => {
+    setDraftAttendance((prev) => {
+      const next = { ...prev };
+      for (const rec of tripAttendanceList) {
+        const savedSt = getSavedStatusForMode(rec, mode);
+        if (savedSt !== 'Pending' && !includeSavedRecords) continue;
+        const key = getDraftKey(rec.id, mode);
+        if (savedSt === 'Holiday') {
+          delete next[key];
+        } else {
+          next[key] = { status: 'Holiday' };
+        }
+      }
+      return next;
+    });
+    setStatusFeedback(
+      `Marked Holiday (H) in draft for ${
+        mode === 'arrival' ? 'Arrival' : 'Departure'
+      } Attendance. Click "Save Attendance" to finalize.`
+    );
+    setTimeout(() => setStatusFeedback(null), 4000);
   };
 
   const handleMarkAllHoliday = async () => {
@@ -483,16 +668,200 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       });
       return;
     }
-    const targetSource = boardMode === 'arrival' ? 'driver' : 'assistant';
-    for (const rec of tripAttendanceList) {
-      await onMarkAttendance(rec.id, targetSource, 'Holiday');
+
+    const alreadySavedNonHoliday = tripAttendanceList.filter((rec) => {
+      const savedSt = getSavedStatusForMode(rec, boardMode);
+      return savedSt !== 'Pending' && savedSt !== 'Holiday';
+    });
+
+    if (alreadySavedNonHoliday.length > 0) {
+      if (!isAdmin) {
+        const pendingRecs = tripAttendanceList.filter(
+          (rec) => getSavedStatusForMode(rec, boardMode) === 'Pending'
+        );
+        if (pendingRecs.length === 0) {
+          setLockedRecordModal({
+            studentName: `${alreadySavedNonHoliday.length} Saved Member Record(s)`,
+            admissionNo: currentTrip?.routeName || 'Route',
+            savedStatus: 'Saved & Finalized',
+            mode: boardMode,
+          });
+          return;
+        }
+        applyAllHolidayToDraft(boardMode, false);
+        return;
+      }
+
+      setSavedRecordChangeModal({
+        mode: boardMode,
+        actionType: 'all_holiday',
+        affectedCount: alreadySavedNonHoliday.length,
+        newStatus: 'Holiday',
+      });
+      return;
     }
-    setStatusFeedback(
-      `Marked ${tripAttendanceList.length} member(s) as Holiday (H) in ${
-        boardMode === 'arrival' ? 'Arrival' : 'Departure'
-      } Attendance for ${selectedDate}`
-    );
+
+    applyAllHolidayToDraft(boardMode, true);
+  };
+
+  const handleMarkPendingAsPresentInDraft = () => {
+    if (boardMode === 'arrival' && !isArrivalTimeMarked) {
+      setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
+      setTimeRequiredPrompt({
+        mode: 'arrival',
+        pendingAction: { type: 'mark_pending_present' },
+      });
+      return;
+    }
+    if (boardMode === 'departure' && !isDepartureTimeMarked) {
+      setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
+      setTimeRequiredPrompt({
+        mode: 'departure',
+        pendingAction: { type: 'mark_pending_present' },
+      });
+      return;
+    }
+
+    let stagedCount = 0;
+    setDraftAttendance((prev) => {
+      const next = { ...prev };
+      for (const rec of tripAttendanceList) {
+        const savedSt = getSavedStatusForMode(rec, boardMode);
+        const key = getDraftKey(rec.id, boardMode);
+        const currentEff = next[key]?.status || savedSt;
+        if (savedSt === 'Pending' && currentEff === 'Pending') {
+          next[key] = { status: 'Present' };
+          stagedCount++;
+        }
+      }
+      return next;
+    });
+    if (stagedCount > 0) {
+      setStatusFeedback(
+        `Marked ${stagedCount} unmarked member(s) as Present (P) in draft. Click "Save Attendance" to finalize.`
+      );
+      setTimeout(() => setStatusFeedback(null), 4000);
+    }
+  };
+
+  const handleDiscardDraftAttendance = () => {
+    setDraftAttendance((prev) => {
+      const next = { ...prev };
+      for (const rec of tripAttendanceList) {
+        delete next[getDraftKey(rec.id, boardMode)];
+      }
+      return next;
+    });
+    setStatusFeedback('Discarded unsaved changes and restored saved attendance records.');
     setTimeout(() => setStatusFeedback(null), 3500);
+  };
+
+  const executeSaveAttendanceBatch = async (modeToSave: 'arrival' | 'departure' = boardMode) => {
+    const recordsToSave = tripAttendanceList.filter((rec) => {
+      const dEntry = draftAttendance[getDraftKey(rec.id, modeToSave)];
+      const savedSt = getSavedStatusForMode(rec, modeToSave);
+      return Boolean(dEntry && dEntry.status && dEntry.status !== savedSt && dEntry.status !== 'Pending');
+    });
+
+    if (recordsToSave.length === 0) {
+      setStatusFeedback('No unsaved attendance changes to save.');
+      setTimeout(() => setStatusFeedback(null), 3000);
+      return;
+    }
+
+    // Double-check role permission if any saved record is being modified
+    const modifyingSaved = recordsToSave.some(
+      (rec) => getSavedStatusForMode(rec, modeToSave) !== 'Pending'
+    );
+    if (modifyingSaved && !isAdmin) {
+      setLockedRecordModal({
+        studentName: 'Saved Attendance Record(s)',
+        admissionNo: currentTrip?.routeName || 'Route',
+        savedStatus: 'Finalized',
+        mode: modeToSave,
+      });
+      return;
+    }
+
+    setIsSavingAttendanceBatch(true);
+    try {
+      const targetSource = modeToSave === 'arrival' ? 'driver' : 'assistant';
+
+      // Process any early arrival confirmations first
+      for (const rec of recordsToSave) {
+        const dEntry = draftAttendance[getDraftKey(rec.id, modeToSave)];
+        if (dEntry?.earlyArrivalConfirmed && onConfirmEarlyArrival) {
+          await onConfirmEarlyArrival({
+            studentId: rec.studentId,
+            date: selectedDate,
+            confirmedBy: currentRole,
+            remarks: dEntry.earlyArrivalRemarks || `Confirmed early arrival on ${selectedDate}`,
+          });
+        }
+      }
+
+      const batchPayload = recordsToSave.map((rec) => {
+        const dEntry = draftAttendance[getDraftKey(rec.id, modeToSave)]!;
+        return {
+          recordId: rec.id,
+          source: targetSource as 'driver' | 'assistant',
+          value: dEntry.status,
+          reason: dEntry.reason,
+        };
+      });
+
+      if (onBatchSaveAttendance) {
+        await onBatchSaveAttendance(batchPayload);
+      } else {
+        for (const item of batchPayload) {
+          await onMarkAttendance(item.recordId, item.source, item.value, item.reason);
+        }
+      }
+
+      // Clear saved draft entries for this mode
+      setDraftAttendance((prev) => {
+        const next = { ...prev };
+        for (const rec of recordsToSave) {
+          delete next[getDraftKey(rec.id, modeToSave)];
+        }
+        return next;
+      });
+
+      setStatusFeedback(
+        `✓ Saved & Finalized ${recordsToSave.length} ${
+          modeToSave === 'arrival' ? 'Arrival' : 'Departure'
+        } Attendance record(s) for ${currentTrip?.routeName || 'Route'} (${selectedDate}).`
+      );
+      setTimeout(() => setStatusFeedback(null), 4500);
+    } catch (err: any) {
+      setStatusFeedback(err?.message || 'Failed to save attendance records.');
+      setTimeout(() => setStatusFeedback(null), 4500);
+    } finally {
+      setIsSavingAttendanceBatch(false);
+    }
+  };
+
+  const handleSaveAttendanceClick = async () => {
+    if (unsavedDraftEntriesForCurrentBoard.length === 0) return;
+
+    if (boardMode === 'arrival' && !isArrivalTimeMarked) {
+      setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
+      setTimeRequiredPrompt({
+        mode: 'arrival',
+        pendingAction: { type: 'save_batch' },
+      });
+      return;
+    }
+    if (boardMode === 'departure' && !isDepartureTimeMarked) {
+      setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
+      setTimeRequiredPrompt({
+        mode: 'departure',
+        pendingAction: { type: 'save_batch' },
+      });
+      return;
+    }
+
+    await executeSaveAttendanceBatch(boardMode);
   };
 
   const checkRequiresEarlyArrivalConfirmation = (rec: TripAttendanceRecord, statusVal: string): StudentMember | null => {
@@ -504,62 +873,113 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     return null;
   };
 
-  const handleArrivalAttendanceClick = async (rec: TripAttendanceRecord, newArrStatus: string) => {
-    if (!isArrivalTimeMarked) {
+  const handleAttendanceButtonClick = (
+    rec: TripAttendanceRecord,
+    mode: 'arrival' | 'departure',
+    newStatus: string
+  ) => {
+    // Ignore accidental tap if finger slid/scrolled across the screen
+    if (touchMovedRef.current) {
+      touchMovedRef.current = false;
+      return;
+    }
+
+    const savedStatus = getSavedStatusForMode(rec, mode);
+    const currentEffective =
+      mode === 'arrival' ? getEffectiveArrivalStatus(rec) : getEffectiveDepartureStatus(rec);
+
+    // If tapping the already-selected status:
+    if (currentEffective === newStatus) {
+      // If it was an unsaved draft selection on a Pending record, allow toggling back to Pending
+      if (savedStatus === 'Pending') {
+        setDraftAttendance((prev) => {
+          const next = { ...prev };
+          delete next[getDraftKey(rec.id, mode)];
+          return next;
+        });
+      }
+      return;
+    }
+
+    // If user had modified a saved record in draft and taps the original saved status, revert draft for this row
+    if (savedStatus !== 'Pending' && newStatus === savedStatus) {
+      setDraftAttendance((prev) => {
+        const next = { ...prev };
+        delete next[getDraftKey(rec.id, mode)];
+        return next;
+      });
+      return;
+    }
+
+    // Ensure Arrival / Departure Time is marked first
+    if (mode === 'arrival' && !isArrivalTimeMarked) {
       setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
       setTimeRequiredPrompt({
         mode: 'arrival',
-        pendingAction: { type: 'single', rec, statusVal: newArrStatus },
+        pendingAction: { type: 'single', rec, statusVal: newStatus },
       });
       return;
     }
-    const earlyStu = checkRequiresEarlyArrivalConfirmation(rec, newArrStatus);
-    if (earlyStu) {
-      setEarlyArrivalModal({
-        student: earlyStu,
-        record: rec,
-        mode: 'arrival',
-        remarks: `Arrived early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
-      });
-      return;
-    }
-    await onMarkAttendance(rec.id, 'driver', newArrStatus);
-  };
-
-  const handleDepartureAttendanceClick = async (rec: TripAttendanceRecord, newDepStatus: string) => {
-    if (!isDepartureTimeMarked) {
+    if (mode === 'departure' && !isDepartureTimeMarked) {
       setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
       setTimeRequiredPrompt({
         mode: 'departure',
-        pendingAction: { type: 'single', rec, statusVal: newDepStatus },
+        pendingAction: { type: 'single', rec, statusVal: newStatus },
       });
       return;
     }
-    const earlyStu = checkRequiresEarlyArrivalConfirmation(rec, newDepStatus);
-    if (earlyStu) {
-      setEarlyArrivalModal({
-        student: earlyStu,
-        record: rec,
-        mode: 'departure',
-        remarks: `Departed / Present early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
+
+    // Check if this record is ALREADY SAVED (finalized)
+    if (savedStatus !== 'Pending') {
+      if (!isAdmin) {
+        setLockedRecordModal({
+          studentName: rec.studentName,
+          admissionNo: rec.admissionNo,
+          savedStatus,
+          mode,
+        });
+        return;
+      }
+
+      // Admin trying to change a saved record -> Prompt confirmation with Yes/Continue or Back/Discard
+      setSavedRecordChangeModal({
+        mode,
+        actionType: 'single',
+        rec,
+        savedStatus,
+        newStatus,
       });
       return;
     }
-    const arrStatus = rec.driverStatus || 'Pending';
-    // If Arrival Attendance was marked (not Pending) and does NOT match the newly chosen Departure Attendance, open Mismatch Reason Popup
-    if (arrStatus !== 'Pending' && arrStatus !== newDepStatus) {
-      setMismatchError(null);
-      setMismatchPopup({
-        recordId: rec.id,
-        studentName: rec.studentName,
-        admissionNo: rec.admissionNo,
-        arrivalStatus: arrStatus,
-        departureStatus: newDepStatus,
-        reason: rec.resolutionReason || rec.notes || '',
-      });
+
+    proceedWithAttendanceSelectionAfterSavedCheck(rec, mode, newStatus);
+  };
+
+  const handleConfirmSavedRecordChange = () => {
+    if (!savedRecordChangeModal) return;
+    const { mode, actionType, rec, newStatus } = savedRecordChangeModal;
+    setSavedRecordChangeModal(null);
+
+    if (actionType === 'all_holiday') {
+      applyAllHolidayToDraft(mode, true);
       return;
     }
-    await onMarkAttendance(rec.id, 'assistant', newDepStatus);
+
+    if (actionType === 'single' && rec && newStatus) {
+      proceedWithAttendanceSelectionAfterSavedCheck(rec, mode, newStatus);
+    }
+  };
+
+  const handleDiscardSavedRecordChange = () => {
+    if (savedRecordChangeModal?.actionType === 'single' && savedRecordChangeModal.rec) {
+      const key = getDraftKey(savedRecordChangeModal.rec.id, savedRecordChangeModal.mode);
+      setDraftAttendance((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+    setSavedRecordChangeModal(null);
   };
 
   const handleConfirmEarlyArrivalAndMarkPresent = async (e: React.FormEvent) => {
@@ -568,21 +988,14 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     setIsConfirmingEarlyArrival(true);
     try {
       const { student, record, mode, remarks } = earlyArrivalModal;
-      if (onConfirmEarlyArrival) {
-        await onConfirmEarlyArrival({
-          studentId: student.id,
-          date: selectedDate,
-          confirmedBy: currentRole,
-          remarks: remarks.trim() || `Confirmed early arrival on ${selectedDate}`,
-        });
-      }
-      if (mode === 'arrival') {
-        await onMarkAttendance(record.id, 'driver', 'Present', remarks.trim());
-      } else {
-        await onMarkAttendance(record.id, 'assistant', 'Present', remarks.trim());
-      }
+      const cleanRemarks = remarks.trim() || `Confirmed early arrival on ${selectedDate}`;
+      stageSingleDraftAttendance(record, mode, 'Present', {
+        reason: cleanRemarks,
+        earlyArrivalConfirmed: true,
+        earlyArrivalRemarks: cleanRemarks,
+      });
       setStatusFeedback(
-        `Confirmed Early Arrival for ${student.name} (${student.admissionNo}) & marked Present on ${selectedDate}. Removed from Tentative Arrival list.`
+        `Marked ${student.name} (${student.admissionNo}) as Present in draft (Early Arrival confirmed). Click "Save Attendance" to finalize.`
       );
       setEarlyArrivalModal(null);
       setTimeout(() => setStatusFeedback(null), 4000);
@@ -599,14 +1012,14 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       setMismatchError('Please enter a reason / remark for the mismatch between Arrival and Departure attendance.');
       return;
     }
-    await onMarkAttendance(
-      mismatchPopup.recordId,
-      'assistant',
-      mismatchPopup.departureStatus,
-      cleanReason
-    );
+    const targetRec = tripAttendanceList.find((r) => r.id === mismatchPopup.recordId);
+    if (targetRec) {
+      stageSingleDraftAttendance(targetRec, 'departure', mismatchPopup.departureStatus, {
+        reason: cleanReason,
+      });
+    }
     setStatusFeedback(
-      `Saved Departure Attendance (${mismatchPopup.departureStatus}) for ${mismatchPopup.studentName} with mismatch remark: "${cleanReason}"`
+      `Marked Departure Attendance (${mismatchPopup.departureStatus}) in draft for ${mismatchPopup.studentName} with remark. Click "Save Attendance" to finalize.`
     );
     setMismatchPopup(null);
     setMismatchError(null);
@@ -646,54 +1059,72 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
     setStatusFeedback(
       mode === 'Arrived'
-        ? `${currentTrip.vehicleNumber} (${currentTrip.routeName}) Arrival Time marked as ${effectiveIn}. You can now mark Arrival Attendance.`
-        : `${currentTrip.vehicleNumber} (${currentTrip.routeName}) Departure Time marked as ${effectiveOut}. You can now mark Departure Attendance.`
+        ? `${currentTrip.vehicleNumber} (${currentTrip.routeName}) Arrival Time marked as ${effectiveIn}. Mark attendance and click "Save Attendance" to finalize.`
+        : `${currentTrip.vehicleNumber} (${currentTrip.routeName}) Departure Time marked as ${effectiveOut}. Mark attendance and click "Save Attendance" to finalize.`
     );
     setTimeout(() => setStatusFeedback(null), 3500);
   };
 
   const handleConfirmMarkTimeFromPrompt = async () => {
     if (!timeRequiredPrompt || !currentTrip) return;
-    const mode = timeRequiredPrompt.mode === 'arrival' ? 'Arrived' : 'Departed';
+    const promptMode = timeRequiredPrompt.mode;
+    const mode = promptMode === 'arrival' ? 'Arrived' : 'Departed';
     const pending = timeRequiredPrompt.pendingAction;
     setTimeRequiredPrompt(null);
     await handleMarkTripArrivalOrDeparture(mode);
 
     if (pending) {
-      if (pending.type === 'all_holiday') {
-        const targetSource = timeRequiredPrompt.mode === 'arrival' ? 'driver' : 'assistant';
-        for (const rec of tripAttendanceList) {
-          await onMarkAttendance(rec.id, targetSource, 'Holiday');
+      if (pending.type === 'save_batch') {
+        await executeSaveAttendanceBatch(promptMode);
+      } else if (pending.type === 'all_holiday') {
+        const alreadySavedNonHoliday = tripAttendanceList.filter((rec) => {
+          const savedSt = getSavedStatusForMode(rec, promptMode);
+          return savedSt !== 'Pending' && savedSt !== 'Holiday';
+        });
+        if (alreadySavedNonHoliday.length > 0 && isAdmin) {
+          setSavedRecordChangeModal({
+            mode: promptMode,
+            actionType: 'all_holiday',
+            affectedCount: alreadySavedNonHoliday.length,
+            newStatus: 'Holiday',
+          });
+        } else {
+          applyAllHolidayToDraft(promptMode, isAdmin);
         }
+      } else if (pending.type === 'mark_pending_present') {
+        setDraftAttendance((prev) => {
+          const next = { ...prev };
+          for (const rec of tripAttendanceList) {
+            const savedSt = getSavedStatusForMode(rec, promptMode);
+            const key = getDraftKey(rec.id, promptMode);
+            if (savedSt === 'Pending' && !next[key]) {
+              next[key] = { status: 'Present' };
+            }
+          }
+          return next;
+        });
       } else if (pending.type === 'single' && pending.rec && pending.statusVal) {
-        const earlyStu = checkRequiresEarlyArrivalConfirmation(pending.rec, pending.statusVal);
-        if (earlyStu) {
-          setEarlyArrivalModal({
-            student: earlyStu,
-            record: pending.rec,
-            mode: timeRequiredPrompt.mode,
-            remarks: `Arrived early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
+        const savedSt = getSavedStatusForMode(pending.rec, promptMode);
+        if (savedSt !== 'Pending') {
+          if (!isAdmin) {
+            setLockedRecordModal({
+              studentName: pending.rec.studentName,
+              admissionNo: pending.rec.admissionNo,
+              savedStatus: savedSt,
+              mode: promptMode,
+            });
+            return;
+          }
+          setSavedRecordChangeModal({
+            mode: promptMode,
+            actionType: 'single',
+            rec: pending.rec,
+            savedStatus: savedSt,
+            newStatus: pending.statusVal,
           });
           return;
         }
-        if (timeRequiredPrompt.mode === 'arrival') {
-          await onMarkAttendance(pending.rec.id, 'driver', pending.statusVal);
-        } else {
-          const arrStatus = pending.rec.driverStatus || 'Pending';
-          if (arrStatus !== 'Pending' && arrStatus !== pending.statusVal) {
-            setMismatchError(null);
-            setMismatchPopup({
-              recordId: pending.rec.id,
-              studentName: pending.rec.studentName,
-              admissionNo: pending.rec.admissionNo,
-              arrivalStatus: arrStatus,
-              departureStatus: pending.statusVal,
-              reason: pending.rec.resolutionReason || pending.rec.notes || '',
-            });
-          } else {
-            await onMarkAttendance(pending.rec.id, 'assistant', pending.statusVal);
-          }
-        }
+        proceedWithAttendanceSelectionAfterSavedCheck(pending.rec, promptMode, pending.statusVal);
       }
     }
   };
@@ -2046,8 +2477,106 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             </div>
           </div>
 
+          {/* Save & Finalize Attendance Action Bar (Top) */}
+          <div
+            className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
+              unsavedDraftEntriesForCurrentBoard.length > 0
+                ? 'bg-amber-50 border-amber-300 shadow-xs'
+                : savedRecordsOnCurrentBoardCount > 0 &&
+                  savedRecordsOnCurrentBoardCount === tripAttendanceList.length
+                ? 'bg-emerald-50/80 border-emerald-200'
+                : 'bg-white border-slate-200'
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              {unsavedDraftEntriesForCurrentBoard.length > 0 ? (
+                <>
+                  <span className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-black uppercase tracking-wide text-[11px]">
+                    ● {unsavedDraftEntriesForCurrentBoard.length} Unsaved Selection(s)
+                  </span>
+                  <span className="font-semibold text-amber-950">
+                    Attendance is marked in draft — click <strong>Save Attendance</strong> to finalize.
+                    {unsavedModifiedSavedRecordsCount > 0 && (
+                      <span className="ml-1 text-rose-700 font-bold">
+                        ({unsavedModifiedSavedRecordsCount} saved record{unsavedModifiedSavedRecordsCount > 1 ? 's' : ''} modified by Admin)
+                      </span>
+                    )}
+                  </span>
+                </>
+              ) : savedRecordsOnCurrentBoardCount > 0 ? (
+                <>
+                  <span className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px] flex items-center gap-1">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    <span>
+                      Saved: {savedRecordsOnCurrentBoardCount}/{tripAttendanceList.length} Finalized
+                    </span>
+                  </span>
+                  <span className="text-slate-600 font-medium">
+                    {isAdmin
+                      ? 'Saved records are finalized (Admin can modify with confirmation).'
+                      : 'Saved records are finalized and locked (Admin only to change).'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-200 text-slate-700 font-bold text-[11px]">
+                    Not Saved Yet
+                  </span>
+                  <span className="text-slate-600 font-medium">
+                    Mark member attendance below and press <strong>Save Attendance</strong> to finalize.
+                  </span>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {pendingCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleMarkPendingAsPresentInDraft}
+                  className="px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs cursor-pointer transition-colors"
+                >
+                  Mark Pending ({pendingCount}) as Present
+                </button>
+              )}
+              {unsavedDraftEntriesForCurrentBoard.length > 0 && (
+                <button
+                  type="button"
+                  disabled={isSavingAttendanceBatch}
+                  onClick={handleDiscardDraftAttendance}
+                  className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer transition-colors"
+                >
+                  Back / Discard ({unsavedDraftEntriesForCurrentBoard.length})
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={unsavedDraftEntriesForCurrentBoard.length === 0 || isSavingAttendanceBatch}
+                onClick={handleSaveAttendanceClick}
+                className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
+                  unsavedDraftEntriesForCurrentBoard.length > 0
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
+                    : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                }`}
+              >
+                <Check className="w-4 h-4" />
+                <span>
+                  {isSavingAttendanceBatch
+                    ? 'Saving Attendance...'
+                    : unsavedDraftEntriesForCurrentBoard.length > 0
+                    ? `Save Attendance (${unsavedDraftEntriesForCurrentBoard.length})`
+                    : 'Save Attendance'}
+                </span>
+              </button>
+            </div>
+          </div>
+
           {/* Clean Attendance Table — Separate for Arrival vs Departure */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+          <div
+            className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden"
+            onTouchStart={handleAttendanceTouchStart}
+            onTouchMove={handleAttendanceTouchMove}
+          >
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
@@ -2083,21 +2612,35 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                     tripAttendanceList.map((rec) => {
                       const stuObj = students.find((s) => s.id === rec.studentId);
                       const isSuspended = rec.transportStatus === 'Suspended';
-                      const arrStatus = rec.driverStatus || 'Pending';
-                      const depStatus = rec.assistantStatus || 'Pending';
-                      const currentMarked = boardMode === 'arrival' ? arrStatus : depStatus;
+                      const savedStatus = getSavedStatusForMode(rec, boardMode);
+                      const isRecordSaved = savedStatus !== 'Pending';
+                      const draftEntry = draftAttendance[getDraftKey(rec.id, boardMode)];
+                      const isDraftModified = Boolean(
+                        draftEntry && draftEntry.status && draftEntry.status !== savedStatus
+                      );
+                      const effArrStatus = getEffectiveArrivalStatus(rec);
+                      const effDepStatus = getEffectiveDepartureStatus(rec);
+                      const currentMarked = boardMode === 'arrival' ? effArrStatus : effDepStatus;
                       const hasMismatch =
                         boardMode === 'departure' &&
-                        arrStatus !== 'Pending' &&
-                        depStatus !== 'Pending' &&
-                        arrStatus !== depStatus;
-                      const remarkText = rec.resolutionReason || rec.notes || '';
+                        effArrStatus !== 'Pending' &&
+                        effDepStatus !== 'Pending' &&
+                        effArrStatus !== effDepStatus;
+                      const remarkText =
+                        draftAttendance[getDraftKey(rec.id, 'departure')]?.reason ||
+                        rec.resolutionReason ||
+                        rec.notes ||
+                        '';
 
                       return (
                         <tr
                           key={rec.id}
                           className={`hover:bg-slate-50/80 transition-colors ${
-                            isSuspended ? 'bg-rose-50/30' : ''
+                            isDraftModified
+                              ? 'bg-amber-50/40'
+                              : isSuspended
+                              ? 'bg-rose-50/30'
+                              : ''
                           }`}
                         >
                           <td className="py-2.5 px-4">
@@ -2115,11 +2658,22 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                               )}
                               <div>
                                 <div
-                                  className={`font-bold ${
+                                  className={`font-bold flex items-center gap-1.5 flex-wrap ${
                                     isSuspended ? 'text-rose-600' : 'text-slate-900'
                                   }`}
                                 >
-                                  {rec.studentName}
+                                  <span>{rec.studentName}</span>
+                                  {isDraftModified ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                      {isRecordSaved
+                                        ? `Unsaved Change (${savedStatus[0]}→${currentMarked[0]})`
+                                        : 'Unsaved'}
+                                    </span>
+                                  ) : isRecordSaved ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                      ✓ Saved
+                                    </span>
+                                  ) : null}
                                 </div>
                                 <div className="text-[11px] font-mono text-slate-500">
                                   {rec.admissionNo}
@@ -2148,18 +2702,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                             <td className="py-2.5 px-3">
                               <span
                                 className={`inline-flex items-center px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
-                                  arrStatus === 'Present'
+                                  effArrStatus === 'Present'
                                     ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                    : arrStatus === 'Absent'
+                                    : effArrStatus === 'Absent'
                                     ? 'bg-rose-50 text-rose-800 border-rose-200'
-                                    : arrStatus === 'Leave'
+                                    : effArrStatus === 'Leave'
                                     ? 'bg-amber-50 text-amber-900 border-amber-200'
-                                    : arrStatus === 'Holiday'
+                                    : effArrStatus === 'Holiday'
                                     ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
                                     : 'bg-slate-100 text-slate-500 border-slate-200'
                                 }`}
                               >
-                                {arrStatus === 'Pending' ? 'Not Marked' : `Arrival: ${arrStatus}`}
+                                {effArrStatus === 'Pending' ? 'Not Marked' : `Arrival: ${effArrStatus}`}
                               </span>
                               {(hasMismatch || remarkText) && (
                                 <div className="mt-1 text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
@@ -2174,6 +2728,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                               {(['Present', 'Absent', 'Leave', 'Holiday'] as const).map((stVal) => {
                                 const shortCode = stVal[0];
                                 const isSelected = currentMarked === stVal;
+                                const isLockedForNonAdmin = isRecordSaved && !isAdmin && !isSelected;
                                 const activeColor =
                                   stVal === 'Present'
                                     ? 'bg-emerald-600 text-white shadow-2xs'
@@ -2182,28 +2737,29 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                     : stVal === 'Leave'
                                     ? 'bg-amber-500 text-slate-950 shadow-2xs'
                                     : 'bg-indigo-600 text-white shadow-2xs';
-                                const hoverColor =
-                                  stVal === 'Present'
-                                    ? 'bg-slate-100 hover:bg-emerald-50 text-slate-700'
-                                    : stVal === 'Absent'
-                                    ? 'bg-slate-100 hover:bg-rose-50 text-slate-700'
-                                    : stVal === 'Leave'
-                                    ? 'bg-slate-100 hover:bg-amber-50 text-slate-700'
-                                    : 'bg-slate-100 hover:bg-indigo-50 text-slate-700';
+                                const hoverColor = isLockedForNonAdmin
+                                  ? 'bg-slate-100 text-slate-400 opacity-60'
+                                  : stVal === 'Present'
+                                  ? 'bg-slate-100 hover:bg-emerald-50 text-slate-700'
+                                  : stVal === 'Absent'
+                                  ? 'bg-slate-100 hover:bg-rose-50 text-slate-700'
+                                  : stVal === 'Leave'
+                                  ? 'bg-slate-100 hover:bg-amber-50 text-slate-700'
+                                  : 'bg-slate-100 hover:bg-indigo-50 text-slate-700';
 
                                 return (
                                   <button
                                     key={stVal}
                                     type="button"
-                                    onClick={() => {
-                                      if (boardMode === 'arrival') {
-                                        handleArrivalAttendanceClick(rec, stVal);
-                                      } else {
-                                        handleDepartureAttendanceClick(rec, stVal);
-                                      }
-                                    }}
-                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-                                      isSelected ? activeColor : hoverColor
+                                    onTouchStart={handleAttendanceTouchStart}
+                                    onTouchMove={handleAttendanceTouchMove}
+                                    onClick={() => handleAttendanceButtonClick(rec, boardMode, stVal)}
+                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors touch-manipulation select-none ${
+                                      isSelected
+                                        ? `${activeColor} ${
+                                            isDraftModified ? 'ring-2 ring-amber-400 ring-offset-1' : ''
+                                          }`
+                                        : hoverColor
                                     }`}
                                   >
                                     <span>{shortCode} ({stVal})</span>
@@ -2219,7 +2775,226 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 </tbody>
               </table>
             </div>
+
+            {/* Bottom Save Attendance Footer Bar */}
+            {tripAttendanceList.length > 0 && (
+              <div className="bg-slate-50 border-t border-slate-200 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="text-xs text-slate-600 font-medium">
+                  {unsavedDraftEntriesForCurrentBoard.length > 0 ? (
+                    <span className="text-amber-900 font-bold">
+                      ● {unsavedDraftEntriesForCurrentBoard.length} member(s) marked in draft — press{' '}
+                      <span className="underline">Save Attendance</span> to finalize.
+                    </span>
+                  ) : (
+                    <span>
+                      Saved &amp; Finalized: <strong>{savedRecordsOnCurrentBoardCount}</strong> of{' '}
+                      <strong>{tripAttendanceList.length}</strong> member(s)
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {unsavedDraftEntriesForCurrentBoard.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isSavingAttendanceBatch}
+                      onClick={handleDiscardDraftAttendance}
+                      className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer"
+                    >
+                      Back / Discard
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={unsavedDraftEntriesForCurrentBoard.length === 0 || isSavingAttendanceBatch}
+                    onClick={handleSaveAttendanceClick}
+                    className={`px-5 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
+                      unsavedDraftEntriesForCurrentBoard.length > 0
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
+                        : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>
+                      {isSavingAttendanceBatch
+                        ? 'Saving Attendance...'
+                        : unsavedDraftEntriesForCurrentBoard.length > 0
+                        ? `Save Attendance (${unsavedDraftEntriesForCurrentBoard.length})`
+                        : 'Save Attendance'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Floating Sticky Save Bar on Mobile / Scroll when Unsaved Changes Exist */}
+          {unsavedDraftEntriesForCurrentBoard.length > 0 && (
+            <div className="sticky bottom-3 z-20 bg-slate-900 text-white rounded-2xl border border-slate-700 shadow-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 text-xs">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                <div>
+                  <div className="font-bold text-amber-300">
+                    {unsavedDraftEntriesForCurrentBoard.length} Unsaved Attendance Selection(s)
+                    {unsavedModifiedSavedRecordsCount > 0
+                      ? ` • Changing ${unsavedModifiedSavedRecordsCount} Saved Record(s)`
+                      : ''}
+                  </div>
+                  <div className="text-[11px] text-slate-300">
+                    Press <strong>Save Attendance</strong> to finalize or <strong>Back / Discard</strong> to cancel.
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isSavingAttendanceBatch}
+                  onClick={handleDiscardDraftAttendance}
+                  className="px-3.5 py-2 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs cursor-pointer"
+                >
+                  Back / Discard
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingAttendanceBatch}
+                  onClick={handleSaveAttendanceClick}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-md cursor-pointer"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>
+                    {isSavingAttendanceBatch
+                      ? 'Saving...'
+                      : `Save Attendance (${unsavedDraftEntriesForCurrentBoard.length})`}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Admin Confirmation Modal: "You are trying to change a saved record" */}
+          {savedRecordChangeModal && (
+            <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl border border-amber-300 shadow-2xl max-w-md w-full overflow-hidden">
+                <div className="bg-amber-500 text-slate-950 px-5 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-slate-950 shrink-0" />
+                    <h3 className="text-sm font-black uppercase tracking-wide">
+                      You are trying to change a saved record
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleDiscardSavedRecordChange}
+                    className="text-slate-900 hover:text-slate-950 p-1 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="p-5 space-y-4 text-xs">
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2 text-amber-950">
+                    <p className="font-bold text-sm text-slate-900">
+                      You are trying to change a saved attendance record.
+                    </p>
+                    {savedRecordChangeModal.actionType === 'single' && savedRecordChangeModal.rec ? (
+                      <div className="space-y-1.5 pt-1">
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">Member:</span>
+                          <span className="font-bold text-slate-900">
+                            {savedRecordChangeModal.rec.studentName} ({savedRecordChangeModal.rec.admissionNo})
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">Current Saved Record:</span>
+                          <span className="font-bold text-emerald-800">
+                            {savedRecordChangeModal.savedStatus}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">New Selected Status:</span>
+                          <span className="font-bold text-rose-700">
+                            {savedRecordChangeModal.newStatus}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-slate-700">
+                        <strong>{savedRecordChangeModal.affectedCount}</strong> member record(s) on this route
+                        are already saved and finalized. Changing them to{' '}
+                        <strong>{savedRecordChangeModal.newStatus}</strong> will modify saved records.
+                      </p>
+                    )}
+                    <p className="pt-1 text-slate-700 font-medium">
+                      Press <strong>Yes / Continue</strong> to continue with the changes (and click{' '}
+                      <strong>Save Attendance</strong> to finalize), or press{' '}
+                      <strong>Back / Discard</strong> to discard the changes.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleDiscardSavedRecordChange}
+                      className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-bold text-xs cursor-pointer"
+                    >
+                      Back / Discard
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmSavedRecordChange}
+                      className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs cursor-pointer shadow-xs"
+                    >
+                      Yes / Continue
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Non-Admin Locked Record Modal */}
+          {lockedRecordModal && (
+            <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl border border-rose-200 shadow-2xl max-w-md w-full overflow-hidden">
+                <div className="bg-rose-600 text-white px-5 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-white shrink-0" />
+                    <h3 className="text-sm font-black uppercase tracking-wide">
+                      Saved Record Locked — Admin Only
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLockedRecordModal(null)}
+                    className="text-white/80 hover:text-white p-1 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="p-5 space-y-4 text-xs">
+                  <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 space-y-1.5 text-rose-950">
+                    <p className="font-bold text-sm">
+                      Saved attendance record can be changed by Admin only.
+                    </p>
+                    <p className="text-rose-900">
+                      Attendance for <strong>{lockedRecordModal.studentName}</strong> (
+                      {lockedRecordModal.admissionNo}) is already saved and finalized as{' '}
+                      <strong>{lockedRecordModal.savedStatus}</strong>.
+                    </p>
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setLockedRecordModal(null)}
+                      className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs cursor-pointer"
+                    >
+                      Back
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Mismatch Reason / Remark Popup Modal (When Departure Attendance != Arrival Attendance) */}
           {mismatchPopup && (

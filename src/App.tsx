@@ -878,7 +878,19 @@ export function App() {
     value: string,
     reason?: string
   ) => {
-    await api.markAttendance(recordId, source, value, reason);
+    await api.markAttendance(recordId, source, value, reason, activeRole);
+    await loadAllData();
+  };
+
+  const handleBatchSaveAttendance = async (
+    entries: Array<{
+      recordId: string;
+      source: 'driver' | 'assistant';
+      value: string;
+      reason?: string;
+    }>
+  ) => {
+    await api.batchSaveAttendance(entries, activeRole);
     await loadAllData();
   };
 
@@ -1108,17 +1120,17 @@ export function App() {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Header Bar */}
-        <header className="bg-white border-b border-slate-200/80 px-6 py-3.5 sticky top-0 z-20 flex flex-wrap items-center justify-between gap-4 shadow-2xs print:hidden">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-slate-900 text-amber-400 flex items-center justify-center font-bold shadow-xs">
-              <Bus className="w-5 h-5" />
+        <header className="bg-white border-b border-slate-200/80 px-3 py-2.5 sm:px-6 sm:py-3.5 sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2.5 sm:gap-4 shadow-2xs print:hidden">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-900 text-amber-400 flex items-center justify-center font-bold shadow-xs shrink-0">
+              <Bus className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-slate-900 tracking-tight">
+                <h1 className="text-sm sm:text-base font-bold text-slate-900 tracking-tight">
                   {config.schoolName}
                 </h1>
-                <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-amber-100 text-amber-900 rounded-md">
+                <span className="px-2 py-0.5 text-[10px] sm:text-[11px] font-mono font-semibold bg-amber-100 text-amber-900 rounded-md">
                   {config.currentAcademicSession || config.academicYear || '2026-2027'}
                 </span>
               </div>
@@ -1128,13 +1140,13 @@ export function App() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
             {/* Signed-In User & Active Role Badge */}
-            <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200">
-              <UserCheck className="w-4 h-4 text-slate-700" />
+            <div className="flex items-center gap-1.5 sm:gap-2 bg-slate-100 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl border border-slate-200">
+              <UserCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-700" />
               <div className="text-xs">
                 <span className="font-bold text-slate-900">{currentUser.fullName}</span>
-                <span className="text-slate-500 font-mono text-[11px] ml-1">(@{currentUser.username})</span>
+                <span className="text-slate-500 font-mono text-[11px] ml-1 hidden md:inline">(@{currentUser.username})</span>
               </div>
               <span
                 className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
@@ -1157,7 +1169,7 @@ export function App() {
             {/* Android App / APK Installer Button */}
             <button
               onClick={() => setIsAndroidModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer shadow-2xs"
+              className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer shadow-2xs"
               title="Install Android App (WebAPK) or Download Android APK Package"
             >
               <Smartphone className="w-3.5 h-3.5" />
@@ -1168,27 +1180,28 @@ export function App() {
             {isAdmin && (
               <button
                 onClick={() => handleNavigate('masters', 'users')}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-amber-400 transition-colors cursor-pointer shadow-2xs"
+                className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-amber-400 transition-colors cursor-pointer shadow-2xs"
                 title="Create or Edit Usernames, Names & Passwords for Admin, Coordinator, and Assistant"
               >
                 <KeyRound className="w-3.5 h-3.5" />
-                <span>Users &amp; Passwords</span>
+                <span className="hidden sm:inline">Users &amp; Passwords</span>
               </button>
             )}
 
             <button
               onClick={() => handleLogout(false)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-bold transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-bold transition-colors cursor-pointer"
               title="Sign Out or Switch Role Account"
             >
               <LogOut className="w-3.5 h-3.5 text-rose-600" />
-              <span>Switch User / Logout</span>
+              <span className="hidden sm:inline">Switch User /</span>
+              <span>Logout</span>
             </button>
           </div>
         </header>
 
         {/* Main Workspace Container */}
-        <main className="flex-1 p-6 max-w-[1600px] w-full mx-auto">
+        <main className="flex-1 p-3 sm:p-6 max-w-[1600px] w-full mx-auto">
           {error && (
             <div className="mb-6 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 flex items-center justify-between gap-4 text-xs">
               <div className="flex items-center gap-2.5">
@@ -1441,6 +1454,7 @@ export function App() {
                   onSelectTrip={handleSelectTrip}
                   onSelectRouteForDate={handleSelectRouteForDate}
                   onMarkAttendance={handleMarkAttendance}
+                  onBatchSaveAttendance={handleBatchSaveAttendance}
                   onResolveMismatch={handleResolveMismatch}
                   onVerifyTrip={handleVerifyTrip}
                   onCancelTrip={handleCancelTrip}

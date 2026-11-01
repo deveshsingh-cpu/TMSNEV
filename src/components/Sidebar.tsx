@@ -83,7 +83,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   resumesCount = 0,
   pendingApprovalsCount = 0,
 }) => {
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const isApkOrCompactDevice = () => {
+    if (typeof window === 'undefined') return false;
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (window.navigator as any).standalone === true;
+    const isMobileOrAndroid =
+      window.innerWidth < 1024 || /Android|webOS|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    return isStandalone || isMobileOrAndroid;
+  };
+
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => isApkOrCompactDevice());
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
     members_group: false,
     employees_group: false,
@@ -95,6 +105,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
     masters_group: false,
     assistant_vehicles_group: true,
   });
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (isApkOrCompactDevice()) {
+        setIsSidebarCollapsed(true);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     if (activeKey === 'members') {
@@ -548,141 +568,175 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
       : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
 
+  const handleItemSelect = (navKey: NavItemKey, subTab?: string) => {
+    onSelect(navKey, subTab);
+    if (isApkOrCompactDevice()) {
+      setIsSidebarCollapsed(true);
+    }
+  };
+
   return (
-    <aside
-      className={`${
-        isSidebarCollapsed ? 'w-20' : 'w-68'
-      } bg-slate-900 text-slate-300 flex flex-col shrink-0 min-h-[calc(100vh-61px)] transition-all duration-200 border-r border-slate-800 print:hidden`}
-    >
-      <div className="p-3.5 border-b border-slate-800 flex items-center justify-between gap-2">
-        {!isSidebarCollapsed && (
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold tracking-wider uppercase text-slate-400">
-              Authorized Menu
-            </div>
-            <div className="mt-1 flex items-center gap-1.5">
-              <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border truncate ${roleColorBadge}`}>
-                {currentRole}
-              </span>
-            </div>
-          </div>
-        )}
-        <button
-          onClick={() => setIsSidebarCollapsed((prev) => !prev)}
-          title={isSidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
-          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer mx-auto sm:mx-0 shrink-0"
+    <>
+      {/* Backdrop when sidebar is expanded on mobile / APK */}
+      {!isSidebarCollapsed && (
+        <div
+          onClick={() => setIsSidebarCollapsed(true)}
+          className="fixed inset-0 bg-slate-950/50 backdrop-blur-[1px] z-30 lg:hidden print:hidden"
+        />
+      )}
+
+      {/* Spacer in layout flow on mobile/APK when sidebar expands as overlay */}
+      {!isSidebarCollapsed && <div className="w-12 sm:w-14 shrink-0 lg:hidden print:hidden" />}
+
+      <aside
+        className={`${
+          isSidebarCollapsed
+            ? 'w-12 sm:w-16 relative'
+            : 'w-64 fixed inset-y-0 left-0 z-40 shadow-2xl lg:static lg:w-64 lg:shadow-none'
+        } bg-slate-900 text-slate-300 flex flex-col shrink-0 min-h-screen lg:min-h-[calc(100vh-61px)] transition-all duration-200 border-r border-slate-800 print:hidden`}
+      >
+        <div
+          className={`${
+            isSidebarCollapsed ? 'p-2 justify-center' : 'p-3 justify-between'
+          } border-b border-slate-800 flex items-center gap-2`}
         >
-          {isSidebarCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-        </button>
-      </div>
+          {!isSidebarCollapsed && (
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold tracking-wider uppercase text-slate-400">
+                Authorized Menu
+              </div>
+              <div className="mt-1 flex items-center gap-1.5">
+                <span
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold border truncate ${roleColorBadge}`}
+                >
+                  {currentRole}
+                </span>
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => setIsSidebarCollapsed((prev) => !prev)}
+            title={isSidebarCollapsed ? 'Expand Side Ribbon' : 'Minimize Side Ribbon'}
+            className="p-1.5 rounded-lg text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+          >
+            {isSidebarCollapsed ? (
+              <PanelLeftOpen className="w-4 h-4 text-amber-400" />
+            ) : (
+              <PanelLeftClose className="w-4 h-4 text-amber-400" />
+            )}
+          </button>
+        </div>
 
-      <nav className="p-2.5 space-y-1 flex-1 overflow-y-auto">
-        {visibleGroups.map((group) => {
-          const hasSubItems = group.subItems && group.subItems.length > 0;
-          const isGroupActive = hasSubItems
-            ? group.subItems!.some(
-                (sub) =>
-                  sub.navKey === activeKey &&
-                  (!sub.subTab || !activeSubTab || sub.subTab === activeSubTab)
-              )
-            : activeKey === group.defaultNavKey &&
-              (!group.defaultSubTab || group.defaultSubTab === activeSubTab);
-          const isExpanded = !!expandedGroups[group.key];
+        <nav className={`${isSidebarCollapsed ? 'p-1.5' : 'p-2.5'} space-y-1 flex-1 overflow-y-auto`}>
+          {visibleGroups.map((group) => {
+            const hasSubItems = group.subItems && group.subItems.length > 0;
+            const isGroupActive = hasSubItems
+              ? group.subItems!.some(
+                  (sub) =>
+                    sub.navKey === activeKey &&
+                    (!sub.subTab || !activeSubTab || sub.subTab === activeSubTab)
+                )
+              : activeKey === group.defaultNavKey &&
+                (!group.defaultSubTab || group.defaultSubTab === activeSubTab);
+            const isExpanded = !!expandedGroups[group.key];
 
-          return (
-            <div key={group.key} className="space-y-1">
-              <button
-                onClick={() => {
-                  if (hasSubItems) {
-                    toggleGroup(group.key, group.defaultNavKey, group.defaultSubTab);
-                  } else {
-                    onSelect(group.defaultNavKey, group.defaultSubTab);
-                  }
-                }}
-                title={group.label}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition-all cursor-pointer ${
-                  isGroupActive && (!hasSubItems || isSidebarCollapsed)
-                    ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                    : isGroupActive
-                    ? 'bg-slate-800/90 text-amber-400 font-semibold'
-                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <span
-                    className={
-                      isGroupActive && (!hasSubItems || isSidebarCollapsed)
-                        ? 'text-slate-950 shrink-0'
-                        : isGroupActive
-                        ? 'text-amber-400 shrink-0'
-                        : 'text-slate-400 shrink-0'
+            return (
+              <div key={group.key} className="space-y-1">
+                <button
+                  onClick={() => {
+                    if (hasSubItems) {
+                      toggleGroup(group.key, group.defaultNavKey, group.defaultSubTab);
+                    } else {
+                      handleItemSelect(group.defaultNavKey, group.defaultSubTab);
                     }
-                  >
-                    {group.icon}
-                  </span>
-                  {!isSidebarCollapsed && <span className="truncate">{group.label}</span>}
-                </div>
-                {!isSidebarCollapsed && (
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {group.badge !== undefined && (
-                      <span
-                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                          group.badgeColor || 'bg-slate-700 text-slate-200'
-                        }`}
-                      >
-                        {group.badge}
-                      </span>
-                    )}
-                    {hasSubItems ? (
-                      isExpanded ? (
-                        <ChevronDown className="w-4 h-4 text-slate-400" />
+                  }}
+                  title={group.label}
+                  className={`w-full flex items-center ${
+                    isSidebarCollapsed ? 'justify-center px-1.5 py-2.5' : 'justify-between px-3 py-2.5'
+                  } rounded-xl text-xs font-medium transition-all cursor-pointer ${
+                    isGroupActive && (!hasSubItems || isSidebarCollapsed)
+                      ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
+                      : isGroupActive
+                      ? 'bg-slate-800/90 text-amber-400 font-semibold'
+                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                  }`}
+                >
+                  <div className={`flex items-center ${isSidebarCollapsed ? 'justify-center' : 'gap-3'} min-w-0`}>
+                    <span
+                      className={
+                        isGroupActive && (!hasSubItems || isSidebarCollapsed)
+                          ? 'text-slate-950 shrink-0'
+                          : isGroupActive
+                          ? 'text-amber-400 shrink-0'
+                          : 'text-slate-400 shrink-0'
+                      }
+                    >
+                      {group.icon}
+                    </span>
+                    {!isSidebarCollapsed && <span className="truncate">{group.label}</span>}
+                  </div>
+                  {!isSidebarCollapsed && (
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {group.badge !== undefined && (
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                            group.badgeColor || 'bg-slate-700 text-slate-200'
+                          }`}
+                        >
+                          {group.badge}
+                        </span>
+                      )}
+                      {hasSubItems ? (
+                        isExpanded ? (
+                          <ChevronDown className="w-4 h-4 text-slate-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )
                       ) : (
-                        <ChevronRight className="w-4 h-4 text-slate-400" />
-                      )
-                    ) : (
-                      isGroupActive && <ChevronRight className="w-4 h-4 text-slate-950" />
-                    )}
+                        isGroupActive && <ChevronRight className="w-4 h-4 text-slate-950" />
+                      )}
+                    </div>
+                  )}
+                </button>
+
+                {hasSubItems && isExpanded && !isSidebarCollapsed && (
+                  <div className="pl-4 pr-1 py-1 space-y-1 border-l-2 border-slate-800 ml-3.5">
+                    {group.subItems!.map((sub) => {
+                      const isSubActive =
+                        activeKey === sub.navKey &&
+                        (!sub.subTab || !activeSubTab || activeSubTab === sub.subTab);
+                      return (
+                        <button
+                          key={sub.id}
+                          onClick={() => handleItemSelect(sub.navKey, sub.subTab)}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                            isSubActive
+                              ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
+                              : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
+                          }`}
+                        >
+                          <span className="truncate">{sub.label}</span>
+                          {sub.badge !== undefined && (
+                            <span
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                                isSubActive
+                                  ? 'bg-slate-950 text-amber-400'
+                                  : sub.badgeColor || 'bg-slate-800 text-slate-300'
+                              }`}
+                            >
+                              {sub.badge}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
-              </button>
-
-              {hasSubItems && isExpanded && !isSidebarCollapsed && (
-                <div className="pl-5 pr-1 py-1 space-y-1 border-l-2 border-slate-800 ml-4">
-                  {group.subItems!.map((sub) => {
-                    const isSubActive =
-                      activeKey === sub.navKey &&
-                      (!sub.subTab || !activeSubTab || activeSubTab === sub.subTab);
-                    return (
-                      <button
-                        key={sub.id}
-                        onClick={() => onSelect(sub.navKey, sub.subTab)}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                          isSubActive
-                            ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
-                            : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
-                        }`}
-                      >
-                        <span className="truncate">{sub.label}</span>
-                        {sub.badge !== undefined && (
-                          <span
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                              isSubActive
-                                ? 'bg-slate-950 text-amber-400'
-                                : sub.badgeColor || 'bg-slate-800 text-slate-300'
-                            }`}
-                          >
-                            {sub.badge}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </nav>
-    </aside>
+              </div>
+            );
+          })}
+        </nav>
+      </aside>
+    </>
   );
 };

@@ -9944,179 +9944,254 @@ export class SheetsDatabaseManager {
     return this.attendance;
   }
 
-  public async updateAttendanceObservation(recordId: string, source: 'driver' | 'assistant' | 'resolve', value: string, resolverName?: string, reason?: string) {
-    return this.enqueueWrite(async () => {
-      let rec = this.attendance.find(a => a.id === recordId);
+  private applySingleAttendanceObservationInternal(
+    recordId: string,
+    source: 'driver' | 'assistant' | 'resolve',
+    value: string,
+    resolverName?: string,
+    reason?: string,
+    role?: string
+  ): TripAttendanceRecord {
+    let rec = this.attendance.find(a => a.id === recordId);
 
-      // If record doesn't exist yet (e.g. marking directly from Arrival & Departure board before trip record creation),
-      // parse deterministic ID `att-${tripId}-${studentId}` and auto-create trip + attendance record
-      if (!rec && recordId.startsWith('att-')) {
-        const matchedStu = this.students.find(s => recordId.endsWith(`-${s.id}`));
-        if (matchedStu) {
-          const tripIdPart = recordId.slice(4, recordId.length - matchedStu.id.length - 1);
-          let trip = this.trips.find(t => t.id === tripIdPart);
-          if (!trip && tripIdPart.startsWith('dt-') && tripIdPart.length > 14) {
-            const datePart = tripIdPart.slice(-10);
-            const routeIdPart = tripIdPart.slice(3, -11);
-            const route =
-              this.routes.find(r => r.id === routeIdPart || r.code === routeIdPart) ||
-              this.routes.find(r => r.id === matchedStu.routeId || r.code === matchedStu.routeCode);
-            if (route) {
-              const veh = this.vehicles.find(v => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber);
-              const routeStudents = this.getStudentsForRoute(route);
-              trip = {
-                id: `dt-${route.id}-${datePart}`,
-                date: datePart,
-                campus: route.campus,
-                routeId: route.id,
-                routeName: route.code,
-                vehicleId: route.vehicleId,
-                vehicleNumber: route.vehicleNumber,
-                driverName: veh?.assignedDriverName || 'Assigned Driver',
-                helperName: veh?.assignedHelperName,
-                tripNumber: route.tripNumber,
-                shiftName: `Trip ${route.tripNumber} — ${route.name || route.code}`,
-                status: 'Ready',
-                rosterCount: routeStudents.length,
-                presentCount: 0,
-                absentCount: 0,
-                mismatchCount: 0,
-                plannedStartTime: '06:40 AM',
-                plannedEndTime: '07:30 AM',
-              };
-              this.trips.push(trip);
-            }
+    // If record doesn't exist yet (e.g. marking directly from Arrival & Departure board before trip record creation),
+    // parse deterministic ID `att-${tripId}-${studentId}` and auto-create trip + attendance record
+    if (!rec && recordId.startsWith('att-')) {
+      const matchedStu = this.students.find(s => recordId.endsWith(`-${s.id}`));
+      if (matchedStu) {
+        const tripIdPart = recordId.slice(4, recordId.length - matchedStu.id.length - 1);
+        let trip = this.trips.find(t => t.id === tripIdPart);
+        if (!trip && tripIdPart.startsWith('dt-') && tripIdPart.length > 14) {
+          const datePart = tripIdPart.slice(-10);
+          const routeIdPart = tripIdPart.slice(3, -11);
+          const route =
+            this.routes.find(r => r.id === routeIdPart || r.code === routeIdPart) ||
+            this.routes.find(r => r.id === matchedStu.routeId || r.code === matchedStu.routeCode);
+          if (route) {
+            const veh = this.vehicles.find(v => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber);
+            const routeStudents = this.getStudentsForRoute(route);
+            trip = {
+              id: `dt-${route.id}-${datePart}`,
+              date: datePart,
+              campus: route.campus,
+              routeId: route.id,
+              routeName: route.code,
+              vehicleId: route.vehicleId,
+              vehicleNumber: route.vehicleNumber,
+              driverName: veh?.assignedDriverName || 'Assigned Driver',
+              helperName: veh?.assignedHelperName,
+              tripNumber: route.tripNumber,
+              shiftName: `Trip ${route.tripNumber} — ${route.name || route.code}`,
+              status: 'Ready',
+              rosterCount: routeStudents.length,
+              presentCount: 0,
+              absentCount: 0,
+              mismatchCount: 0,
+              plannedStartTime: '06:40 AM',
+              plannedEndTime: '07:30 AM',
+            };
+            this.trips.push(trip);
           }
-          const effectiveTripId = trip?.id || tripIdPart;
-          const effectiveDate = trip?.date || (tripIdPart.length >= 10 ? tripIdPart.slice(-10) : new Date().toISOString().split('T')[0]);
-          rec = {
-            id: `att-${effectiveTripId}-${matchedStu.id}`,
-            tripId: effectiveTripId,
-            date: effectiveDate,
-            studentId: matchedStu.id,
-            admissionNo: matchedStu.admissionNo,
-            studentName: matchedStu.name,
-            classSection: `${matchedStu.class}-${matchedStu.section}`,
-            stopName: matchedStu.pickupDropStopName,
-            transportStatus: matchedStu.transportStatus,
-            driverStatus: 'Pending',
-            assistantStatus: 'Pending',
-            reconciliationStatus: 'Assistant_Pending',
-          };
-          this.attendance.push(rec);
         }
+        const effectiveTripId = trip?.id || tripIdPart;
+        const effectiveDate = trip?.date || (tripIdPart.length >= 10 ? tripIdPart.slice(-10) : new Date().toISOString().split('T')[0]);
+        rec = {
+          id: `att-${effectiveTripId}-${matchedStu.id}`,
+          tripId: effectiveTripId,
+          date: effectiveDate,
+          studentId: matchedStu.id,
+          admissionNo: matchedStu.admissionNo,
+          studentName: matchedStu.name,
+          classSection: `${matchedStu.class}-${matchedStu.section}`,
+          stopName: matchedStu.pickupDropStopName,
+          transportStatus: matchedStu.transportStatus,
+          driverStatus: 'Pending',
+          assistantStatus: 'Pending',
+          reconciliationStatus: 'Assistant_Pending',
+        };
+        this.attendance.push(rec);
       }
+    }
 
-      if (!rec) throw new Error('Record not found');
+    if (!rec) throw new Error('Record not found');
 
-      const tripForValidation = this.trips.find(t => t.id === rec!.tripId);
-      if (source === 'driver') {
-        if (
-          !tripForValidation ||
-          !tripForValidation.inTime ||
-          tripForValidation.status === 'Ready' ||
-          tripForValidation.status === 'Planned'
-        ) {
-          throw new Error(
-            'Arrival attendance cannot be marked without marking Arrival (In) Time first.'
-          );
-        }
-        rec.driverStatus = value as any;
-        if (reason !== undefined) {
-          rec.resolutionReason = reason;
-          rec.notes = reason;
-        }
-      } else if (source === 'assistant') {
-        if (
-          !tripForValidation ||
-          !tripForValidation.outTime ||
-          (tripForValidation.status !== 'Departed' &&
-            tripForValidation.status !== 'Completed' &&
-            tripForValidation.status !== 'Verified')
-        ) {
-          throw new Error(
-            'Departure attendance cannot be marked without marking Departure (Out) Time first.'
-          );
-        }
-        rec.assistantStatus = value as any;
-        if (reason !== undefined) {
-          rec.resolutionReason = reason;
-          rec.notes = reason;
-        }
-      } else if (source === 'resolve') {
-        rec.resolvedBy = resolverName;
-        rec.resolutionReason = reason !== undefined ? reason : rec.resolutionReason;
-        rec.notes = reason !== undefined ? reason : rec.notes;
+    const tripForValidation = this.trips.find(t => t.id === rec!.tripId);
+    if (source === 'driver') {
+      if (
+        !tripForValidation ||
+        !tripForValidation.inTime ||
+        tripForValidation.status === 'Ready' ||
+        tripForValidation.status === 'Planned'
+      ) {
+        throw new Error(
+          'Arrival attendance cannot be marked without marking Arrival (In) Time first.'
+        );
       }
+      if (
+        rec.driverStatus &&
+        rec.driverStatus !== 'Pending' &&
+        rec.driverStatus !== value &&
+        role &&
+        role !== 'Admin'
+      ) {
+        throw new Error(
+          'Saved attendance record can be changed by Admin only.'
+        );
+      }
+      rec.driverStatus = value as any;
+      if (reason !== undefined) {
+        rec.resolutionReason = reason;
+        rec.notes = reason;
+      }
+    } else if (source === 'assistant') {
+      if (
+        !tripForValidation ||
+        !tripForValidation.outTime ||
+        (tripForValidation.status !== 'Departed' &&
+          tripForValidation.status !== 'Completed' &&
+          tripForValidation.status !== 'Verified')
+      ) {
+        throw new Error(
+          'Departure attendance cannot be marked without marking Departure (Out) Time first.'
+        );
+      }
+      if (
+        rec.assistantStatus &&
+        rec.assistantStatus !== 'Pending' &&
+        rec.assistantStatus !== value &&
+        role &&
+        role !== 'Admin'
+      ) {
+        throw new Error(
+          'Saved attendance record can be changed by Admin only.'
+        );
+      }
+      rec.assistantStatus = value as any;
+      if (reason !== undefined) {
+        rec.resolutionReason = reason;
+        rec.notes = reason;
+      }
+    } else if (source === 'resolve') {
+      rec.resolvedBy = resolverName;
+      rec.resolutionReason = reason !== undefined ? reason : rec.resolutionReason;
+      rec.notes = reason !== undefined ? reason : rec.notes;
+    }
 
-      const arr = rec.driverStatus || 'Pending';
-      const dep = rec.assistantStatus || 'Pending';
+    const arr = rec.driverStatus || 'Pending';
+    const dep = rec.assistantStatus || 'Pending';
 
-      // Rule: If student is Present during EITHER Arrival OR Departure, overall daily attendance is Present
-      if (arr === 'Present' || dep === 'Present') {
-        rec.resolvedStatus = 'Present';
-      } else if (dep !== 'Pending') {
-        rec.resolvedStatus = dep;
-      } else if (arr !== 'Pending') {
-        rec.resolvedStatus = arr;
+    // Rule: If student is Present during EITHER Arrival OR Departure, overall daily attendance is Present
+    if (arr === 'Present' || dep === 'Present') {
+      rec.resolvedStatus = 'Present';
+    } else if (dep !== 'Pending') {
+      rec.resolvedStatus = dep;
+    } else if (arr !== 'Pending') {
+      rec.resolvedStatus = arr;
+    } else {
+      rec.resolvedStatus = 'Pending';
+    }
+
+    // Rule: Remarks needed ONLY if Arrival and Departure differ; no remarks needed when both are same
+    if (arr !== 'Pending' && dep !== 'Pending') {
+      if (arr === dep) {
+        rec.reconciliationStatus = arr === 'Present' ? 'Matched_Present' : 'Matched_Absent';
+        rec.resolutionReason = '';
+        rec.notes = '';
       } else {
-        rec.resolvedStatus = 'Pending';
+        rec.reconciliationStatus =
+          rec.resolutionReason && rec.resolutionReason.trim().length > 0
+            ? 'Resolved_Exception'
+            : 'Mismatch';
       }
+    } else if (arr !== 'Pending') {
+      rec.reconciliationStatus = 'Assistant_Pending';
+    } else {
+      rec.reconciliationStatus = 'Driver_Pending';
+    }
 
-      // Rule: Remarks needed ONLY if Arrival and Departure differ; no remarks needed when both are same
-      if (arr !== 'Pending' && dep !== 'Pending') {
-        if (arr === dep) {
-          rec.reconciliationStatus = arr === 'Present' ? 'Matched_Present' : 'Matched_Absent';
-          rec.resolutionReason = '';
-          rec.notes = '';
-        } else {
-          rec.reconciliationStatus =
-            rec.resolutionReason && rec.resolutionReason.trim().length > 0
-              ? 'Resolved_Exception'
-              : 'Mismatch';
-        }
-      } else if (arr !== 'Pending') {
-        rec.reconciliationStatus = 'Assistant_Pending';
-      } else {
-        rec.reconciliationStatus = 'Driver_Pending';
+    const trip = this.trips.find(t => t.id === rec!.tripId);
+    if (trip) {
+      const tripAtts = this.attendance.filter(a => a.tripId === trip.id);
+      trip.rosterCount = Math.max(trip.rosterCount || 0, tripAtts.length);
+      trip.presentCountDriver = tripAtts.filter(a => a.driverStatus === 'Present').length;
+      trip.presentCountAssistant = tripAtts.filter(a => a.assistantStatus === 'Present').length;
+      const anyArrivalMarked = tripAtts.some(a => a.driverStatus && a.driverStatus !== 'Pending');
+      const anyDepartureMarked = tripAtts.some(a => a.assistantStatus && a.assistantStatus !== 'Pending');
+      trip.inStrength = anyArrivalMarked ? trip.presentCountDriver : undefined;
+      trip.outStrength = anyDepartureMarked ? trip.presentCountAssistant : undefined;
+      trip.presentCount = tripAtts.filter(
+        a => a.resolvedStatus === 'Present' || a.driverStatus === 'Present' || a.assistantStatus === 'Present'
+      ).length;
+      trip.absentCount = tripAtts.filter(
+        a =>
+          a.driverStatus !== 'Present' &&
+          a.assistantStatus !== 'Present' &&
+          (a.resolvedStatus === 'Absent' || a.driverStatus === 'Absent' || a.assistantStatus === 'Absent')
+      ).length;
+      trip.mismatchCount = tripAtts.filter(
+        a =>
+          a.driverStatus !== 'Pending' &&
+          a.assistantStatus !== 'Pending' &&
+          a.driverStatus !== a.assistantStatus
+      ).length;
+      const memberMismatchNotes = tripAtts
+        .filter(a => a.driverStatus !== 'Pending' && a.assistantStatus !== 'Pending' && a.driverStatus !== a.assistantStatus && (a.resolutionReason || a.notes))
+        .map(a => `${a.studentName.split(' ')[0]}: ${a.resolutionReason || a.notes}`)
+        .join('; ');
+      if (memberMismatchNotes && !trip.strengthMismatchRemark) {
+        trip.strengthMismatchRemark = memberMismatchNotes;
       }
+    }
 
-      const trip = this.trips.find(t => t.id === rec!.tripId);
-      if (trip) {
-        const tripAtts = this.attendance.filter(a => a.tripId === trip.id);
-        trip.rosterCount = Math.max(trip.rosterCount || 0, tripAtts.length);
-        trip.presentCountDriver = tripAtts.filter(a => a.driverStatus === 'Present').length;
-        trip.presentCountAssistant = tripAtts.filter(a => a.assistantStatus === 'Present').length;
-        const anyArrivalMarked = tripAtts.some(a => a.driverStatus && a.driverStatus !== 'Pending');
-        const anyDepartureMarked = tripAtts.some(a => a.assistantStatus && a.assistantStatus !== 'Pending');
-        trip.inStrength = anyArrivalMarked ? trip.presentCountDriver : undefined;
-        trip.outStrength = anyDepartureMarked ? trip.presentCountAssistant : undefined;
-        trip.presentCount = tripAtts.filter(
-          a => a.resolvedStatus === 'Present' || a.driverStatus === 'Present' || a.assistantStatus === 'Present'
-        ).length;
-        trip.absentCount = tripAtts.filter(
-          a =>
-            a.driverStatus !== 'Present' &&
-            a.assistantStatus !== 'Present' &&
-            (a.resolvedStatus === 'Absent' || a.driverStatus === 'Absent' || a.assistantStatus === 'Absent')
-        ).length;
-        trip.mismatchCount = tripAtts.filter(
-          a =>
-            a.driverStatus !== 'Pending' &&
-            a.assistantStatus !== 'Pending' &&
-            a.driverStatus !== a.assistantStatus
-        ).length;
-        const memberMismatchNotes = tripAtts
-          .filter(a => a.driverStatus !== 'Pending' && a.assistantStatus !== 'Pending' && a.driverStatus !== a.assistantStatus && (a.resolutionReason || a.notes))
-          .map(a => `${a.studentName.split(' ')[0]}: ${a.resolutionReason || a.notes}`)
-          .join('; ');
-        if (memberMismatchNotes && !trip.strengthMismatchRemark) {
-          trip.strengthMismatchRemark = memberMismatchNotes;
-        }
-      }
+    return rec;
+  }
 
+  public async updateAttendanceObservation(
+    recordId: string,
+    source: 'driver' | 'assistant' | 'resolve',
+    value: string,
+    resolverName?: string,
+    reason?: string,
+    role?: string
+  ) {
+    return this.enqueueWrite(async () => {
+      const rec = this.applySingleAttendanceObservationInternal(
+        recordId,
+        source,
+        value,
+        resolverName,
+        reason,
+        role
+      );
       await this.internalSyncToGoogleSheets();
       return rec;
+    });
+  }
+
+  public async batchSaveAttendanceObservations(
+    entries: Array<{
+      recordId: string;
+      source: 'driver' | 'assistant';
+      value: string;
+      reason?: string;
+    }>,
+    role?: string
+  ): Promise<TripAttendanceRecord[]> {
+    return this.enqueueWrite(async () => {
+      const updatedRecords: TripAttendanceRecord[] = [];
+      for (const item of entries) {
+        const rec = this.applySingleAttendanceObservationInternal(
+          item.recordId,
+          item.source,
+          item.value,
+          undefined,
+          item.reason,
+          role
+        );
+        updatedRecords.push(rec);
+      }
+      await this.internalSyncToGoogleSheets();
+      return updatedRecords;
     });
   }
 

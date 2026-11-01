@@ -1029,14 +1029,31 @@ export const api = {
     recordId: string,
     source: 'driver' | 'assistant',
     value: string,
-    reason?: string
+    reason?: string,
+    role?: string
   ): Promise<TripAttendanceRecord> => {
     const res = await fetch(`/api/attendance/${recordId}/mark`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source, value, reason }),
+      body: JSON.stringify({ source, value, reason, role }),
     });
-    return res.json();
+    return parseApiJson(res, 'Failed to save attendance');
+  },
+  batchSaveAttendance: async (
+    entries: Array<{
+      recordId: string;
+      source: 'driver' | 'assistant';
+      value: string;
+      reason?: string;
+    }>,
+    role?: string
+  ): Promise<TripAttendanceRecord[]> => {
+    const res = await fetch('/api/attendance/batch-save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries, role }),
+    });
+    return parseApiJson(res, 'Failed to save attendance records');
   },
   resolveAttendanceMismatch: async (recordId: string, value: string, resolverName: string, reason: string): Promise<TripAttendanceRecord> => {
     const res = await fetch(`/api/attendance/${recordId}/resolve`, {
