@@ -1049,4 +1049,146 @@ apiRouter.delete('/complaints/:id', async (req: Request, res: Response) => {
   }
 });
 
+// 17. Dedicated Top-Level Print Page Endpoint (escapes iframe sandbox without allow-modals)
+apiRouter.post('/print-page', (req: Request, res: Response) => {
+  const rawTitle = String(req.body?.title || 'Document Print');
+  const rawSubtitle = String(req.body?.subtitle || '');
+  const rawHtml = String(req.body?.html || '');
 
+  const safeTitle = rawTitle
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const safeSubtitle = rawSubtitle
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  const styleMatches = rawHtml.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
+  const bodyMatch = rawHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  const bodyContent = bodyMatch ? bodyMatch[1] : rawHtml;
+
+  const pageHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${safeTitle}</title>
+  <style>
+    @page { size: A4; margin: 10mm; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #f1f5f9;
+      color: #0f172a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      font-size: 12px;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .print-toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: #0f172a;
+      color: #ffffff;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .print-toolbar-title {
+      font-size: 14px;
+      font-weight: 800;
+      color: #ffffff;
+    }
+    .print-toolbar-sub {
+      font-size: 11px;
+      color: #cbd5e1;
+      margin-top: 2px;
+    }
+    .print-toolbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn-print-now {
+      background: #f59e0b;
+      color: #0f172a;
+      border: none;
+      padding: 9px 18px;
+      border-radius: 8px;
+      font-weight: 800;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-close-tab {
+      background: #334155;
+      color: #ffffff;
+      border: 1px solid #475569;
+      padding: 9px 14px;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .print-sheet {
+      max-width: 210mm;
+      margin: 20px auto;
+      background: #ffffff;
+      color: #0f172a;
+      padding: 16px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { color: #0f172a; }
+    @media print {
+      html, body {
+        background: #ffffff !important;
+      }
+      .print-toolbar {
+        display: none !important;
+      }
+      .print-sheet {
+        max-width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+      }
+    }
+  </style>
+  ${styleMatches.join('\n')}
+</head>
+<body>
+  <div class="print-toolbar">
+    <div>
+      <div class="print-toolbar-title">${safeTitle}</div>
+      ${safeSubtitle ? `<div class="print-toolbar-sub">${safeSubtitle}</div>` : ''}
+    </div>
+    <div class="print-toolbar-actions">
+      <button type="button" class="btn-print-now" onclick="window.print()">🖨️ Print / Save as PDF</button>
+      <button type="button" class="btn-close-tab" onclick="window.close()">✕ Close</button>
+    </div>
+  </div>
+  <div class="print-sheet">
+    ${bodyContent}
+  </div>
+  <script>
+    window.addEventListener('load', function() {
+      setTimeout(function() {
+        window.focus();
+        window.print();
+      }, 250);
+    });
+  </script>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(pageHtml);
+});

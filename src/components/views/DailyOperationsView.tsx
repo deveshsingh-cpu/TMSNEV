@@ -1026,6 +1026,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   };
 
   // --- Print Route List State ---
+  const [packVehicleFilter, setPackVehicleFilter] = useState<string>('all');
   const [packRouteId, setPackRouteId] = useState<string>(routes[0]?.id || '');
   const [packWeekStart, setPackWeekStart] = useState<string>(todayStr);
   const [packWeekEnd, setPackWeekEnd] = useState<string>(() => {
@@ -1034,11 +1035,27 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     return d.toISOString().split('T')[0];
   });
 
-  useEffect(() => {
-    if (!packRouteId && routes.length > 0) {
-      setPackRouteId(routes[0].id);
+  const filteredPackRoutes = routes.filter((r) => {
+    if (lockedCampus && r.campus && r.campus !== lockedCampus) return false;
+    if (
+      packVehicleFilter !== 'all' &&
+      r.vehicleId !== packVehicleFilter &&
+      r.vehicleNumber !== packVehicleFilter &&
+      r.vehicleLast4 !== packVehicleFilter
+    ) {
+      return false;
     }
-  }, [routes, packRouteId]);
+    return true;
+  });
+
+  useEffect(() => {
+    if (
+      filteredPackRoutes.length > 0 &&
+      !filteredPackRoutes.some((r) => r.id === packRouteId)
+    ) {
+      setPackRouteId(filteredPackRoutes[0].id);
+    }
+  }, [routes, packVehicleFilter, packRouteId, lockedCampus]);
 
   const handleStartCalendarChange = (val: string) => {
     setPackWeekStart(val);
@@ -1073,7 +1090,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   };
 
   const weekDates = getSelectedWeekDates();
-  const selectedPackRoute = routes.find((r) => r.id === packRouteId) || routes[0];
+  const selectedPackRoute =
+    filteredPackRoutes.find((r) => r.id === packRouteId) ||
+    routes.find((r) => r.id === packRouteId) ||
+    filteredPackRoutes[0] ||
+    routes[0];
   const routeRosterMembers = getMembersForRoute(selectedPackRoute);
 
   const handlePrintRouteList = () => {
@@ -1504,25 +1525,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         </body>
       </html>`;
 
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.right = '0';
-    iframe.style.bottom = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = '0';
-    document.body.appendChild(iframe);
-    const doc = iframe.contentWindow?.document;
-    if (doc) {
-      doc.open();
-      doc.write(html);
-      doc.close();
-      setTimeout(() => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-        setTimeout(() => document.body.removeChild(iframe), 1500);
-      }, 250);
-    }
+    openHtmlPrintPreview({
+      title: `Transport Timings & Attendance Summary — ${formattedSummaryDate}`,
+      subtitle: `Campus: ${summaryCampus} • Vehicles: ${summaryRows.length}`,
+      html,
+    });
   };
 
   const formattedSummaryDate = summaryDate
@@ -2857,17 +2864,35 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       {activeSubView === 'pack' && (
         <div className="space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Select Route
+                  Filter by Vehicle
+                </label>
+                <select
+                  value={packVehicleFilter}
+                  onChange={(e) => setPackVehicleFilter(e.target.value)}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50"
+                >
+                  <option value="all">All Vehicles ({routes.length} Routes)</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.registrationNumber}>
+                      {v.registrationNumber} {v.nickname ? `— ${v.nickname}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Select Route ({filteredPackRoutes.length})
                 </label>
                 <select
                   value={packRouteId}
                   onChange={(e) => setPackRouteId(e.target.value)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50"
                 >
-                  {routes.map((r) => (
+                  {filteredPackRoutes.map((r) => (
                     <option key={r.id} value={r.id}>
                       {r.code} — {r.name || r.villageNames.join(', ')} ({r.vehicleNumber})
                     </option>

@@ -2382,17 +2382,28 @@ export class SheetsDatabaseManager {
             if (isLinkedToVillage) {
               member.villageId = updatedVillage.id;
               member.villageName = newVillageName;
-              const bestRoute =
-                this.findBestRouteForVillageOrStop(
-                  updatedVillage.id,
-                  newVillageName,
-                  member.pickupDropStopId,
-                  member.pickupDropStopName,
-                  member.campus
-                ) || matchingRouteForVillage;
-              if (bestRoute) {
-                member.routeId = bestRoute.id;
-                member.routeCode = bestRoute.code;
+              const hasExistingValidRoute =
+                Boolean(member.routeId && this.routes.some(r => r.id === member.routeId)) ||
+                Boolean(
+                  member.routeCode &&
+                    member.routeCode !== 'Unassigned' &&
+                    this.routes.some(
+                      r => r.code.trim().toLowerCase() === member.routeCode.trim().toLowerCase()
+                    )
+                );
+              if (!hasExistingValidRoute) {
+                const bestRoute =
+                  this.findBestRouteForVillageOrStop(
+                    updatedVillage.id,
+                    newVillageName,
+                    member.pickupDropStopId,
+                    member.pickupDropStopName,
+                    member.campus
+                  ) || matchingRouteForVillage;
+                if (bestRoute) {
+                  member.routeId = bestRoute.id;
+                  member.routeCode = bestRoute.code;
+                }
               }
             }
           }
@@ -8341,7 +8352,30 @@ export class SheetsDatabaseManager {
       }
     }
 
+    // Ensure every route has stops, stopIds, and stopNames synced from its villages
+    for (const r of this.routes) {
+      if (!Array.isArray(r.stops) || r.stops.length === 0 || !Array.isArray(r.stopIds) || r.stopIds.length === 0) {
+        const routeVillages = this.villages.filter(
+          v =>
+            (Array.isArray(r.villageIds) && r.villageIds.includes(v.id)) ||
+            (Array.isArray(r.villageNames) &&
+              r.villageNames.some(vn => normalizeVillage(vn) === normalizeVillage(v.name)))
+        );
+        if (routeVillages.length > 0) {
+          const derivedStops = routeVillages.flatMap(v => v.stops || []);
+          if (derivedStops.length > 0) {
+            r.stops = derivedStops;
+            r.stopIds = derivedStops.map(st => st.id);
+            r.stopNames = derivedStops.map(st => st.name);
+            changed = true;
+          }
+        }
+      }
+    }
+
     for (const batch of routeSeedBatches) {
+      const targetRouteId = batch.routeObj?.id || batch.fallbackRouteId;
+      const targetRouteCode = batch.routeObj?.code || batch.fallbackRouteCode;
       for (let i = 0; i < batch.members.length; i++) {
         const item = batch.members[i];
         const deterministicId = `${batch.seedPrefix}-${i + 1}`;
@@ -8365,7 +8399,24 @@ export class SheetsDatabaseManager {
           }
           return false;
         });
-        if (existing) continue;
+        if (existing) {
+          if (existing.id === deterministicId) {
+            if (existing.routeId !== targetRouteId || existing.routeCode !== targetRouteCode) {
+              existing.routeId = targetRouteId;
+              existing.routeCode = targetRouteCode;
+              changed = true;
+            }
+            const expectedCampus = this.inferCampusFromClass(
+              existing.class || item.className,
+              batch.routeObj?.campus || 'Sr'
+            );
+            if (existing.campus !== expectedCampus) {
+              existing.campus = expectedCampus;
+              changed = true;
+            }
+          }
+          continue;
+        }
 
         const matchedVil = findMatchingVillage(item.villageMatch);
         const firstStop = matchedVil?.stops?.[0];

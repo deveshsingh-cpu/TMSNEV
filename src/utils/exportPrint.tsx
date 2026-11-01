@@ -189,74 +189,223 @@ export function openHtmlPrintPreview(
         filename?: string;
       }
     | string,
-  legacyTitle?: string
+  legacySecondArg?: string
 ) {
-  const options =
-    typeof optionsOrHtml === 'string'
-      ? { html: optionsOrHtml, title: legacyTitle || 'Document Preview' }
-      : optionsOrHtml;
-  const { title, subtitle, html, filename } = options;
+  let title = 'Document Preview';
+  let subtitle: string | undefined;
+  let html = '';
+  let filename: string | undefined;
 
-  // Create an immediate, visible full-screen Print Preview Modal in DOM so it works reliably even in sandboxed iframes
+  if (typeof optionsOrHtml === 'string') {
+    const firstLooksLikeHtml = /<[a-z][\s\S]*>/i.test(optionsOrHtml);
+    const secondLooksLikeHtml = Boolean(legacySecondArg && /<[a-z][\s\S]*>/i.test(legacySecondArg));
+    if (!firstLooksLikeHtml && secondLooksLikeHtml && legacySecondArg) {
+      title = optionsOrHtml || 'Document Preview';
+      html = legacySecondArg;
+    } else {
+      html = optionsOrHtml;
+      title = legacySecondArg || 'Document Preview';
+    }
+  } else {
+    title = optionsOrHtml.title || 'Document Preview';
+    subtitle = optionsOrHtml.subtitle;
+    html = optionsOrHtml.html || '';
+    filename = optionsOrHtml.filename;
+  }
+
+  const fullHtml = /<html[\s>]/i.test(html)
+    ? html
+    : `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${title.replace(/</g, '&lt;')}</title>
+  <style>
+    @page { size: A4; margin: 12mm; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: #ffffff !important;
+      color: #0f172a !important;
+      margin: 0;
+      padding: 18px;
+      font-size: 12px;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { color: #0f172a; }
+  </style>
+</head>
+<body>${html}</body>
+</html>`;
+
   const existing = document.getElementById('stms-global-print-modal');
   if (existing) existing.remove();
+  const existingMount = document.getElementById('stms-print-mount');
+  if (existingMount) existingMount.remove();
+  const existingStyle = document.getElementById('stms-print-style');
+  if (existingStyle) existingStyle.remove();
+
+  // Extract inner <style> blocks and <body> content if full HTML was passed
+  const styleMatches = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  const bodyInnerHtml = bodyMatch ? bodyMatch[1] : html;
+
+  const printStyleEl = document.createElement('style');
+  printStyleEl.id = 'stms-print-style';
+  printStyleEl.textContent = `
+    #stms-print-mount {
+      display: none;
+    }
+    @media print {
+      @page { size: A4; margin: 10mm; }
+      html, body {
+        background: #ffffff !important;
+        color: #0f172a !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      body > *:not(#stms-print-mount) {
+        display: none !important;
+      }
+      #stms-print-mount {
+        display: block !important;
+        background: #ffffff !important;
+        color: #0f172a !important;
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 8px !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        font-size: 12px;
+      }
+      #stms-print-mount table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      #stms-print-mount th, #stms-print-mount td {
+        color: #0f172a;
+      }
+    }
+  `;
+  document.head.appendChild(printStyleEl);
+
+  const printMount = document.createElement('div');
+  printMount.id = 'stms-print-mount';
+  printMount.innerHTML = `${styleMatches.join('\n')}${bodyInnerHtml}`;
+  document.body.appendChild(printMount);
+
+  const cleanupPrintModal = () => {
+    overlay.remove();
+    printMount.remove();
+    printStyleEl.remove();
+  };
 
   const overlay = document.createElement('div');
   overlay.id = 'stms-global-print-modal';
   overlay.style.cssText =
-    'position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,0.75);backdrop-filter:blur(4px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;';
+    'position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,0.55);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;';
 
   const container = document.createElement('div');
   container.style.cssText =
-    'background:#ffffff;border-radius:16px;width:100%;max-width:1000px;max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.4);border:1px solid #cbd5e1;';
+    'background:#ffffff;border-radius:14px;width:100%;max-width:1020px;max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 45px rgba(0,0,0,0.25);border:1px solid #cbd5e1;';
 
   const topBar = document.createElement('div');
   topBar.style.cssText =
-    'background:#0f172a;color:#ffffff;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
+    'background:#ffffff;color:#0f172a;padding:14px 20px;border-bottom:2px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
 
   const leftInfo = document.createElement('div');
-  leftInfo.innerHTML = `<div style="font-weight:800;font-size:14px;">Print Preview — ${title}</div>
-    <div style="font-size:11px;color:#94a3b8;">${subtitle || 'Ready to print or save as A4 document'}</div>`;
+  const titleEl = document.createElement('div');
+  titleEl.style.cssText = 'font-weight:800;font-size:15px;color:#0f172a;';
+  titleEl.textContent = title;
+  leftInfo.appendChild(titleEl);
+
+  if (subtitle) {
+    const subEl = document.createElement('div');
+    subEl.style.cssText = 'font-size:11px;color:#64748b;margin-top:2px;';
+    subEl.textContent = subtitle;
+    leftInfo.appendChild(subEl);
+  }
 
   const btnGroup = document.createElement('div');
   btnGroup.style.cssText = 'display:flex;align-items:center;gap:8px;';
 
+  const printForm = document.createElement('form');
+  printForm.method = 'POST';
+  printForm.action = '/api/print-page';
+  printForm.target = '_blank';
+  printForm.style.cssText = 'margin:0;display:inline-flex;';
+
+  const titleInput = document.createElement('input');
+  titleInput.type = 'hidden';
+  titleInput.name = 'title';
+  titleInput.value = title;
+
+  const subtitleInput = document.createElement('input');
+  subtitleInput.type = 'hidden';
+  subtitleInput.name = 'subtitle';
+  subtitleInput.value = subtitle || '';
+
+  const htmlInput = document.createElement('input');
+  htmlInput.type = 'hidden';
+  htmlInput.name = 'html';
+  htmlInput.value = fullHtml;
+
   const printNowBtn = document.createElement('button');
-  printNowBtn.type = 'button';
-  printNowBtn.textContent = '🖨️ Print Now (A4)';
+  printNowBtn.type = 'submit';
+  printNowBtn.textContent = '🖨️ Print Document';
   printNowBtn.style.cssText =
-    'background:#f59e0b;color:#0f172a;border:none;padding:8px 16px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;';
+    'background:#0f172a;color:#ffffff;border:none;padding:9px 18px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.1);';
+
+  printForm.appendChild(titleInput);
+  printForm.appendChild(subtitleInput);
+  printForm.appendChild(htmlInput);
+  printForm.appendChild(printNowBtn);
+
+  printForm.onsubmit = (e) => {
+    const isInsideIframe = window.self !== window.top;
+    if (!isInsideIframe) {
+      let didOpenPrintDialog = false;
+      const onBeforePrint = () => {
+        didOpenPrintDialog = true;
+      };
+      window.addEventListener('beforeprint', onBeforePrint, { once: true });
+      try {
+        window.focus();
+        window.print();
+      } catch {
+        // fallback to form submission
+      }
+      window.removeEventListener('beforeprint', onBeforePrint);
+      if (didOpenPrintDialog) {
+        e.preventDefault();
+      }
+    }
+  };
 
   const downloadHtmlBtn = document.createElement('button');
   downloadHtmlBtn.type = 'button';
-  downloadHtmlBtn.textContent = '⬇ Download Printable (.html)';
+  downloadHtmlBtn.textContent = '⬇ Download (.html)';
   downloadHtmlBtn.style.cssText =
-    'background:#1e293b;color:#ffffff;border:1px solid #334155;padding:8px 14px;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;';
+    'background:#f8fafc;color:#0f172a;border:1px solid #cbd5e1;padding:9px 14px;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;';
 
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.textContent = '✕ Close';
   closeBtn.style.cssText =
-    'background:#334155;color:#ffffff;border:none;padding:8px 14px;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;';
+    'background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;padding:9px 14px;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;';
 
   const frameWrapper = document.createElement('div');
-  frameWrapper.style.cssText = 'flex:1;overflow:auto;background:#f1f5f9;padding:20px;display:flex;justify-content:center;';
+  frameWrapper.style.cssText =
+    'flex:1;overflow:auto;background:#f8fafc;padding:20px;display:flex;justify-content:center;';
 
   const iframe = document.createElement('iframe');
   iframe.style.cssText =
-    'width:100%;min-height:660px;background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.06);';
-
-  printNowBtn.onclick = () => {
-    try {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    } catch {
-      window.print();
-    }
-  };
+    'width:100%;min-height:680px;background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.05);';
 
   downloadHtmlBtn.onclick = () => {
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8;' });
+    const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -269,14 +418,14 @@ export function openHtmlPrintPreview(
   };
 
   closeBtn.onclick = () => {
-    overlay.remove();
+    cleanupPrintModal();
   };
 
   overlay.onclick = (e) => {
-    if (e.target === overlay) overlay.remove();
+    if (e.target === overlay) cleanupPrintModal();
   };
 
-  btnGroup.appendChild(printNowBtn);
+  btnGroup.appendChild(printForm);
   btnGroup.appendChild(downloadHtmlBtn);
   btnGroup.appendChild(closeBtn);
   topBar.appendChild(leftInfo);
@@ -291,7 +440,7 @@ export function openHtmlPrintPreview(
   const doc = iframe.contentWindow?.document;
   if (doc) {
     doc.open();
-    doc.write(html);
+    doc.write(fullHtml);
     doc.close();
   }
 }

@@ -1510,10 +1510,40 @@ export const FeesView: React.FC<FeesViewProps> = ({
       {/* TAB 4: DEMAND SLIP & PHONE FOLLOW-UP (With Past Communications)     */}
       {/* =================================================================== */}
       {activeTab === 'demand_slip' && (() => {
+        const findStudentRoute = (s: StudentMember) =>
+          routes.find(
+            (r) =>
+              (Boolean(r.id) && r.id === s.routeId) ||
+              (Boolean(r.code) && Boolean(s.routeCode) && r.code.trim() === s.routeCode.trim())
+          );
+
+        const resolveVehicleNum = (s: StudentMember, rt?: Route) => {
+          const direct =
+            rt?.vehicleNumber ||
+            rt?.vehicleLast4 ||
+            (rt as any)?.assignedVehicleReg ||
+            s.vehicleNumber ||
+            s.vehicleLast4 ||
+            '';
+          if (direct) return direct;
+          if (rt?.vehicleId) {
+            const vObj = vehicles.find((v) => v.id === rt.vehicleId);
+            if (vObj) return vObj.registrationNumber || vObj.last4Digits || vObj.busCode || '';
+          }
+          const codeParts = (rt?.code || s.routeCode || '').split('/');
+          return codeParts.length >= 2 && codeParts[1] ? codeParts[1] : '—';
+        };
+
+        const resolveStop = (s: StudentMember) =>
+          s.pickupDropStopName || s.pickupStopName || s.villageName || s.stopName || '—';
+
+        const resolvePhone = (s: StudentMember) =>
+          s.mobile || s.phone || s.parentPhone || s.emergencyContact || '—';
+
         const filteredDemandStudents = students
-          .filter((s) => s.transportStatus !== 'Left School')
+          .filter((s) => s.transportStatus !== 'Left' && s.transportStatus !== 'Left School')
           .filter((s) => {
-            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const rt = findStudentRoute(s);
             const stuCampus = s.campus || rt?.campus || 'Sr';
             if (lockedCampus && stuCampus !== lockedCampus) return false;
             if (demandCampusFilter !== 'all' && stuCampus !== demandCampusFilter) return false;
@@ -1522,13 +1552,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
             if (
               demandRouteFilter !== 'all' &&
               s.routeId !== demandRouteFilter &&
-              s.routeName !== demandRouteFilter &&
+              s.routeCode !== demandRouteFilter &&
               rt?.code !== demandRouteFilter
             ) {
               return false;
             }
             if (demandVehicleFilter !== 'all') {
-              const veh = s.vehicleNumber || rt?.assignedVehicleReg || '';
+              const veh = resolveVehicleNum(s, rt);
               if (veh !== demandVehicleFilter) return false;
             }
             if (demandSearch.trim()) {
@@ -1537,14 +1567,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 s.name.toLowerCase().includes(q) ||
                 s.admissionNo.toLowerCase().includes(q) ||
                 (s.fatherName || '').toLowerCase().includes(q) ||
-                (s.parentPhone || s.mobile || '').toLowerCase().includes(q) ||
-                (s.villageName || s.stopName || '').toLowerCase().includes(q);
+                resolvePhone(s).toLowerCase().includes(q) ||
+                resolveStop(s).toLowerCase().includes(q);
               if (!match) return false;
             }
             return true;
           })
           .map((s) => {
-            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const rt = findStudentRoute(s);
             const stuInvoices = invoices.filter((i) => i.studentId === s.id);
             const stuReceipts = receipts.filter((r) => r.studentId === s.id);
             const prevDuesInv = stuInvoices.filter(
@@ -1561,6 +1591,35 @@ export const FeesView: React.FC<FeesViewProps> = ({
               (sum, i) => sum + Number(i.netPayable ?? i.netAmount ?? 0),
               0
             );
+            const formatInvoiceMonthLabel = (m: string): string => {
+              const map: Record<string, string> = {
+                '2026-11': 'November 2026',
+                '2026-12': 'December 2026',
+                '2027-01': 'January 2027',
+                '2027-02': 'February 2027',
+                '2027-03': 'March 2027',
+                '2026-10': 'October 2026',
+                '2026-09': 'September 2026',
+                '2026-08': 'August 2026',
+                '2026-07': 'July 2026',
+                '2026-06': 'June 2026',
+                '2026-05': 'May 2026',
+                '2026-04': 'April 2026',
+              };
+              return map[m] || m;
+            };
+
+            const chargedMonthLabels = Array.from(
+              new Set(
+                sessionInv
+                  .filter((i) => Number(i.netPayable ?? i.netAmount ?? 0) > 0)
+                  .map((i) => formatInvoiceMonthLabel(i.month))
+              )
+            );
+            const monthNameDisplay =
+              chargedMonthLabels.length > 0 ? chargedMonthLabels.join(', ') : 'November 2026';
+            const monthFeeHeader = `${monthNameDisplay} Fee (₹)`;
+
             const totalBilled = prevDuesBilled + sessionBilled;
             const totalCollected = stuReceipts.reduce(
               (sum, r) => sum + Number(r.amountPaid ?? r.amount ?? 0),
@@ -1574,10 +1633,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
             return {
               student: s,
               campus: s.campus || rt?.campus || 'Sr',
-              routeCode: rt?.code || s.routeName || '—',
-              vehicleReg: s.vehicleNumber || rt?.assignedVehicleReg || '—',
+              routeCode: rt?.code || s.routeCode || '—',
+              vehicleReg: resolveVehicleNum(s, rt),
+              stopDisplay: resolveStop(s),
+              phoneDisplay: resolvePhone(s),
               prevDuesBilled,
               sessionBilled,
+              monthNameDisplay,
+              monthFeeHeader,
               totalCollected,
               totalOutstanding,
               stuFollowUps,
@@ -1592,7 +1655,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
           const html = rowsToPrint
             .map(
               (r, idx) => `
-              <div style="border: 2px solid #0f172a; border-radius: 10px; padding: 14px; margin-bottom: 14px; page-break-inside: avoid; font-family: Inter, Arial, sans-serif;">
+              <div style="background: #ffffff; color: #0f172a; border: 2px solid #0f172a; border-radius: 10px; padding: 14px; margin-bottom: 14px; page-break-inside: avoid; font-family: Inter, Arial, sans-serif;">
                 <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 8px; margin-bottom: 10px;">
                   <div>
                     <div style="font-size: 15px; font-weight: 800; color: #0f172a; text-transform: uppercase;">${schoolName}</div>
@@ -1603,43 +1666,116 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     <div><strong>Date:</strong> ${todayStr}</div>
                   </div>
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 14px; font-size: 11.5px; margin-bottom: 10px;">
-                  <div><strong>Student Name:</strong> ${r.student.name}</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 14px; font-size: 11.5px; margin-bottom: 10px; color: #0f172a;">
+                  <div><strong>Member Name:</strong> ${r.student.name}</div>
                   <div><strong>Admission No:</strong> <span style="font-family: monospace;">${r.student.admissionNo}</span></div>
                   <div><strong>Class &amp; Sec:</strong> ${r.student.class}-${r.student.section}</div>
                   <div><strong>Father's Name:</strong> ${r.student.fatherName || r.student.parentName || '—'}</div>
                   <div><strong>Route / Vehicle:</strong> ${r.routeCode} (${r.vehicleReg})</div>
-                  <div><strong>Stop / Village:</strong> ${r.student.villageName || r.student.stopName || '—'}</div>
-                  <div><strong>Phone:</strong> ${r.student.parentPhone || r.student.mobile || '—'}</div>
+                  <div><strong>Stop / Village:</strong> ${r.stopDisplay}</div>
+                  <div><strong>Phone:</strong> ${r.phoneDisplay}</div>
                   <div><strong>Campus:</strong> ${r.campus}</div>
                   <div><strong>Pay By Date:</strong> <strong style="color: #be123c;">${demandDueDate}</strong></div>
                 </div>
-                <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px; background: #ffffff; color: #0f172a;">
                   <thead>
-                    <tr style="background: #f8fafc;">
-                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Previous Dues (₹)</th>
-                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Current Session Fee (₹)</th>
-                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Paid Amount (₹)</th>
-                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Net Outstanding Due (₹)</th>
+                    <tr style="background: #f1f5f9; color: #0f172a;">
+                      <th style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; color: #0f172a;">Previous Dues (₹)</th>
+                      <th style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; color: #0f172a;">${r.monthFeeHeader}</th>
+                      <th style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; color: #0f172a;">Net Outstanding Due (₹)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${r.prevDuesBilled.toLocaleString('en-IN')}</td>
-                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${r.sessionBilled.toLocaleString('en-IN')}</td>
-                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857;">₹${r.totalCollected.toLocaleString('en-IN')}</td>
-                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-weight: 800; color: #be123c;">₹${r.totalOutstanding.toLocaleString('en-IN')}</td>
+                    <tr style="background: #ffffff; color: #0f172a;">
+                      <td style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; color: #0f172a;">₹${r.prevDuesBilled.toLocaleString('en-IN')}</td>
+                      <td style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; color: #0f172a;">₹${r.sessionBilled.toLocaleString('en-IN')}</td>
+                      <td style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; font-weight: 800; color: #be123c;">₹${r.totalOutstanding.toLocaleString('en-IN')}</td>
                     </tr>
                   </tbody>
                 </table>
-                <div style="font-size: 10.5px; color: #475569;">
+                <div style="font-size: 10.5px; color: #334155;">
                   Dear Parent, kindly deposit the pending transport dues of <strong>₹${r.totalOutstanding.toLocaleString('en-IN')}</strong> by <strong>${demandDueDate}</strong>.
                 </div>
               </div>
             `
             )
             .join('');
-          openHtmlPrintPreview(title, html);
+          openHtmlPrintPreview({
+            title,
+            subtitle: `${rowsToPrint.length} Demand Slip(s) • Pay By: ${demandDueDate}`,
+            html,
+          });
+        };
+
+        const printFilteredListPdf = () => {
+          if (filteredDemandStudents.length === 0) return;
+          const totalPrev = filteredDemandStudents.reduce((s, r) => s + r.prevDuesBilled, 0);
+          const totalMonthFee = filteredDemandStudents.reduce((s, r) => s + r.sessionBilled, 0);
+          const totalOut = filteredDemandStudents.reduce((s, r) => s + r.totalOutstanding, 0);
+          const activeMonthColTitle =
+            filteredDemandStudents[0]?.monthFeeHeader || 'November 2026 Fee (₹)';
+
+          const rowsHtml = filteredDemandStudents
+            .map(
+              (r, idx) => `
+              <tr style="background: #ffffff; color: #0f172a;">
+                <td style="border: 1px solid #94a3b8; padding: 6px; text-align: center; color: #0f172a;">${idx + 1}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; font-family: monospace; font-weight: 700; color: #0f172a;">${r.student.admissionNo}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; font-weight: 700; color: #0f172a;">${r.student.name}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">${r.student.class}-${r.student.section}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">${r.routeCode} (${r.vehicleReg})</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">${r.stopDisplay}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">${r.student.fatherName || r.student.parentName || '—'}<br/><span style="font-family: monospace; font-size: 10px;">${r.phoneDisplay}</span></td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">₹${r.prevDuesBilled.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">₹${r.sessionBilled.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; font-weight: 800; color: #be123c;">₹${r.totalOutstanding.toLocaleString('en-IN')}</td>
+              </tr>`
+            )
+            .join('');
+
+          const listHtml = `
+            <div style="background: #ffffff; color: #0f172a; padding: 10px; font-family: Inter, Arial, sans-serif;">
+              <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 12px;">
+                <h1 style="margin: 0; font-size: 18px; text-transform: uppercase; color: #0f172a;">${schoolName}</h1>
+                <p style="margin: 4px 0 0; font-size: 12px; font-weight: 700; color: #334155;">TRANSPORT FEE REMINDER / OUTSTANDING REGISTER</p>
+                <p style="margin: 4px 0 0; font-size: 11px; color: #475569;">
+                  Route: <strong>${demandRouteFilter === 'all' ? 'All Routes' : demandRouteFilter}</strong> &nbsp;|&nbsp;
+                  Vehicle: <strong>${demandVehicleFilter === 'all' ? 'All Vehicles' : demandVehicleFilter}</strong> &nbsp;|&nbsp;
+                  Date: <strong>${todayStr}</strong>
+                </p>
+              </div>
+              <table style="width: 100%; border-collapse: collapse; font-size: 11px; background: #ffffff; color: #0f172a;">
+                <thead>
+                  <tr style="background: #f1f5f9; color: #0f172a;">
+                    <th style="border: 1px solid #94a3b8; padding: 6px; text-align: center;">Sl</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px;">Adm No</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px;">Member Name</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px;">Class</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px;">Route / Vehicle</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px;">Village / Stop</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px;">Father &amp; Phone</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right;">Previous Dues (₹)</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right;">${activeMonthColTitle}</th>
+                    <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right;">Net Outstanding (₹)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                  <tr style="background: #f8fafc; font-weight: 800; color: #0f172a;">
+                    <td colspan="7" style="border: 1px solid #94a3b8; padding: 7px; text-align: right;">TOTAL (${filteredDemandStudents.length} Members)</td>
+                    <td style="border: 1px solid #94a3b8; padding: 7px; text-align: right;">₹${totalPrev.toLocaleString('en-IN')}</td>
+                    <td style="border: 1px solid #94a3b8; padding: 7px; text-align: right;">₹${totalMonthFee.toLocaleString('en-IN')}</td>
+                    <td style="border: 1px solid #94a3b8; padding: 7px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          `;
+          openHtmlPrintPreview({
+            title: `Fee Reminder Register (${filteredDemandStudents.length} Members)`,
+            subtitle: `Route: ${demandRouteFilter === 'all' ? 'All Routes' : demandRouteFilter} • Date: ${todayStr}`,
+            html: listHtml,
+          });
         };
 
         return (
@@ -1648,11 +1784,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Filter &amp; Print Demand Slips / Take Phone Follow-up
+                    Demand Slips &amp; Phone Follow-up
                   </h3>
-                  <p className="text-xs text-slate-500">
-                    Click &quot;Follow-up&quot; against any member to call and view all past communications
-                  </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -1665,6 +1798,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
                       className="font-mono font-bold text-slate-900 bg-transparent focus:outline-hidden"
                     />
                   </div>
+                  <button
+                    type="button"
+                    onClick={printFilteredListPdf}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>Print Filtered List PDF ({filteredDemandStudents.length})</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() =>
@@ -1729,6 +1870,25 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 </div>
 
                 <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Vehicle</label>
+                  <select
+                    value={demandVehicleFilter}
+                    onChange={(e) => {
+                      setDemandVehicleFilter(e.target.value);
+                      setDemandRouteFilter('all');
+                    }}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Vehicles</option>
+                    {vehicles.map((v) => (
+                      <option key={v.id} value={v.registrationNumber}>
+                        {v.registrationNumber}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Route</label>
                   <select
                     value={demandRouteFilter}
@@ -1738,27 +1898,17 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     <option value="all">All Routes</option>
                     {routes
                       .filter((r) => !lockedCampus || (r.campus || 'Sr') === lockedCampus)
+                      .filter(
+                        (r) =>
+                          demandVehicleFilter === 'all' ||
+                          r.vehicleNumber === demandVehicleFilter ||
+                          r.vehicleLast4 === demandVehicleFilter
+                      )
                       .map((r) => (
                         <option key={r.id} value={r.code}>
                           {r.code} ({r.campus || 'Sr'})
                         </option>
                       ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Vehicle</label>
-                  <select
-                    value={demandVehicleFilter}
-                    onChange={(e) => setDemandVehicleFilter(e.target.value)}
-                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
-                  >
-                    <option value="all">All Vehicles</option>
-                    {vehicles.map((v) => (
-                      <option key={v.id} value={v.registrationNumber}>
-                        {v.registrationNumber}
-                      </option>
-                    ))}
                   </select>
                 </div>
 
@@ -1788,17 +1938,17 @@ export const FeesView: React.FC<FeesViewProps> = ({
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-              <div className="overflow-x-auto">
+              <div className="max-h-[540px] overflow-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase sticky top-0 z-10">
                     <tr>
                       <th className="py-3 px-4">Member &amp; Stop</th>
                       <th className="py-3 px-2.5">Campus / Class</th>
                       <th className="py-3 px-3">Route &amp; Vehicle</th>
                       <th className="py-3 px-3">Father &amp; Phone</th>
                       <th className="py-3 px-2.5 text-right font-mono">Prev. Dues</th>
-                      <th className="py-3 px-2.5 text-right font-mono">Collected</th>
-                      <th className="py-3 px-3 text-right font-mono">Outstanding</th>
+                      <th className="py-3 px-2.5 text-right font-mono">Month Fee</th>
+                      <th className="py-3 px-3 text-right font-mono">Net Outstanding</th>
                       <th className="py-3 px-3">Past Communications</th>
                       <th className="py-3 px-4 text-right">Demand Slip / Follow-up</th>
                     </tr>
@@ -1809,7 +1959,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                         <td className="py-3 px-4">
                           <div className="font-bold text-slate-900">{r.student.name}</div>
                           <div className="text-[11px] font-mono text-slate-500">
-                            {r.student.admissionNo} • {r.student.villageName || r.student.stopName || '—'}
+                            {r.student.admissionNo} • {r.stopDisplay}
                           </div>
                         </td>
                         <td className="py-3 px-2.5">
@@ -1829,18 +1979,21 @@ export const FeesView: React.FC<FeesViewProps> = ({
                             {r.student.fatherName || r.student.parentName || '—'}
                           </div>
                           <a
-                            href={`tel:${r.student.parentPhone || r.student.mobile || ''}`}
+                            href={`tel:${r.phoneDisplay}`}
                             className="text-[11px] font-mono font-bold text-indigo-600 hover:underline inline-flex items-center gap-1"
                           >
                             <PhoneCall className="w-3 h-3" />
-                            <span>{r.student.parentPhone || r.student.mobile || '—'}</span>
+                            <span>{r.phoneDisplay}</span>
                           </a>
                         </td>
                         <td className="py-3 px-2.5 text-right font-mono">
                           ₹{r.prevDuesBilled.toLocaleString('en-IN')}
                         </td>
-                        <td className="py-3 px-2.5 text-right font-mono font-bold text-emerald-700">
-                          ₹{r.totalCollected.toLocaleString('en-IN')}
+                        <td className="py-3 px-2.5 text-right font-mono">
+                          <div className="font-bold text-slate-800">
+                            ₹{r.sessionBilled.toLocaleString('en-IN')}
+                          </div>
+                          <div className="text-[10px] text-slate-500">{r.monthNameDisplay}</div>
                         </td>
                         <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
                           ₹{r.totalOutstanding.toLocaleString('en-IN')}
@@ -1880,7 +2033,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                                 setDemandFollowUpStudent(r.student);
                                 setFolStudentId(r.student.id);
                                 setFolContactPerson(r.student.fatherName || r.student.parentName || 'Parent');
-                                setFolPhone(r.student.parentPhone || r.student.mobile || '');
+                                setFolPhone(r.phoneDisplay !== '—' ? r.phoneDisplay : '');
                               }}
                               className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
@@ -1918,7 +2071,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
           (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
         );
         const totalPrevDuesBilled = students
-          .filter((s) => s.transportStatus !== 'Left School')
+          .filter((s) => s.transportStatus !== 'Left' && s.transportStatus !== 'Left School')
           .reduce((sum, s) => {
             const inv = prevDuesInvoices.find((i) => i.studentId === s.id);
             return sum + (inv ? Number(inv.netPayable ?? inv.netAmount ?? 0) : Number(s.previousDues || 0));
@@ -1947,16 +2100,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
         // 3. Member-wise Matrix (Previous Dues vs Month-wise Session Fees)
         const matrixRows = students
-          .filter((s) => s.transportStatus !== 'Left School')
+          .filter((s) => s.transportStatus !== 'Left' && s.transportStatus !== 'Left School')
           .filter((s) => {
-            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const rt = routes.find(
+              (r) =>
+                (Boolean(r.id) && r.id === s.routeId) ||
+                (Boolean(r.code) && Boolean(s.routeCode) && r.code.trim() === s.routeCode.trim())
+            );
             const stuCampus = s.campus || rt?.campus || 'Sr';
             if (matrixCampusFilter !== 'all' && stuCampus !== matrixCampusFilter) return false;
             if (matrixClassFilter !== 'all' && s.class !== matrixClassFilter) return false;
             if (
               matrixRouteFilter !== 'all' &&
               s.routeId !== matrixRouteFilter &&
-              s.routeName !== matrixRouteFilter &&
+              s.routeCode !== matrixRouteFilter &&
               rt?.code !== matrixRouteFilter
             ) {
               return false;
@@ -1966,13 +2123,17 @@ export const FeesView: React.FC<FeesViewProps> = ({
               return (
                 s.name.toLowerCase().includes(q) ||
                 s.admissionNo.toLowerCase().includes(q) ||
-                (s.villageName || s.stopName || '').toLowerCase().includes(q)
+                (s.pickupDropStopName || s.villageName || s.stopName || '').toLowerCase().includes(q)
               );
             }
             return true;
           })
           .map((s) => {
-            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const rt = routes.find(
+              (r) =>
+                (Boolean(r.id) && r.id === s.routeId) ||
+                (Boolean(r.code) && Boolean(s.routeCode) && r.code.trim() === s.routeCode.trim())
+            );
             const stuInvoices = invoices.filter((i) => i.studentId === s.id);
             const stuReceipts = receipts.filter((r) => r.studentId === s.id);
             const prevInv = stuInvoices.find(
@@ -2008,7 +2169,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
             return {
               student: s,
               campus: s.campus || rt?.campus || 'Sr',
-              routeCode: rt?.code || s.routeName || '—',
+              routeCode: rt?.code || s.routeCode || '—',
               prevDuesBilled,
               prevDuesPaid,
               prevDuesPending,
@@ -2019,6 +2180,93 @@ export const FeesView: React.FC<FeesViewProps> = ({
             };
           });
 
+        const handlePrintMonthlyMatrix = () => {
+          const rowsHtml = matrixRows
+            .map(
+              (row, idx) => `
+              <tr style="background: #ffffff; color: #0f172a;">
+                <td style="border: 1px solid #94a3b8; padding: 5px; text-align: center;">${idx + 1}</td>
+                <td style="border: 1px solid #94a3b8; padding: 5px;">
+                  <strong>${row.student.name}</strong><br/>
+                  <span style="font-family: monospace; font-size: 10px;">${row.student.admissionNo} (${row.student.class}-${row.student.section})</span>
+                </td>
+                <td style="border: 1px solid #94a3b8; padding: 5px;">${row.campus} / ${row.routeCode}</td>
+                <td style="border: 1px solid #94a3b8; padding: 5px; text-align: right;">
+                  ${row.prevDuesBilled > 0 ? `₹${row.prevDuesBilled.toLocaleString('en-IN')} (Due: ₹${row.prevDuesPending.toLocaleString('en-IN')})` : '₹0'}
+                </td>
+                ${SESSION_MONTHS.map((mKey) => {
+                  const cell = row.monthMap[mKey];
+                  return `<td style="border: 1px solid #94a3b8; padding: 5px; text-align: right;">${
+                    cell.billed > 0
+                      ? `₹${cell.billed.toLocaleString('en-IN')}<br/><span style="font-size: 9px; color: ${
+                          cell.due > 0 ? '#be123c' : '#047857'
+                        };">${cell.due > 0 ? `Due: ₹${cell.due}` : 'Paid'}</span>`
+                      : '—'
+                  }</td>`;
+                }).join('')}
+                <td style="border: 1px solid #94a3b8; padding: 5px; text-align: right; font-weight: 700; color: #047857;">₹${row.totalCollected.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #94a3b8; padding: 5px; text-align: right; font-weight: 800; color: #be123c;">₹${row.netOutstanding.toLocaleString('en-IN')}</td>
+              </tr>`
+            )
+            .join('');
+
+          const html = `
+            <div style="background: #ffffff; color: #0f172a; padding: 10px; font-family: Inter, Arial, sans-serif;">
+              <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 12px;">
+                <h1 style="margin: 0; font-size: 18px; text-transform: uppercase; color: #0f172a;">${schoolName}</h1>
+                <p style="margin: 4px 0 0; font-size: 12px; font-weight: 700; color: #334155;">MONTH-WISE TRANSPORT FEE &amp; PREVIOUS DUES STATEMENT</p>
+                <p style="margin: 4px 0 0; font-size: 11px; color: #475569;">
+                  Campus: <strong>${matrixCampusFilter === 'all' ? 'All Campuses' : matrixCampusFilter}</strong> &nbsp;|&nbsp;
+                  Route: <strong>${matrixRouteFilter === 'all' ? 'All Routes' : matrixRouteFilter}</strong> &nbsp;|&nbsp;
+                  Class: <strong>${matrixClassFilter === 'all' ? 'All Classes' : matrixClassFilter}</strong> &nbsp;|&nbsp;
+                  Date: <strong>${todayStr}</strong>
+                </p>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; font-size: 11px;">
+                <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px;">
+                  <strong>Head 1 • Previous Dues Summary:</strong><br/>
+                  Opening Prev. Dues: <strong>₹${totalPrevDuesBilled.toLocaleString('en-IN')}</strong> &nbsp;|&nbsp;
+                  Collected: <strong style="color: #047857;">₹${totalPrevDuesPaid.toLocaleString('en-IN')}</strong> &nbsp;|&nbsp;
+                  Outstanding: <strong style="color: #be123c;">₹${totalPrevDuesPending.toLocaleString('en-IN')}</strong>
+                </div>
+                <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px;">
+                  <strong>Head 2 • Session 2026-27 Monthly Fees Summary:</strong><br/>
+                  Billed: <strong>₹${monthBreakdown.reduce((s, m) => s + m.billed, 0).toLocaleString('en-IN')}</strong> &nbsp;|&nbsp;
+                  Collected: <strong style="color: #047857;">₹${monthBreakdown.reduce((s, m) => s + m.collected, 0).toLocaleString('en-IN')}</strong> &nbsp;|&nbsp;
+                  Outstanding: <strong style="color: #be123c;">₹${monthBreakdown.reduce((s, m) => s + m.outstanding, 0).toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+
+              <table style="width: 100%; border-collapse: collapse; font-size: 10.5px; background: #ffffff; color: #0f172a;">
+                <thead>
+                  <tr style="background: #f1f5f9; color: #0f172a;">
+                    <th style="border: 1px solid #94a3b8; padding: 5px; text-align: center;">Sl</th>
+                    <th style="border: 1px solid #94a3b8; padding: 5px;">Member &amp; Adm No</th>
+                    <th style="border: 1px solid #94a3b8; padding: 5px;">Campus / Route</th>
+                    <th style="border: 1px solid #94a3b8; padding: 5px; text-align: right;">Prev. Dues</th>
+                    ${SESSION_MONTHS.map(
+                      (mKey) =>
+                        `<th style="border: 1px solid #94a3b8; padding: 5px; text-align: right;">${MONTH_LABELS[mKey]}</th>`
+                    ).join('')}
+                    <th style="border: 1px solid #94a3b8; padding: 5px; text-align: right;">Total Collected</th>
+                    <th style="border: 1px solid #94a3b8; padding: 5px; text-align: right;">Net Outstanding</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          `;
+
+          openHtmlPrintPreview({
+            title: `Month-wise Fee & Previous Dues Report (${matrixRows.length} Members)`,
+            subtitle: `Route: ${matrixRouteFilter === 'all' ? 'All Routes' : matrixRouteFilter} • Date: ${todayStr}`,
+            html,
+          });
+        };
+
         return (
           <div className="space-y-6">
             {/* Part 1: Separate Previous Dues vs Session Months Summary Cards */}
@@ -2028,10 +2276,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold text-[10px] uppercase">
-                      Head 1 • Previous Dues (Opening Arrears)
+                      Head 1 • Previous Dues
                     </span>
                     <h3 className="text-base font-bold text-slate-900 mt-1">
-                      Previous Dues Statement (Shown Separately)
+                      Previous Dues Statement
                     </h3>
                   </div>
                   <Layers className="w-6 h-6 text-amber-600" />
@@ -2063,7 +2311,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-bold text-[10px] uppercase">
-                      Head 2 • Session 2026-27 Monthly Fees (From Nov 2026)
+                      Head 2 • Session 2026-27 Monthly Fees
                     </span>
                     <h3 className="text-base font-bold text-slate-900 mt-1">
                       Month-wise Session Transport Fee Summary
@@ -2096,9 +2344,19 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
             {/* Part 2: Month-by-Month Breakdown Cards */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                Month-by-Month Collection &amp; Outstanding Breakdown (Session 2026-27)
-              </h4>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Month-by-Month Breakdown (Session 2026-27)
+                </h4>
+                <button
+                  type="button"
+                  onClick={handlePrintMonthlyMatrix}
+                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print Month-wise Fee &amp; Previous Dues Report</span>
+                </button>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                 {monthBreakdown.map((mb) => (
                   <div
@@ -2139,11 +2397,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h4 className="text-sm font-bold text-slate-900">
-                    Member-wise Previous Dues, Month-wise Collection &amp; Outstanding Ledger
+                    Member-wise Previous Dues &amp; Month-wise Ledger
                   </h4>
-                  <p className="text-xs text-slate-500">
-                    Shows Previous Dues and each session month separately for every member
-                  </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -2190,6 +2445,15 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     onChange={(e) => setMatrixSearch(e.target.value)}
                     className="p-2 rounded-xl border border-slate-200 text-xs bg-slate-50 w-44"
                   />
+
+                  <button
+                    type="button"
+                    onClick={handlePrintMonthlyMatrix}
+                    className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Print</span>
+                  </button>
                 </div>
               </div>
 

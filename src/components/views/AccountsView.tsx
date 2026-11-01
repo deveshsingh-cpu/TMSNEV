@@ -110,6 +110,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   // Route-wise Outstanding State
   const [routeOutCampusFilter, setRouteOutCampusFilter] = useState<string>(lockedCampus || 'all');
   const [routeOutVehicleFilter, setRouteOutVehicleFilter] = useState<string>('all');
+  const [routeOutRouteFilter, setRouteOutRouteFilter] = useState<string>('all');
+  const [routeOutDuesFilter, setRouteOutDuesFilter] = useState<'all' | 'with_dues'>('all');
   const [routeOutSearch, setRouteOutSearch] = useState<string>('');
   const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
 
@@ -475,9 +477,85 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   // ============================================================================
   // 4. ROUTE-WISE OUTSTANDING & DEMAND SLIP COMPUTATION
   // ============================================================================
+  const getStudentPhone = (student: Student): string => {
+    return (
+      student.mobile ||
+      student.phone ||
+      (student as any).parentPhone ||
+      student.emergencyContact ||
+      '—'
+    );
+  };
+
+  const getStudentStopDisplay = (student: Student): string => {
+    return (
+      student.pickupDropStopName ||
+      student.pickupStopName ||
+      student.villageName ||
+      (student as any).stopName ||
+      '—'
+    );
+  };
+
+  const getRouteVehicleNumber = (rt?: Route, student?: Student): string => {
+    if (rt?.vehicleNumber && rt.vehicleNumber.trim()) return rt.vehicleNumber.trim();
+    if ((rt as any)?.assignedVehicleReg && (rt as any).assignedVehicleReg.trim()) {
+      return (rt as any).assignedVehicleReg.trim();
+    }
+    if (rt?.vehicleId) {
+      const found = vehicles.find(
+        (v) => v.id === rt.vehicleId || v.registrationNumber === rt.vehicleId
+      );
+      if (found) return found.registrationNumber;
+    }
+    if (rt?.vehicleLast4) {
+      const found = vehicles.find(
+        (v) =>
+          v.registrationNumber === rt.vehicleLast4 ||
+          v.registrationNumber.endsWith(rt.vehicleLast4) ||
+          v.nickname === rt.vehicleLast4
+      );
+      if (found) return found.registrationNumber;
+      return rt.vehicleLast4;
+    }
+    const codeStr = rt?.code || student?.routeCode || '';
+    const parts = codeStr.split('/');
+    if (parts.length >= 2 && parts[1]) {
+      const found = vehicles.find(
+        (v) =>
+          v.registrationNumber === parts[1] ||
+          v.registrationNumber.endsWith(parts[1]) ||
+          v.nickname === parts[1]
+      );
+      return found ? found.registrationNumber : parts[1];
+    }
+    return (student as any)?.vehicleNumber || '—';
+  };
+
+  const isStudentAssignedToRoute = (s: Student, rt: Route): boolean => {
+    if (
+      s.transportStatus === 'Left' ||
+      s.transportStatus === 'Terminated' ||
+      (s.transportStatus as string) === 'Left School'
+    ) {
+      return false;
+    }
+    if (rt.id && s.routeId && s.routeId === rt.id) return true;
+    const sCode = (s.routeCode || (s as any).routeName || '').trim().toLowerCase();
+    const rtCode = (rt.code || '').trim().toLowerCase();
+    const rtName = (rt.name || '').trim().toLowerCase();
+    if (rtCode && sCode && sCode === rtCode) return true;
+    if (rtName && sCode && sCode === rtName) return true;
+    return false;
+  };
+
   const getStudentFeeStats = (student: Student) => {
-    const stuInvoices = invoices.filter((i) => i.studentId === student.id);
-    const stuReceipts = receipts.filter((r) => r.studentId === student.id);
+    const stuInvoices = invoices.filter(
+      (i) => i.studentId === student.id || (student.admissionNo && i.admissionNo === student.admissionNo)
+    );
+    const stuReceipts = receipts.filter(
+      (r) => r.studentId === student.id || (student.admissionNo && r.admissionNo === student.admissionNo)
+    );
     const previousDuesAmount = Number(student.previousDues || 0);
     const prevDuesInv = stuInvoices.filter(
       (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
@@ -500,8 +578,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       .filter((i) => i.status !== 'Paid' && (i.balanceDue ?? 0) > 0)
       .map((i) => i.month);
     const stuFollowUps = followUps
-      .filter((f) => f.studentId === student.id)
-      .sort((a, b) => (b.callDate || '').localeCompare(a.callDate || ''));
+      .filter((f) => f.studentId === student.id || (student.admissionNo && f.admissionNo === student.admissionNo))
+      .sort((a, b) => (b.callDate || b.date || '').localeCompare(a.callDate || a.date || ''));
 
     return {
       previousDuesAmount,
@@ -537,25 +615,38 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
   const routeSummaries: RouteOutstandingSummary[] = routes
     .filter((rt) => {
-      if (lockedCampus && (rt.campus || 'Sr') !== lockedCampus) return false;
-      if (routeOutCampusFilter !== 'all' && (rt.campus || 'Sr') !== routeOutCampusFilter) return false;
-      if (routeOutVehicleFilter !== 'all' && rt.assignedVehicleReg !== routeOutVehicleFilter) return false;
+      const rtCampus = rt.campus || rt.campusCode || 'Sr';
+      const rtVeh = getRouteVehicleNumber(rt);
+      if (lockedCampus && rtCampus !== lockedCampus) return false;
+      if (routeOutCampusFilter !== 'all' && rtCampus !== routeOutCampusFilter) return false;
+      if (
+        routeOutVehicleFilter !== 'all' &&
+        rtVeh !== routeOutVehicleFilter &&
+        rt.vehicleId !== routeOutVehicleFilter &&
+        rt.vehicleNumber !== routeOutVehicleFilter &&
+        rt.vehicleLast4 !== routeOutVehicleFilter
+      ) {
+        return false;
+      }
+      if (
+        routeOutRouteFilter !== 'all' &&
+        rt.id !== routeOutRouteFilter &&
+        rt.code !== routeOutRouteFilter
+      ) {
+        return false;
+      }
       if (routeOutSearch.trim()) {
         const q = routeOutSearch.toLowerCase();
         const matchRoute =
-          rt.code.toLowerCase().includes(q) ||
-          rt.name.toLowerCase().includes(q) ||
-          (rt.assignedVehicleReg || '').toLowerCase().includes(q);
+          (rt.code || '').toLowerCase().includes(q) ||
+          (rt.name || '').toLowerCase().includes(q) ||
+          rtVeh.toLowerCase().includes(q);
         if (!matchRoute) return false;
       }
       return true;
     })
     .map((rt) => {
-      const routeMembers = students.filter(
-        (s) =>
-          s.transportStatus !== 'Left School' &&
-          (s.routeId === rt.id || s.routeName === rt.code || s.routeName === rt.name)
-      );
+      const routeMembers = students.filter((s) => isStudentAssignedToRoute(s, rt));
       const memberRows = routeMembers.map((s) => ({
         student: s,
         stats: getStudentFeeStats(s),
@@ -571,9 +662,9 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       return {
         routeId: rt.id,
         routeCode: rt.code,
-        routeName: rt.name,
-        campus: rt.campus || 'Sr',
-        vehicleNumber: rt.assignedVehicleReg || 'Unassigned',
+        routeName: rt.name || rt.code,
+        campus: rt.campus || rt.campusCode || 'Sr',
+        vehicleNumber: getRouteVehicleNumber(rt),
         activeMembersCount: routeMembers.length,
         overdueMembersCount,
         previousDuesTotal,
@@ -584,7 +675,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
         collectionRate,
         members: memberRows.sort((a, b) => b.stats.totalOutstanding - a.stats.totalOutstanding),
       };
-    });
+    })
+    .filter((summary) => (routeOutDuesFilter === 'with_dues' ? summary.totalOutstanding > 0 : true));
 
   const maxRouteGraphAmount = Math.max(
     1,
@@ -592,12 +684,16 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   );
 
   const demandFilteredMembers = students
-    .filter((s) => s.transportStatus !== 'Left School')
+    .filter(
+      (s) =>
+        s.transportStatus !== 'Left' &&
+        s.transportStatus !== 'Terminated' &&
+        (s.transportStatus as string) !== 'Left School'
+    )
     .filter((s) => {
-      const stuCampus =
-        s.campus ||
-        routes.find((r) => r.id === s.routeId || r.code === s.routeName)?.campus ||
-        'Sr';
+      const rt = routes.find((r) => isStudentAssignedToRoute(s, r));
+      const stuCampus = s.campus || rt?.campus || rt?.campusCode || 'Sr';
+      const vehReg = getRouteVehicleNumber(rt, s);
       if (lockedCampus && stuCampus !== lockedCampus) return false;
       if (demandCampusFilter !== 'all' && stuCampus !== demandCampusFilter) return false;
       if (demandClassFilter !== 'all' && s.class !== demandClassFilter) return false;
@@ -605,14 +701,18 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       if (
         demandRouteFilter !== 'all' &&
         s.routeId !== demandRouteFilter &&
-        s.routeName !== demandRouteFilter
+        s.routeCode !== demandRouteFilter &&
+        rt?.code !== demandRouteFilter
       ) {
         return false;
       }
-      if (demandVehicleFilter !== 'all') {
-        const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
-        const vehReg = s.vehicleNumber || rt?.assignedVehicleReg || '';
-        if (vehReg !== demandVehicleFilter) return false;
+      if (
+        demandVehicleFilter !== 'all' &&
+        vehReg !== demandVehicleFilter &&
+        rt?.vehicleNumber !== demandVehicleFilter &&
+        rt?.vehicleLast4 !== demandVehicleFilter
+      ) {
+        return false;
       }
       if (demandSearch.trim()) {
         const q = demandSearch.toLowerCase();
@@ -620,19 +720,19 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           s.name.toLowerCase().includes(q) ||
           s.admissionNo.toLowerCase().includes(q) ||
           (s.fatherName || '').toLowerCase().includes(q) ||
-          (s.parentPhone || '').toLowerCase().includes(q) ||
-          (s.villageName || s.stopName || '').toLowerCase().includes(q);
+          getStudentPhone(s).toLowerCase().includes(q) ||
+          getStudentStopDisplay(s).toLowerCase().includes(q);
         if (!match) return false;
       }
       return true;
     })
     .map((s) => {
-      const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+      const rt = routes.find((r) => isStudentAssignedToRoute(s, r));
       return {
         student: s,
-        campus: s.campus || rt?.campus || 'Sr',
-        routeCode: rt?.code || s.routeName || '—',
-        vehicleReg: s.vehicleNumber || rt?.assignedVehicleReg || '—',
+        campus: s.campus || rt?.campus || rt?.campusCode || 'Sr',
+        routeCode: rt?.code || s.routeCode || '—',
+        vehicleReg: getRouteVehicleNumber(rt, s),
         stats: getStudentFeeStats(s),
       };
     })
@@ -648,67 +748,77 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     const totalPrev = rows.reduce((s, r) => s + r.stats.previousDuesAmount, 0);
 
     const html = `
-      <div style="font-family: Inter, Arial, sans-serif; color: #0f172a; padding: 8px;">
-        <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 12px;">
-          <h1 style="margin: 0; font-size: 18px; text-transform: uppercase;">${schoolName}</h1>
-          <div style="font-size: 12px; font-weight: 700; color: #334155; margin-top: 3px;">
-            ROUTE-WISE FEE REMINDER / OUTSTANDING DEMAND REGISTER
+      <div style="font-family: Inter, Arial, sans-serif; background: #ffffff; color: #0f172a; padding: 12px;">
+        <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 14px; background: #ffffff;">
+          <h1 style="margin: 0; font-size: 18px; font-weight: 800; color: #0f172a; text-transform: uppercase;">${schoolName}</h1>
+          <div style="font-size: 13px; font-weight: 700; color: #1e293b; margin-top: 4px;">
+            ROUTE-WISE FEE REMINDER / OUTSTANDING REGISTER
           </div>
-          <div style="font-size: 11px; color: #475569; margin-top: 4px;">
-            Route: <strong>${routeSummary.routeCode}</strong> &nbsp;|&nbsp;
-            Campus: <strong>${routeSummary.campus}</strong> &nbsp;|&nbsp;
-            Vehicle: <strong>${routeSummary.vehicleNumber}</strong> &nbsp;|&nbsp;
-            Date: <strong>${todayStr}</strong>
+          <div style="font-size: 11.5px; color: #334155; margin-top: 5px;">
+            Route: <strong style="color: #0f172a;">${routeSummary.routeCode}</strong> &nbsp;|&nbsp;
+            Campus: <strong style="color: #0f172a;">${routeSummary.campus}</strong> &nbsp;|&nbsp;
+            Vehicle: <strong style="color: #0f172a;">${routeSummary.vehicleNumber}</strong> &nbsp;|&nbsp;
+            Members Listed: <strong style="color: #0f172a;">${rows.length}</strong> &nbsp;|&nbsp;
+            Date: <strong style="color: #0f172a;">${todayStr}</strong>
           </div>
         </div>
 
-        <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 11.5px; background: #ffffff; color: #0f172a;">
           <thead>
-            <tr style="background: #f1f5f9; border-bottom: 2px solid #0f172a;">
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: center;">Sl</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Adm No</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Member Name</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Class</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Father / Guardian</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Village / Stop</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Phone</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">Prev. Dues (₹)</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">Collected (₹)</th>
-              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">Outstanding (₹)</th>
+            <tr style="background: #f8fafc; color: #0f172a; border-bottom: 2px solid #0f172a;">
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: center; color: #0f172a;">Sl</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: left; color: #0f172a;">Adm No</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: left; color: #0f172a;">Member Name</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: left; color: #0f172a;">Class</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: left; color: #0f172a;">Father / Guardian</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: left; color: #0f172a;">Village / Stop</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: left; color: #0f172a;">Phone</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #0f172a;">Prev. Dues (₹)</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #0f172a;">Collected (₹)</th>
+              <th style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #0f172a;">Outstanding (₹)</th>
             </tr>
           </thead>
           <tbody>
-            ${rows
-              .map(
-                (r, idx) => `
-              <tr>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: center;">${idx + 1}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace; font-weight: 700;">${r.student.admissionNo}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; font-weight: 700;">${r.student.name}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.class}-${r.student.section}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.fatherName || r.student.parentName || '—'}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.villageName || r.student.stopName || '—'}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace;">${r.student.parentPhone || '—'}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">₹${r.stats.previousDuesAmount.toLocaleString('en-IN')}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right; color: #047857;">₹${r.stats.totalCollected.toLocaleString('en-IN')}</td>
-                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right; font-weight: 700; color: #be123c;">₹${r.stats.totalOutstanding.toLocaleString('en-IN')}</td>
+            ${
+              rows.length === 0
+                ? `<tr><td colspan="10" style="border: 1px solid #94a3b8; padding: 16px; text-align: center; color: #475569; background: #ffffff;">No members with pending dues on Route ${routeSummary.routeCode}.</td></tr>`
+                : rows
+                    .map(
+                      (r, idx) => `
+              <tr style="background: #ffffff; color: #0f172a;">
+                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: center; color: #0f172a;">${idx + 1}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; font-family: monospace; font-weight: 700; color: #0f172a;">${r.student.admissionNo || '—'}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; font-weight: 700; color: #0f172a;">${r.student.name || '—'}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; color: #0f172a;">${r.student.class || '—'}${r.student.section ? `-${r.student.section}` : ''}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; color: #0f172a;">${r.student.fatherName || '—'}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; color: #0f172a;">${getStudentStopDisplay(r.student)}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; font-family: monospace; color: #0f172a;">${getStudentPhone(r.student)}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #0f172a;">₹${r.stats.previousDuesAmount.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857; font-weight: 600;">₹${r.stats.totalCollected.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-weight: 700; color: #be123c;">₹${r.stats.totalOutstanding.toLocaleString('en-IN')}</td>
               </tr>
             `
-              )
-              .join('')}
+                    )
+                    .join('')
+            }
           </tbody>
           <tfoot>
-            <tr style="background: #f8fafc; font-weight: 700;">
-              <td colspan="7" style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">ROUTE TOTAL (${rows.length} Members):</td>
-              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${totalPrev.toLocaleString('en-IN')}</td>
-              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857;">₹${totalCol.toLocaleString('en-IN')}</td>
-              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
+            <tr style="background: #f8fafc; font-weight: 800; color: #0f172a;">
+              <td colspan="7" style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #0f172a;">ROUTE TOTAL (${rows.length} Members):</td>
+              <td style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #0f172a;">₹${totalPrev.toLocaleString('en-IN')}</td>
+              <td style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #047857;">₹${totalCol.toLocaleString('en-IN')}</td>
+              <td style="border: 1px solid #94a3b8; padding: 7px 6px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
             </tr>
           </tfoot>
         </table>
       </div>
     `;
-    openHtmlPrintPreview(`Route Reminder List — ${routeSummary.routeCode}`, html);
+    openHtmlPrintPreview({
+      title: `Route Reminder List — ${routeSummary.routeCode}`,
+      subtitle: `Vehicle: ${routeSummary.vehicleNumber} • ${rows.length} Members on Route`,
+      html,
+      filename: `route_reminder_list_${routeSummary.routeCode.replace(/[^a-zA-Z0-9]/g, '_')}`,
+    });
   };
 
   const printDemandSlipsBatchPdf = (
@@ -723,60 +833,60 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     if (items.length === 0) return;
     const slipsHtml = items
       .map(({ student, stats, routeCode, vehicleReg }, index) => {
-        const rt = routes.find((r) => r.id === student.routeId || r.code === student.routeName);
-        const rCode = routeCode || rt?.code || student.routeName || '—';
-        const vReg = vehicleReg || student.vehicleNumber || rt?.assignedVehicleReg || '—';
+        const rt = routes.find((r) => isStudentAssignedToRoute(student, r));
+        const rCode = routeCode || rt?.code || student.routeCode || '—';
+        const vReg = vehicleReg || getRouteVehicleNumber(rt, student);
         const pendingMonthsLabel =
           stats.pendingMonths.length > 0 ? stats.pendingMonths.join(', ') : 'Current Session Dues';
 
         return `
-          <div style="border: 2px solid #0f172a; border-radius: 10px; padding: 14px; margin-bottom: 14px; page-break-inside: avoid; font-family: Inter, Arial, sans-serif;">
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 8px; margin-bottom: 10px;">
+          <div style="background: #ffffff; color: #0f172a; border: 1.5px solid #0f172a; border-radius: 8px; padding: 14px; margin-bottom: 14px; page-break-inside: avoid; font-family: Inter, Arial, sans-serif;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 8px; margin-bottom: 10px; background: #ffffff;">
               <div>
                 <div style="font-size: 15px; font-weight: 800; color: #0f172a; text-transform: uppercase;">${schoolName}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #b45309;">TRANSPORT FEE DEMAND / REMINDER SLIP</div>
+                <div style="font-size: 11px; font-weight: 700; color: #334155;">TRANSPORT FEE DEMAND / REMINDER SLIP</div>
               </div>
-              <div style="text-align: right; font-size: 11px; color: #334155;">
+              <div style="text-align: right; font-size: 11px; color: #0f172a;">
                 <div><strong>Slip #:</strong> DEM-${todayStr.replace(/-/g, '')}-${index + 1}</div>
                 <div><strong>Date:</strong> ${todayStr}</div>
               </div>
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 14px; font-size: 11.5px; margin-bottom: 10px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 14px; font-size: 11.5px; margin-bottom: 10px; color: #0f172a; background: #ffffff;">
               <div><strong>Student Name:</strong> ${student.name}</div>
-              <div><strong>Admission No:</strong> <span style="font-family: monospace;">${student.admissionNo}</span></div>
-              <div><strong>Class &amp; Sec:</strong> ${student.class}-${student.section}</div>
-              <div><strong>Father's Name:</strong> ${student.fatherName || student.parentName || '—'}</div>
+              <div><strong>Admission No:</strong> <span style="font-family: monospace; font-weight: 700;">${student.admissionNo}</span></div>
+              <div><strong>Class &amp; Sec:</strong> ${student.class}${student.section ? `-${student.section}` : ''}</div>
+              <div><strong>Father's Name:</strong> ${student.fatherName || '—'}</div>
               <div><strong>Route / Vehicle:</strong> ${rCode} (${vReg})</div>
-              <div><strong>Stop / Village:</strong> ${student.villageName || student.stopName || '—'}</div>
-              <div><strong>Contact Phone:</strong> ${student.parentPhone || '—'}</div>
-              <div><strong>Monthly Rate:</strong> ₹${Number(student.netMonthlyFee ?? student.monthlyFee ?? 0).toLocaleString('en-IN')}/mo</div>
+              <div><strong>Stop / Village:</strong> ${getStudentStopDisplay(student)}</div>
+              <div><strong>Contact Phone:</strong> ${getStudentPhone(student)}</div>
+              <div><strong>Monthly Rate:</strong> ₹${Number((student as any).netMonthlyFee ?? student.monthlyFee ?? 0).toLocaleString('en-IN')}/mo</div>
               <div><strong>Pay By Date:</strong> <strong style="color: #be123c;">${demandDueDate}</strong></div>
             </div>
 
-            <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px; background: #ffffff; color: #0f172a;">
               <thead>
-                <tr style="background: #f8fafc;">
-                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: left;">Fee Particulars / Months Due</th>
-                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Previous Dues (₹)</th>
-                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Session Billed (₹)</th>
-                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Paid So Far (₹)</th>
-                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Net Payable Due (₹)</th>
+                <tr style="background: #f8fafc; color: #0f172a;">
+                  <th style="border: 1px solid #94a3b8; padding: 6px; text-align: left; color: #0f172a;">Fee Particulars / Months Due</th>
+                  <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">Previous Dues (₹)</th>
+                  <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">Session Billed (₹)</th>
+                  <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">Paid So Far (₹)</th>
+                  <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">Net Payable Due (₹)</th>
                 </tr>
               </thead>
               <tbody>
-                <tr>
-                  <td style="border: 1px solid #cbd5e1; padding: 6px;">${pendingMonthsLabel}</td>
-                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${stats.previousDuesAmount.toLocaleString('en-IN')}</td>
-                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${stats.sessionBilled.toLocaleString('en-IN')}</td>
-                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857;">₹${stats.totalCollected.toLocaleString('en-IN')}</td>
-                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-weight: 800; font-size: 12.5px; color: #be123c;">₹${stats.totalOutstanding.toLocaleString('en-IN')}</td>
+                <tr style="background: #ffffff; color: #0f172a;">
+                  <td style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">${pendingMonthsLabel}</td>
+                  <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">₹${stats.previousDuesAmount.toLocaleString('en-IN')}</td>
+                  <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">₹${stats.sessionBilled.toLocaleString('en-IN')}</td>
+                  <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #047857; font-weight: 600;">₹${stats.totalCollected.toLocaleString('en-IN')}</td>
+                  <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; font-weight: 800; font-size: 12.5px; color: #be123c;">₹${stats.totalOutstanding.toLocaleString('en-IN')}</td>
                 </tr>
               </tbody>
             </table>
 
-            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: #475569; padding-top: 4px;">
-              <div>Dear Parent, kindly deposit the outstanding transport fee of <strong>₹${stats.totalOutstanding.toLocaleString('en-IN')}</strong> by <strong>${demandDueDate}</strong> to ensure uninterrupted bus facility.</div>
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: #334155; padding-top: 4px; background: #ffffff;">
+              <div>Dear Parent, kindly deposit the outstanding transport fee of <strong style="color: #0f172a;">₹${stats.totalOutstanding.toLocaleString('en-IN')}</strong> by <strong style="color: #0f172a;">${demandDueDate}</strong>.</div>
               <div style="font-weight: 700; color: #0f172a;">Transport In-Charge Sign</div>
             </div>
           </div>
@@ -784,13 +894,17 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       })
       .join('');
 
-    openHtmlPrintPreview(titleLabel, slipsHtml);
+    openHtmlPrintPreview({
+      title: titleLabel,
+      subtitle: `${items.length} Reminder Slip(s) • White A4 Print Layout`,
+      html: `<div style="background: #ffffff; color: #0f172a; padding: 8px;">${slipsHtml}</div>`,
+    });
   };
 
   const handleOpenFollowUpModal = (student: Student) => {
     setFollowUpModalStudent(student);
     setFuCallDate(todayStr);
-    setFuContactedPerson(student.fatherName || student.parentName || 'Father / Guardian');
+    setFuContactedPerson(student.fatherName || 'Father / Guardian');
     setFuOutcome('Promised to Pay');
     setFuPromisedDate('');
     setFuNextFollowUpDate('');
@@ -905,32 +1019,6 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           >
             <BookOpen className="w-3.5 h-3.5" />
             <span>Print / View Day Book</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleSelectTab('route_outstanding')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'route_outstanding'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <BarChart3 className="w-3.5 h-3.5" />
-            <span>Route-wise Outstanding Details</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleSelectTab('demand_slip')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'demand_slip'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Demand Slip &amp; Follow-up</span>
           </button>
 
           <button
@@ -2411,35 +2499,33 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           TAB: ROUTE-WISE OUTSTANDING DETAILS (Graph + Route List + PDF Slips)
          ===================================================================== */}
       {activeTab === 'route_outstanding' && (
-        <div className="space-y-5">
-          {/* Top Filter & Summary Strip */}
+        <div className="space-y-4">
+          {/* Top KPI & Filter Strip */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-indigo-600" />
-                  <span>Route-wise Outstanding &amp; Collected Fee Overview</span>
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Click any route to expand members or directly generate Route Reminder List PDF / Individual Student Demand Slips
-                </p>
-              </div>
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-indigo-600" />
+                <span>Route-wise Outstanding Details</span>
+              </h3>
 
               <div className="flex flex-wrap items-center gap-2">
                 {/* Campus Filter */}
                 <select
                   value={lockedCampus || routeOutCampusFilter}
                   disabled={Boolean(lockedCampus)}
-                  onChange={(e) => setRouteOutCampusFilter(e.target.value)}
+                  onChange={(e) => {
+                    setRouteOutCampusFilter(e.target.value);
+                    setRouteOutRouteFilter('all');
+                  }}
                   className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800 disabled:opacity-75"
                 >
-                  {!lockedCampus && <option value="all">All Campuses (Whole School)</option>}
-                  <option value="Sr">Sr Campus (Senior)</option>
-                  <option value="Jr">Jr Campus (Junior)</option>
+                  {!lockedCampus && <option value="all">All Campuses</option>}
+                  <option value="Sr">Sr Campus</option>
+                  <option value="Jr">Jr Campus</option>
                   {campuses
-                    .filter((c) => c.name !== 'Sr' && c.name !== 'Jr')
+                    .filter((c) => c.code !== 'Sr' && c.code !== 'Jr' && c.name !== 'Sr' && c.name !== 'Jr')
                     .map((c) => (
-                      <option key={c.id} value={c.name}>
+                      <option key={c.id} value={c.code || c.name}>
                         {c.name}
                       </option>
                     ))}
@@ -2448,23 +2534,69 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                 {/* Vehicle Filter */}
                 <select
                   value={routeOutVehicleFilter}
-                  onChange={(e) => setRouteOutVehicleFilter(e.target.value)}
+                  onChange={(e) => {
+                    setRouteOutVehicleFilter(e.target.value);
+                    setRouteOutRouteFilter('all');
+                  }}
                   className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800"
                 >
                   <option value="all">All Vehicles</option>
-                  {vehicles.map((v) => (
-                    <option key={v.id} value={v.registrationNumber}>
-                      {v.registrationNumber} ({v.nickname})
+                  {Array.from(
+                    new Set([
+                      ...vehicles.map((v) => v.registrationNumber),
+                      ...routes.map((r) => getRouteVehicleNumber(r)).filter((v) => v && v !== '—'),
+                    ])
+                  ).map((vehReg) => (
+                    <option key={vehReg} value={vehReg}>
+                      Vehicle: {vehReg}
                     </option>
                   ))}
                 </select>
 
+                {/* Route Filter */}
+                <select
+                  value={routeOutRouteFilter}
+                  onChange={(e) => setRouteOutRouteFilter(e.target.value)}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800"
+                >
+                  <option value="all">All Routes ({routes.length})</option>
+                  {routes
+                    .filter((r) => {
+                      const c = r.campus || r.campusCode || 'Sr';
+                      if (lockedCampus && c !== lockedCampus) return false;
+                      if (routeOutCampusFilter !== 'all' && c !== routeOutCampusFilter) return false;
+                      if (
+                        routeOutVehicleFilter !== 'all' &&
+                        getRouteVehicleNumber(r) !== routeOutVehicleFilter &&
+                        r.vehicleNumber !== routeOutVehicleFilter
+                      ) {
+                        return false;
+                      }
+                      return true;
+                    })
+                    .map((r) => (
+                      <option key={r.id} value={r.code}>
+                        {r.code} ({getRouteVehicleNumber(r)})
+                      </option>
+                    ))}
+                </select>
+
+                {/* Dues Filter */}
+                <select
+                  value={routeOutDuesFilter}
+                  onChange={(e) => setRouteOutDuesFilter(e.target.value as 'all' | 'with_dues')}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800"
+                >
+                  <option value="all">All Routes</option>
+                  <option value="with_dues">With Pending Dues</option>
+                </select>
+
                 {/* Search Route */}
-                <div className="relative w-48">
+                <div className="relative w-44">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    placeholder="Search route / vehicle..."
+                    placeholder="Search route..."
                     value={routeOutSearch}
                     onChange={(e) => setRouteOutSearch(e.target.value)}
                     className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-200 text-xs bg-slate-50"
@@ -2475,35 +2607,35 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
             {/* KPI Cards */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
-                <div className="text-[11px] font-semibold text-slate-500 uppercase">Total Billed (Incl. Prev Dues)</div>
-                <div className="text-lg font-extrabold font-mono text-slate-900 mt-1">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-[10px] font-bold text-slate-500 uppercase">Total Billed</div>
+                <div className="text-base font-extrabold font-mono text-slate-900 mt-0.5">
                   ₹{routeSummaries.reduce((s, r) => s + r.totalBilled, 0).toLocaleString('en-IN')}
                 </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">
-                  Prev Dues: ₹{routeSummaries.reduce((s, r) => s + r.previousDuesTotal, 0).toLocaleString('en-IN')}
+                <div className="text-[10px] text-slate-500">
+                  Prev. Dues: ₹{routeSummaries.reduce((s, r) => s + r.previousDuesTotal, 0).toLocaleString('en-IN')}
                 </div>
               </div>
-              <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
-                <div className="text-[11px] font-semibold text-emerald-800 uppercase">Total Collected Fee</div>
-                <div className="text-lg font-extrabold font-mono text-emerald-700 mt-1">
+              <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                <div className="text-[10px] font-bold text-emerald-800 uppercase">Collected Fee</div>
+                <div className="text-base font-extrabold font-mono text-emerald-700 mt-0.5">
                   ₹{routeSummaries.reduce((s, r) => s + r.totalCollected, 0).toLocaleString('en-IN')}
                 </div>
-                <div className="text-[10px] text-emerald-700 mt-0.5">
-                  Across {routeSummaries.length} active routes
+                <div className="text-[10px] text-emerald-700">
+                  {routeSummaries.length} route(s) shown
                 </div>
               </div>
-              <div className="p-3.5 rounded-xl bg-rose-50/70 border border-rose-200">
-                <div className="text-[11px] font-semibold text-rose-800 uppercase">Total Outstanding Dues</div>
-                <div className="text-lg font-extrabold font-mono text-rose-700 mt-1">
+              <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200">
+                <div className="text-[10px] font-bold text-rose-800 uppercase">Outstanding Fee</div>
+                <div className="text-base font-extrabold font-mono text-rose-700 mt-0.5">
                   ₹{routeSummaries.reduce((s, r) => s + r.totalOutstanding, 0).toLocaleString('en-IN')}
                 </div>
-                <div className="text-[10px] text-rose-700 mt-0.5">
-                  {routeSummaries.reduce((s, r) => s + r.overdueMembersCount, 0)} overdue members
+                <div className="text-[10px] text-rose-700">
+                  {routeSummaries.reduce((s, r) => s + r.overdueMembersCount, 0)} members with dues
                 </div>
               </div>
-              <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200">
-                <div className="text-[11px] font-semibold text-amber-900 uppercase">Pay By Date on Slips</div>
+              <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200">
+                <div className="text-[10px] font-bold text-amber-900 uppercase">Pay By Date (Slips)</div>
                 <input
                   type="date"
                   value={demandDueDate}
@@ -2514,38 +2646,33 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             </div>
           </div>
 
-          {/* Visual Bar Graph: Route-wise Collected vs Outstanding */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-              <div>
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                  Route-wise Collected vs Outstanding Fee Graph
-                </h4>
-                <p className="text-[11px] text-slate-500">
-                  Visual comparison of collected fees (green) and pending outstanding dues (red) across each route
-                </p>
-              </div>
+          {/* Visual Bar Graph: Route-wise Collected vs Outstanding (Compact & Scrollable) */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                Route-wise Collected vs Outstanding Graph
+              </h4>
               <div className="flex items-center gap-4 text-xs font-bold">
                 <span className="flex items-center gap-1.5 text-emerald-700">
                   <span className="w-3 h-3 rounded-xs bg-emerald-500 inline-block" />
-                  Collected Fee (₹)
+                  Collected (₹)
                 </span>
                 <span className="flex items-center gap-1.5 text-rose-700">
                   <span className="w-3 h-3 rounded-xs bg-rose-500 inline-block" />
-                  Outstanding Fee (₹)
+                  Outstanding (₹)
                 </span>
               </div>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
               {routeSummaries.map((rt) => {
-                const colWidth = Math.max(2, Math.round((rt.totalCollected / maxRouteGraphAmount) * 100));
-                const outWidth = Math.max(2, Math.round((rt.totalOutstanding / maxRouteGraphAmount) * 100));
+                const colWidth = rt.totalCollected > 0 ? Math.max(3, Math.round((rt.totalCollected / maxRouteGraphAmount) * 100)) : 0;
+                const outWidth = rt.totalOutstanding > 0 ? Math.max(3, Math.round((rt.totalOutstanding / maxRouteGraphAmount) * 100)) : 0;
                 return (
                   <div
                     key={rt.routeId}
                     onClick={() => setExpandedRouteId(expandedRouteId === rt.routeId ? null : rt.routeId)}
-                    className="p-3 rounded-xl border border-slate-200/80 hover:border-indigo-300 hover:bg-slate-50/70 transition-all cursor-pointer"
+                    className="p-2.5 rounded-xl border border-slate-200/80 hover:border-indigo-300 hover:bg-slate-50/70 transition-all cursor-pointer"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-1.5">
                       <div className="flex items-center gap-2">
@@ -2556,7 +2683,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                           {rt.campus}
                         </span>
                         <span className="text-slate-600 font-medium">
-                          Vehicle: <strong className="font-mono text-slate-800">{rt.vehicleNumber}</strong>
+                          Vehicle: <strong className="font-mono text-slate-900">{rt.vehicleNumber}</strong>
                         </span>
                         <span className="text-slate-400">•</span>
                         <span className="text-slate-600">
@@ -2574,13 +2701,13 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <div className="bg-slate-100 rounded-full h-3 overflow-hidden flex items-center">
+                      <div className="bg-slate-100 rounded-full h-2.5 overflow-hidden flex items-center">
                         <div
                           className="bg-emerald-500 h-full rounded-full transition-all"
                           style={{ width: `${Math.min(100, colWidth)}%` }}
                         />
                       </div>
-                      <div className="bg-slate-100 rounded-full h-3 overflow-hidden flex items-center">
+                      <div className="bg-slate-100 rounded-full h-2.5 overflow-hidden flex items-center">
                         <div
                           className="bg-rose-500 h-full rounded-full transition-all"
                           style={{ width: `${Math.min(100, outWidth)}%` }}
@@ -2593,22 +2720,59 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             </div>
           </div>
 
-          {/* Route-wise Table with Direct PDF List & Group / Individual Slip Print */}
+          {/* Route-wise Register with Direct Filters & Slip Generation */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-            <div className="px-5 py-3.5 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400">
-                  Route-wise Outstanding Register &amp; Direct Reminder Slip Generator
-                </h4>
-                <p className="text-[11px] text-slate-300">
-                  Click &quot;Print Route List PDF&quot; for route summary sheet or &quot;Print Group Slips&quot; for individual slips of all overdue students on that route
-                </p>
+            <div className="px-4 py-3 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                Route-wise Outstanding Register ({routeSummaries.length} Routes)
+              </h4>
+
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <select
+                  value={routeOutRouteFilter}
+                  onChange={(e) => setRouteOutRouteFilter(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white font-bold text-xs"
+                >
+                  <option value="all">Filter Route: All</option>
+                  {routes
+                    .filter((r) => {
+                      const c = r.campus || r.campusCode || 'Sr';
+                      if (lockedCampus && c !== lockedCampus) return false;
+                      if (routeOutCampusFilter !== 'all' && c !== routeOutCampusFilter) return false;
+                      return true;
+                    })
+                    .map((r) => (
+                      <option key={r.id} value={r.code}>
+                        {r.code} ({getRouteVehicleNumber(r)})
+                      </option>
+                    ))}
+                </select>
+
+                {(routeOutCampusFilter !== (lockedCampus || 'all') ||
+                  routeOutVehicleFilter !== 'all' ||
+                  routeOutRouteFilter !== 'all' ||
+                  routeOutDuesFilter !== 'all' ||
+                  routeOutSearch) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRouteOutCampusFilter(lockedCampus || 'all');
+                      setRouteOutVehicleFilter('all');
+                      setRouteOutRouteFilter('all');
+                      setRouteOutDuesFilter('all');
+                      setRouteOutSearch('');
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs cursor-pointer"
+                  >
+                    Reset Filters
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[540px] overflow-y-auto">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase sticky top-0 z-10">
                   <tr>
                     <th className="py-3 px-4">Route</th>
                     <th className="py-3 px-3">Campus</th>
@@ -2617,201 +2781,215 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     <th className="py-3 px-3 text-right font-mono">Prev. Dues (₹)</th>
                     <th className="py-3 px-3 text-right font-mono">Collected (₹)</th>
                     <th className="py-3 px-3 text-right font-mono">Outstanding (₹)</th>
-                    <th className="py-3 px-4 text-right">Generate Reminder / Demand Slip</th>
+                    <th className="py-3 px-4 text-right">Reminder / Demand Slip</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {routeSummaries.map((rt) => {
-                    const isExpanded = expandedRouteId === rt.routeId;
-                    const overdueMembers = rt.members.filter((m) => m.stats.totalOutstanding > 0);
-                    return (
-                      <React.Fragment key={rt.routeId}>
-                        <tr className="hover:bg-slate-50/90 transition-colors">
-                          <td className="py-3 px-4">
-                            <button
-                              type="button"
-                              onClick={() => setExpandedRouteId(isExpanded ? null : rt.routeId)}
-                              className="flex items-center gap-2 font-bold text-slate-900 hover:text-indigo-600 cursor-pointer"
-                            >
-                              {isExpanded ? (
-                                <ChevronDown className="w-4 h-4 text-indigo-600" />
-                              ) : (
-                                <ChevronRight className="w-4 h-4 text-slate-400" />
-                              )}
-                              <span className="font-mono px-2 py-0.5 rounded bg-slate-900 text-amber-400 text-xs">
-                                {rt.routeCode}
-                              </span>
-                            </button>
-                          </td>
-                          <td className="py-3 px-3">
-                            <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 font-bold text-[11px]">
-                              {rt.campus}
-                            </span>
-                          </td>
-                          <td className="py-3 px-3 font-mono font-bold text-slate-700">{rt.vehicleNumber}</td>
-                          <td className="py-3 px-3 text-center">
-                            <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 font-bold text-[11px]">
-                              {rt.overdueMembersCount} Due
-                            </span>{' '}
-                            <span className="text-slate-400">/ {rt.activeMembersCount}</span>
-                          </td>
-                          <td className="py-3 px-3 text-right font-mono text-slate-700">
-                            ₹{rt.previousDuesTotal.toLocaleString('en-IN')}
-                          </td>
-                          <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
-                            ₹{rt.totalCollected.toLocaleString('en-IN')}
-                          </td>
-                          <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
-                            ₹{rt.totalOutstanding.toLocaleString('en-IN')}
-                          </td>
-                          <td className="py-3 px-4 text-right">
-                            <div className="flex flex-wrap items-center justify-end gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => printRouteReminderListPdf(rt, true)}
-                                className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
-                                title="Generate PDF List of Route Members with Outstanding Amount"
-                              >
-                                <FileText className="w-3.5 h-3.5" />
-                                <span>Route PDF List</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  printDemandSlipsBatchPdf(
-                                    overdueMembers.map((m) => ({
-                                      student: m.student,
-                                      stats: m.stats,
-                                      routeCode: rt.routeCode,
-                                      vehicleReg: rt.vehicleNumber,
-                                    })),
-                                    `Route ${rt.routeCode} — Group Reminder Slips (${overdueMembers.length} Members)`
-                                  )
-                                }
-                                className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
-                                title="Print Individual Student Reminder Slips for Whole Route Group"
-                              >
-                                <Printer className="w-3.5 h-3.5" />
-                                <span>Print Group Slips ({overdueMembers.length})</span>
-                              </button>
+                  {routeSummaries.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-400">
+                        No routes match the selected filters.
+                      </td>
+                    </tr>
+                  ) : (
+                    routeSummaries.map((rt) => {
+                      const isExpanded = expandedRouteId === rt.routeId;
+                      const overdueMembers = rt.members.filter((m) => m.stats.totalOutstanding > 0);
+                      return (
+                        <React.Fragment key={rt.routeId}>
+                          <tr className="hover:bg-slate-50/90 transition-colors">
+                            <td className="py-3 px-4">
                               <button
                                 type="button"
                                 onClick={() => setExpandedRouteId(isExpanded ? null : rt.routeId)}
-                                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-[11px] cursor-pointer"
+                                className="flex items-center gap-2 font-bold text-slate-900 hover:text-indigo-600 cursor-pointer"
                               >
-                                {isExpanded ? 'Hide Members' : 'Individual Slips'}
+                                {isExpanded ? (
+                                  <ChevronDown className="w-4 h-4 text-indigo-600" />
+                                ) : (
+                                  <ChevronRight className="w-4 h-4 text-slate-400" />
+                                )}
+                                <span className="font-mono px-2 py-0.5 rounded bg-slate-900 text-amber-400 text-xs">
+                                  {rt.routeCode}
+                                </span>
                               </button>
-                            </div>
-                          </td>
-                        </tr>
+                            </td>
+                            <td className="py-3 px-3">
+                              <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 font-bold text-[11px]">
+                                {rt.campus}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 font-mono font-bold text-slate-800">{rt.vehicleNumber}</td>
+                            <td className="py-3 px-3 text-center">
+                              <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 font-bold text-[11px]">
+                                {rt.overdueMembersCount} Due
+                              </span>{' '}
+                              <span className="text-slate-400">/ {rt.activeMembersCount}</span>
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono text-slate-700">
+                              ₹{rt.previousDuesTotal.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
+                              ₹{rt.totalCollected.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
+                              ₹{rt.totalOutstanding.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => printRouteReminderListPdf(rt, true)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                  <span>Route PDF List</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    printDemandSlipsBatchPdf(
+                                      (overdueMembers.length > 0 ? overdueMembers : rt.members).map((m) => ({
+                                        student: m.student,
+                                        stats: m.stats,
+                                        routeCode: rt.routeCode,
+                                        vehicleReg: rt.vehicleNumber,
+                                      })),
+                                      `Route ${rt.routeCode} — Group Reminder Slips (${
+                                        overdueMembers.length > 0 ? overdueMembers.length : rt.members.length
+                                      } Members)`
+                                    )
+                                  }
+                                  className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Printer className="w-3.5 h-3.5" />
+                                  <span>Print Group Slips ({overdueMembers.length})</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedRouteId(isExpanded ? null : rt.routeId)}
+                                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-[11px] cursor-pointer"
+                                >
+                                  {isExpanded ? 'Hide Members' : 'Individual Slips'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
 
-                        {isExpanded && (
-                          <tr>
-                            <td colSpan={8} className="bg-slate-50/90 p-4 border-b border-slate-200">
-                              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-                                <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
-                                  <span className="text-xs font-bold text-slate-800">
-                                    Members on Route {rt.routeCode} ({rt.members.length} Total • {overdueMembers.length} Overdue)
-                                  </span>
-                                  <div className="flex items-center gap-2">
+                          {isExpanded && (
+                            <tr>
+                              <td colSpan={8} className="bg-slate-50/90 p-4 border-b border-slate-200">
+                                <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
+                                  <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                                    <span className="text-xs font-bold text-slate-800">
+                                      Route {rt.routeCode} • Vehicle: {rt.vehicleNumber} ({rt.members.length} Assigned Members • {overdueMembers.length} Overdue)
+                                    </span>
                                     <button
                                       type="button"
                                       onClick={() => printRouteReminderListPdf(rt, false)}
                                       className="px-2.5 py-1 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-[11px] cursor-pointer"
                                     >
-                                      Print Full Route Register (Incl. Zero Due)
+                                      Print All Route Members ({rt.members.length})
                                     </button>
                                   </div>
-                                </div>
 
-                                <div className="overflow-x-auto">
-                                  <table className="w-full text-left text-[11px]">
-                                    <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase font-bold">
-                                      <tr>
-                                        <th className="py-2 px-3">Adm No</th>
-                                        <th className="py-2 px-3">Member Name</th>
-                                        <th className="py-2 px-2.5">Class</th>
-                                        <th className="py-2 px-3">Father&apos;s Name</th>
-                                        <th className="py-2 px-3">Stop / Village</th>
-                                        <th className="py-2 px-2.5">Phone</th>
-                                        <th className="py-2 px-2.5 text-right">Prev. Dues</th>
-                                        <th className="py-2 px-2.5 text-right">Collected</th>
-                                        <th className="py-2 px-3 text-right">Outstanding</th>
-                                        <th className="py-2 px-3 text-right">Individual Slip / Follow-up</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                      {rt.members.map(({ student, stats }) => (
-                                        <tr key={student.id} className="hover:bg-slate-50">
-                                          <td className="py-2 px-3 font-mono font-bold text-slate-700">
-                                            {student.admissionNo}
-                                          </td>
-                                          <td className="py-2 px-3 font-bold text-slate-900">{student.name}</td>
-                                          <td className="py-2 px-2.5">
-                                            {student.class}-{student.section}
-                                          </td>
-                                          <td className="py-2 px-3 text-slate-700">
-                                            {student.fatherName || student.parentName || '—'}
-                                          </td>
-                                          <td className="py-2 px-3 text-slate-600">
-                                            {student.villageName || student.stopName || '—'}
-                                          </td>
-                                          <td className="py-2 px-2.5 font-mono text-slate-700">
-                                            {student.parentPhone || '—'}
-                                          </td>
-                                          <td className="py-2 px-2.5 text-right font-mono">
-                                            ₹{stats.previousDuesAmount.toLocaleString('en-IN')}
-                                          </td>
-                                          <td className="py-2 px-2.5 text-right font-mono text-emerald-700 font-bold">
-                                            ₹{stats.totalCollected.toLocaleString('en-IN')}
-                                          </td>
-                                          <td className="py-2 px-3 text-right font-mono font-extrabold text-rose-600">
-                                            ₹{stats.totalOutstanding.toLocaleString('en-IN')}
-                                          </td>
-                                          <td className="py-2 px-3 text-right">
-                                            <div className="flex items-center justify-end gap-1.5">
-                                              <button
-                                                type="button"
-                                                onClick={() =>
-                                                  printDemandSlipsBatchPdf(
-                                                    [
-                                                      {
-                                                        student,
-                                                        stats,
-                                                        routeCode: rt.routeCode,
-                                                        vehicleReg: rt.vehicleNumber,
-                                                      },
-                                                    ],
-                                                    `Reminder Slip — ${student.name} (${student.admissionNo})`
-                                                  )
-                                                }
-                                                className="px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
-                                              >
-                                                <Printer className="w-3 h-3" />
-                                                <span>Print Slip</span>
-                                              </button>
-                                              <button
-                                                type="button"
-                                                onClick={() => handleOpenFollowUpModal(student)}
-                                                className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
-                                              >
-                                                <PhoneCall className="w-3 h-3" />
-                                                <span>Follow-up ({stats.followUps.length})</span>
-                                              </button>
-                                            </div>
-                                          </td>
+                                  <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-[11px]">
+                                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase font-bold">
+                                        <tr>
+                                          <th className="py-2 px-3">Adm No</th>
+                                          <th className="py-2 px-3">Member Name</th>
+                                          <th className="py-2 px-2.5">Class</th>
+                                          <th className="py-2 px-3">Father&apos;s Name</th>
+                                          <th className="py-2 px-3">Stop / Village</th>
+                                          <th className="py-2 px-2.5">Phone</th>
+                                          <th className="py-2 px-2.5 text-right">Prev. Dues</th>
+                                          <th className="py-2 px-2.5 text-right">Collected</th>
+                                          <th className="py-2 px-3 text-right">Outstanding</th>
+                                          <th className="py-2 px-3 text-right">Actions</th>
                                         </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-100">
+                                        {rt.members.length === 0 ? (
+                                          <tr>
+                                            <td colSpan={10} className="py-6 text-center text-slate-400">
+                                              No members assigned to Route {rt.routeCode}.
+                                            </td>
+                                          </tr>
+                                        ) : (
+                                          rt.members.map(({ student, stats }) => (
+                                            <tr key={student.id} className="hover:bg-slate-50">
+                                              <td className="py-2 px-3 font-mono font-bold text-slate-700">
+                                                {student.admissionNo}
+                                              </td>
+                                              <td className="py-2 px-3 font-bold text-slate-900">{student.name}</td>
+                                              <td className="py-2 px-2.5">
+                                                {student.class}{student.section ? `-${student.section}` : ''}
+                                              </td>
+                                              <td className="py-2 px-3 text-slate-700">
+                                                {student.fatherName || '—'}
+                                              </td>
+                                              <td className="py-2 px-3 text-slate-600">
+                                                {getStudentStopDisplay(student)}
+                                              </td>
+                                              <td className="py-2 px-2.5 font-mono text-slate-700">
+                                                {getStudentPhone(student)}
+                                              </td>
+                                              <td className="py-2 px-2.5 text-right font-mono">
+                                                ₹{stats.previousDuesAmount.toLocaleString('en-IN')}
+                                              </td>
+                                              <td className="py-2 px-2.5 text-right font-mono text-emerald-700 font-bold">
+                                                ₹{stats.totalCollected.toLocaleString('en-IN')}
+                                              </td>
+                                              <td className="py-2 px-3 text-right font-mono font-extrabold text-rose-600">
+                                                ₹{stats.totalOutstanding.toLocaleString('en-IN')}
+                                              </td>
+                                              <td className="py-2 px-3 text-right">
+                                                <div className="flex items-center justify-end gap-1.5">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      printDemandSlipsBatchPdf(
+                                                        [
+                                                          {
+                                                            student,
+                                                            stats,
+                                                            routeCode: rt.routeCode,
+                                                            vehicleReg: rt.vehicleNumber,
+                                                          },
+                                                        ],
+                                                        `Reminder Slip — ${student.name} (${student.admissionNo})`
+                                                      )
+                                                    }
+                                                    className="px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
+                                                  >
+                                                    <Printer className="w-3 h-3" />
+                                                    <span>Print Slip</span>
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleOpenFollowUpModal(student)}
+                                                    className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
+                                                  >
+                                                    <PhoneCall className="w-3 h-3" />
+                                                    <span>Follow-up ({stats.followUps.length})</span>
+                                                  </button>
+                                                </div>
+                                              </td>
+                                            </tr>
+                                          ))
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  </div>
                                 </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>
@@ -2823,19 +3001,14 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           TAB: DEMAND SLIP & PHONE FOLLOW-UP SUB-MODULE
          ===================================================================== */}
       {activeTab === 'demand_slip' && (
-        <div className="space-y-5">
+        <div className="space-y-4">
           {/* Multi-Filter Bar: Campus, Class, Section, Route, Vehicle */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <Printer className="w-4 h-4 text-amber-600" />
-                  <span>Demand Slip / Reminder Slip &amp; Phone Fee Follow-up Desk</span>
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Filter members by Campus, Class, Section, Route, or Vehicle to print Individual / Group Demand Slips and log phone call follow-ups
-                </p>
-              </div>
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Printer className="w-4 h-4 text-amber-600" />
+                <span>Demand Slip &amp; Phone Fee Follow-up</span>
+              </h3>
 
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -2849,7 +3022,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>Print All Filtered Slips ({demandFilteredMembers.length})</span>
+                  <span>Print Filtered Slips ({demandFilteredMembers.length})</span>
                 </button>
 
                 <button
@@ -2860,57 +3033,63 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                       0
                     );
                     const listHtml = `
-                      <div style="font-family: Inter, Arial, sans-serif; color: #0f172a;">
-                        <h2 style="margin: 0 0 4px 0; text-align: center;">${schoolName} — DEMAND SLIP / OUTSTANDING LIST</h2>
-                        <p style="margin: 0 0 12px 0; text-align: center; font-size: 11px; color: #475569;">
+                      <div style="font-family: Inter, Arial, sans-serif; background: #ffffff; color: #0f172a; padding: 12px;">
+                        <h2 style="margin: 0 0 4px 0; text-align: center; color: #0f172a;">${schoolName} — DEMAND SLIP / OUTSTANDING LIST</h2>
+                        <p style="margin: 0 0 12px 0; text-align: center; font-size: 11px; color: #334155;">
                           Campus: ${lockedCampus || demandCampusFilter} | Class: ${demandClassFilter} | Section: ${demandSectionFilter} | Route: ${demandRouteFilter} | Vehicle: ${demandVehicleFilter}
                         </p>
-                        <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 11.5px; background: #ffffff; color: #0f172a;">
                           <thead>
-                            <tr style="background: #f1f5f9;">
-                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Sl</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Adm No</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Member Name</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Class</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Route / Vehicle</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Phone</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Prev. Dues</th>
-                              <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Outstanding (₹)</th>
+                            <tr style="background: #f8fafc; color: #0f172a;">
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Sl</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Adm No</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Member Name</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Class</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Father / Guardian</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Route / Vehicle</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; color: #0f172a;">Phone</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">Prev. Dues</th>
+                              <th style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">Outstanding (₹)</th>
                             </tr>
                           </thead>
                           <tbody>
                             ${demandFilteredMembers
                               .map(
                                 (r, idx) => `
-                              <tr>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: center;">${idx + 1}</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace;">${r.student.admissionNo}</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px; font-weight: 700;">${r.student.name}</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.class}-${r.student.section}</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.routeCode} (${r.vehicleReg})</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace;">${r.student.parentPhone || '—'}</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">₹${r.stats.previousDuesAmount.toLocaleString('en-IN')}</td>
-                                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right; font-weight: 700; color: #be123c;">₹${r.stats.totalOutstanding.toLocaleString('en-IN')}</td>
+                              <tr style="background: #ffffff; color: #0f172a;">
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: center; color: #0f172a;">${idx + 1}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; font-family: monospace; font-weight: 700; color: #0f172a;">${r.student.admissionNo}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; font-weight: 700; color: #0f172a;">${r.student.name}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; color: #0f172a;">${r.student.class}${r.student.section ? `-${r.student.section}` : ''}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; color: #0f172a;">${r.student.fatherName || '—'}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; color: #0f172a;">${r.routeCode} (${r.vehicleReg})</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; font-family: monospace; color: #0f172a;">${getStudentPhone(r.student)}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #0f172a;">₹${r.stats.previousDuesAmount.toLocaleString('en-IN')}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-weight: 700; color: #be123c;">₹${r.stats.totalOutstanding.toLocaleString('en-IN')}</td>
                               </tr>
                             `
                               )
                               .join('')}
                           </tbody>
                           <tfoot>
-                            <tr style="background: #f8fafc; font-weight: 700;">
-                              <td colspan="7" style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">TOTAL OUTSTANDING:</td>
-                              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
+                            <tr style="background: #f8fafc; font-weight: 800; color: #0f172a;">
+                              <td colspan="8" style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #0f172a;">TOTAL OUTSTANDING:</td>
+                              <td style="border: 1px solid #94a3b8; padding: 6px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
                             </tr>
                           </tfoot>
                         </table>
                       </div>
                     `;
-                    openHtmlPrintPreview('Demand Slip Summary Register', listHtml);
+                    openHtmlPrintPreview({
+                      title: 'Demand Slip Summary Register',
+                      subtitle: `${demandFilteredMembers.length} Members`,
+                      html: listHtml,
+                    });
                   }}
                   className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
                 >
                   <FileText className="w-4 h-4" />
-                  <span>Print Consolidated List (PDF)</span>
+                  <span>Print List (PDF)</span>
                 </button>
               </div>
             </div>
@@ -2972,10 +3151,10 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                 >
                   <option value="all">All Routes</option>
                   {routes
-                    .filter((r) => !lockedCampus || (r.campus || 'Sr') === lockedCampus)
+                    .filter((r) => !lockedCampus || (r.campus || r.campusCode || 'Sr') === lockedCampus)
                     .map((r) => (
                       <option key={r.id} value={r.code}>
-                        {r.code} ({r.campus || 'Sr'})
+                        {r.code} ({getRouteVehicleNumber(r)})
                       </option>
                     ))}
                 </select>
@@ -2989,9 +3168,14 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
                 >
                   <option value="all">All Vehicles</option>
-                  {vehicles.map((v) => (
-                    <option key={v.id} value={v.registrationNumber}>
-                      {v.registrationNumber}
+                  {Array.from(
+                    new Set([
+                      ...vehicles.map((v) => v.registrationNumber),
+                      ...routes.map((r) => getRouteVehicleNumber(r)).filter((v) => v && v !== '—'),
+                    ])
+                  ).map((vReg) => (
+                    <option key={vReg} value={vReg}>
+                      {vReg}
                     </option>
                   ))}
                 </select>
@@ -3010,7 +3194,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Search Member</label>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Search</label>
                 <input
                   type="text"
                   placeholder="Name, Adm No, Phone..."
@@ -3024,9 +3208,9 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
           {/* Demand Slip & Follow-Up Table */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase sticky top-0 z-10">
                   <tr>
                     <th className="py-3 px-4">Adm No &amp; Member</th>
                     <th className="py-3 px-2.5">Campus / Class</th>
@@ -3035,112 +3219,115 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     <th className="py-3 px-2.5 text-right font-mono">Prev. Dues</th>
                     <th className="py-3 px-2.5 text-right font-mono">Collected</th>
                     <th className="py-3 px-3 text-right font-mono">Outstanding</th>
-                    <th className="py-3 px-3">Latest Follow-up Communication</th>
-                    <th className="py-3 px-4 text-right">Demand Slip &amp; Follow-up</th>
+                    <th className="py-3 px-3">Past Communication</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {demandFilteredMembers.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="py-10 text-center text-slate-400">
-                        No members match the selected Demand Slip filters.
+                        No members match the selected filters.
                       </td>
                     </tr>
                   ) : (
-                    demandFilteredMembers.map(({ student, campus, routeCode, vehicleReg, stats }) => (
-                      <tr key={student.id} className="hover:bg-slate-50/80">
-                        <td className="py-3 px-4">
-                          <div className="font-bold text-slate-900">{student.name}</div>
-                          <div className="text-[11px] font-mono text-slate-500">
-                            {student.admissionNo} • {student.villageName || student.stopName || '—'}
-                          </div>
-                        </td>
-                        <td className="py-3 px-2.5">
-                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px] mr-1">
-                            {campus}
-                          </span>
-                          <span className="font-semibold text-slate-700">
-                            {student.class}-{student.section}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3">
-                          <div className="font-mono font-bold text-slate-800">{routeCode}</div>
-                          <div className="text-[10px] font-mono text-slate-500">{vehicleReg}</div>
-                        </td>
-                        <td className="py-3 px-3">
-                          <div className="font-medium text-slate-800">
-                            {student.fatherName || student.parentName || '—'}
-                          </div>
-                          {student.parentPhone ? (
-                            <a
-                              href={`tel:${student.parentPhone}`}
-                              className="text-[11px] font-mono font-bold text-indigo-600 hover:underline inline-flex items-center gap-1"
-                            >
-                              <PhoneCall className="w-3 h-3" />
-                              <span>{student.parentPhone}</span>
-                            </a>
-                          ) : (
-                            <span className="text-[11px] text-slate-400">No Phone</span>
-                          )}
-                        </td>
-                        <td className="py-3 px-2.5 text-right font-mono text-slate-700">
-                          ₹{stats.previousDuesAmount.toLocaleString('en-IN')}
-                        </td>
-                        <td className="py-3 px-2.5 text-right font-mono font-bold text-emerald-700">
-                          ₹{stats.totalCollected.toLocaleString('en-IN')}
-                        </td>
-                        <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
-                          ₹{stats.totalOutstanding.toLocaleString('en-IN')}
-                        </td>
-                        <td className="py-3 px-3 max-w-xs">
-                          {stats.latestFollowUp ? (
-                            <div className="p-2 rounded-lg bg-amber-50/70 border border-amber-200/80 text-[11px]">
-                              <div className="flex items-center justify-between gap-1 font-bold text-amber-950">
-                                <span>{stats.latestFollowUp.callOutcome}</span>
-                                <span className="font-mono text-[10px] text-slate-500">
-                                  {stats.latestFollowUp.callDate}
-                                </span>
-                              </div>
-                              <div className="text-slate-700 truncate mt-0.5">
-                                {stats.latestFollowUp.remarks}
-                              </div>
-                              {stats.latestFollowUp.promisedPayDate && (
-                                <div className="text-[10px] font-bold text-indigo-700 mt-0.5">
-                                  Promised Date: {stats.latestFollowUp.promisedPayDate}
-                                </div>
-                              )}
+                    demandFilteredMembers.map(({ student, campus, routeCode, vehicleReg, stats }) => {
+                      const phoneStr = getStudentPhone(student);
+                      return (
+                        <tr key={student.id} className="hover:bg-slate-50/80">
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-900">{student.name}</div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              {student.admissionNo} • {getStudentStopDisplay(student)}
                             </div>
-                          ) : (
-                            <span className="text-[11px] text-slate-400 italic">No phone follow-up yet</span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                printDemandSlipsBatchPdf(
-                                  [{ student, stats, routeCode, vehicleReg }],
-                                  `Demand Slip — ${student.name} (${student.admissionNo})`
-                                )
-                              }
-                              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                              <span>Print Slip</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenFollowUpModal(student)}
-                              className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <PhoneCall className="w-3.5 h-3.5" />
-                              <span>Follow-up ({stats.followUps.length})</span>
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
+                          </td>
+                          <td className="py-3 px-2.5">
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px] mr-1">
+                              {campus}
+                            </span>
+                            <span className="font-semibold text-slate-700">
+                              {student.class}{student.section ? `-${student.section}` : ''}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="font-mono font-bold text-slate-800">{routeCode}</div>
+                            <div className="text-[10px] font-mono text-slate-500">{vehicleReg}</div>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="font-medium text-slate-800">
+                              {student.fatherName || '—'}
+                            </div>
+                            {phoneStr !== '—' ? (
+                              <a
+                                href={`tel:${phoneStr}`}
+                                className="text-[11px] font-mono font-bold text-indigo-600 hover:underline inline-flex items-center gap-1"
+                              >
+                                <PhoneCall className="w-3 h-3" />
+                                <span>{phoneStr}</span>
+                              </a>
+                            ) : (
+                              <span className="text-[11px] text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-2.5 text-right font-mono text-slate-700">
+                            ₹{stats.previousDuesAmount.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-2.5 text-right font-mono font-bold text-emerald-700">
+                            ₹{stats.totalCollected.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
+                            ₹{stats.totalOutstanding.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-3 max-w-xs">
+                            {stats.latestFollowUp ? (
+                              <div className="p-2 rounded-lg bg-amber-50/70 border border-amber-200/80 text-[11px]">
+                                <div className="flex items-center justify-between gap-1 font-bold text-amber-950">
+                                  <span>{stats.latestFollowUp.callOutcome || stats.latestFollowUp.outcome}</span>
+                                  <span className="font-mono text-[10px] text-slate-500">
+                                    {stats.latestFollowUp.callDate || stats.latestFollowUp.date}
+                                  </span>
+                                </div>
+                                <div className="text-slate-700 truncate mt-0.5">
+                                  {stats.latestFollowUp.remarks || stats.latestFollowUp.notes}
+                                </div>
+                                {(stats.latestFollowUp.promisedPayDate || stats.latestFollowUp.promiseDate) && (
+                                  <div className="text-[10px] font-bold text-indigo-700 mt-0.5">
+                                    Promised: {stats.latestFollowUp.promisedPayDate || stats.latestFollowUp.promiseDate}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  printDemandSlipsBatchPdf(
+                                    [{ student, stats, routeCode, vehicleReg }],
+                                    `Demand Slip — ${student.name} (${student.admissionNo})`
+                                  )
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                                <span>Print Slip</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenFollowUpModal(student)}
+                                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <PhoneCall className="w-3.5 h-3.5" />
+                                <span>Follow-up ({stats.followUps.length})</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -3163,7 +3350,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   {followUpModalStudent.name} ({followUpModalStudent.admissionNo}) • Class{' '}
                   {followUpModalStudent.class}-{followUpModalStudent.section} • Phone:{' '}
                   <strong className="text-amber-300 font-mono">
-                    {followUpModalStudent.parentPhone || 'N/A'}
+                    {getStudentPhone(followUpModalStudent)}
                   </strong>
                 </p>
               </div>
@@ -3179,6 +3366,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs">
               {(() => {
                 const modalStats = getStudentFeeStats(followUpModalStudent);
+                const modalPhone = getStudentPhone(followUpModalStudent);
                 return (
                   <>
                     {/* Member Dues & Phone Strip */}
@@ -3186,18 +3374,18 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                       <div>
                         <div className="text-[10px] font-bold text-slate-500 uppercase">Father / Guardian</div>
                         <div className="font-bold text-slate-900 mt-0.5">
-                          {followUpModalStudent.fatherName || followUpModalStudent.parentName || '—'}
+                          {followUpModalStudent.fatherName || '—'}
                         </div>
                       </div>
                       <div>
                         <div className="text-[10px] font-bold text-slate-500 uppercase">Call Parent Phone</div>
-                        {followUpModalStudent.parentPhone ? (
+                        {modalPhone !== '—' ? (
                           <a
-                            href={`tel:${followUpModalStudent.parentPhone}`}
+                            href={`tel:${modalPhone}`}
                             className="font-mono font-bold text-indigo-600 hover:underline flex items-center gap-1 mt-0.5"
                           >
                             <PhoneCall className="w-3.5 h-3.5" />
-                            <span>{followUpModalStudent.parentPhone}</span>
+                            <span>{modalPhone}</span>
                           </a>
                         ) : (
                           <div className="text-slate-400 mt-0.5">Not Available</div>

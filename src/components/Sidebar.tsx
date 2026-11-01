@@ -241,10 +241,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       defaultSubTab: 'day_book',
       subItems: [
         { id: 'as-led-daybook', label: '1- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
-        { id: 'as-led-route-out', label: '2- Route-wise Outstanding Details', navKey: 'accounts', subTab: 'route_outstanding' },
-        { id: 'as-led-demand', label: '3- Demand Slip & Follow-up', navKey: 'accounts', subTab: 'demand_slip' },
-        { id: 'as-led-stu', label: '4- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
-        { id: 'as-led-veh', label: '5- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
+        { id: 'as-led-stu', label: '2- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
+        { id: 'as-led-veh', label: '3- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
       ],
     },
     {
@@ -426,7 +424,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: '8- Ledger and Accounts',
       icon: <Landmark className="w-5 h-5" />,
       defaultNavKey: 'accounts',
-      defaultSubTab: 'vehicle_ledger',
+      defaultSubTab: 'day_book',
       allowedRoles: ['Admin', 'Transport Coordinator'],
       subItems: [
         {
@@ -436,40 +434,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
           subTab: 'day_book',
         },
         {
-          id: 'ac-route-out',
-          label: '2- Route-wise Outstanding Details',
-          navKey: 'accounts',
-          subTab: 'route_outstanding',
-        },
-        {
-          id: 'ac-demand',
-          label: '3- Demand Slip & Follow-up',
-          navKey: 'accounts',
-          subTab: 'demand_slip',
-        },
-        {
           id: 'ac-stu',
-          label: '4- Member Fee Ledger',
+          label: '2- Member Fee Ledger',
           navKey: 'accounts',
           subTab: 'student_ledger',
         },
         {
           id: 'ac-veh',
-          label: '5- Vehicle Cost Ledger',
+          label: '3- Vehicle Cost Ledger',
           navKey: 'accounts',
           subTab: 'vehicle_ledger',
         },
-        { id: 'ac-odo', label: '6- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
-        { id: 'ac-fuel', label: '7- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
+        { id: 'ac-odo', label: '4- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
+        { id: 'ac-fuel', label: '5- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
         {
           id: 'ac-vch',
-          label: '8- Vouchers & Chart of A/C',
+          label: '6- Vouchers & Chart of A/C',
           navKey: 'accounts',
           subTab: 'vouchers',
         },
         {
           id: 'ac-tb',
-          label: '9- Trial Balance',
+          label: '7- Trial Balance',
           navKey: 'accounts',
           subTab: 'trial_balance',
         },
