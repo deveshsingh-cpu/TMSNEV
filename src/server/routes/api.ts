@@ -992,3 +992,61 @@ apiRouter.post('/member-requests/:id/admin-review', async (req: Request, res: Re
   }
 });
 
+// 15. Attendance Module — Call Absentees, Consecutive Absence Escalation & Expected Return Date
+apiRouter.get('/absentee-calls', (req: Request, res: Response) => {
+  const { date, campus } = req.query as { date?: string; campus?: string };
+  res.json(sheetsDb.getAbsenteeCalls(date, campus));
+});
+
+apiRouter.post('/absentee-calls', async (req: Request, res: Response) => {
+  try {
+    const saved = await sheetsDb.saveAbsenteeCall(req.body || {});
+    res.json(saved);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/absentee-calls/confirm-early-arrival', async (req: Request, res: Response) => {
+  try {
+    const result = await sheetsDb.confirmEarlyArrival(req.body || {});
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 16. Feedback & Complaint Module (Grievances & Feedbacks from Members / Parents)
+apiRouter.get('/complaints', (req: Request, res: Response) => {
+  const { campus, status } = req.query as { campus?: string; status?: string };
+  res.json(sheetsDb.getComplaints(campus, status));
+});
+
+apiRouter.post('/complaints', async (req: Request, res: Response) => {
+  try {
+    const saved = await sheetsDb.saveComplaint(req.body || {});
+    res.json(saved);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/complaints/:id/resolve', async (req: Request, res: Response) => {
+  try {
+    const updated = await sheetsDb.resolveComplaint(req.params.id, req.body || {});
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.delete('/complaints/:id', async (req: Request, res: Response) => {
+  try {
+    const result = await sheetsDb.deleteComplaint(req.params.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+

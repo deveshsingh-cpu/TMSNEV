@@ -201,6 +201,8 @@ export interface TransportStop {
   distanceRoute?: string; // e.g. "School - Chainpur"
   selectedMonths?: SessionMonthCode[];
   totalSessionFee?: number;
+  effectiveFromDate?: string; // YYYY-MM-DD
+  effectiveFromMonth?: string; // YYYY-MM
   landmark?: string;
   villageName?: string;
   stopId?: string;
@@ -216,6 +218,8 @@ export interface Village {
   distanceRoute?: string; // e.g. "School - Chainpur"
   selectedMonths?: SessionMonthCode[];
   totalSessionFee?: number;
+  effectiveFromDate?: string; // YYYY-MM-DD
+  effectiveFromMonth?: string; // YYYY-MM
   stops: TransportStop[];
   monthlyRate?: number;
 }
@@ -441,6 +445,12 @@ export interface StudentMember {
     reason: string;
     grantedAt: string;
   };
+  expectedReturnDate?: string; // Tentative Date of Arrival when on informed leave
+  expectedReturnReason?: string;
+  expectedReturnSetOn?: string;
+  expectedReturnSetBy?: string;
+  lastAbsentAssistantRemark?: string;
+  lastAbsentCoordinatorRemark?: string;
   version: number;
 }
 
@@ -676,6 +686,68 @@ export interface DisciplineRecord {
   actionTaken: string;
   reportedBy: string;
   severity?: 'Minor' | 'Moderate' | 'Serious';
+}
+
+export type ComplaintSeriousness = 'Urgent' | 'General' | 'Feedback';
+export type ComplaintStatus = 'Pending' | 'Resolved';
+
+export interface MemberComplaintRecord {
+  id: string;
+  complaintNo: string;
+  date: string; // YYYY-MM-DD
+  memberId: string;
+  admissionNo: string;
+  memberName: string;
+  fatherName?: string;
+  mobile?: string;
+  campus: CampusId;
+  classSection: string;
+  routeId: string;
+  routeCode: string;
+  vehicleId: string;
+  vehicleNumber: string;
+  driverName: string;
+  seriousness: ComplaintSeriousness;
+  wordsOfMember: string;
+  status: ComplaintStatus;
+  actionTaken?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  recordedBy: string;
+  recordedByRole: UserRole;
+  createdAt: string;
+}
+
+export interface AbsenteeCallRecord {
+  id: string;
+  date: string; // YYYY-MM-DD
+  studentId: string;
+  admissionNo: string;
+  studentName: string;
+  classSection: string;
+  campus: CampusId;
+  routeId: string;
+  routeCode: string;
+  stopName: string;
+  fatherName?: string;
+  phone: string;
+  consecutiveAbsentDays: number;
+  absentSinceDate?: string;
+  attendanceRemarks?: string;
+  calledByAssistant?: boolean;
+  assistantName?: string;
+  assistantCalledAt?: string;
+  assistantRemarks?: string;
+  calledByCoordinator?: boolean;
+  coordinatorName?: string;
+  coordinatorCalledAt?: string;
+  coordinatorRemarks?: string;
+  expectedReturnDate?: string; // YYYY-MM-DD (Tentative Date of Arrival)
+  expectedReturnReason?: string;
+  earlyArrivalConfirmedAt?: string;
+  earlyArrivalConfirmedBy?: string;
+  earlyArrivalRemarks?: string;
+  status: 'Pending Call' | 'Called' | 'Scheduled Return' | 'Returned Early' | 'Overdue Return';
 }
 
 export interface FollowUpRecord {

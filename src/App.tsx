@@ -63,6 +63,8 @@ import {
   UserRole,
   MemberLifecycleRequest,
   SessionMonthCode,
+  AbsenteeCallRecord,
+  MemberComplaintRecord,
 } from './types/index.js';
 import {
   Bus,
@@ -202,6 +204,8 @@ export function App() {
   const [staffPayrolls, setStaffPayrolls] = useState<StaffPayrollRecord[]>([]);
   const [holidays, setHolidays] = useState<HolidayRecord[]>([]);
   const [memberRequests, setMemberRequests] = useState<MemberLifecycleRequest[]>([]);
+  const [absenteeCalls, setAbsenteeCalls] = useState<AbsenteeCallRecord[]>([]);
+  const [complaints, setComplaints] = useState<MemberComplaintRecord[]>([]);
 
   // Analytics & Sync
   const [reportsSummary, setReportsSummary] = useState<ReportsSummary | null>(null);
@@ -276,6 +280,8 @@ export function App() {
       setStaffPayrolls(boot?.staffPayrolls || []);
       setHolidays(boot?.holidays || []);
       setMemberRequests(boot?.memberRequests || []);
+      setAbsenteeCalls(boot?.absenteeCalls || []);
+      setComplaints(boot?.complaints || []);
 
       if (Array.isArray(boot?.attendance)) {
         setAttendanceRecords(boot.attendance);
@@ -407,7 +413,9 @@ export function App() {
         if (
           targetSubTab !== 'day_book' &&
           targetSubTab !== 'student_ledger' &&
-          targetSubTab !== 'vehicle_ledger'
+          targetSubTab !== 'vehicle_ledger' &&
+          targetSubTab !== 'route_outstanding' &&
+          targetSubTab !== 'demand_slip'
         ) {
           targetSubTab = 'day_book';
         }
@@ -547,7 +555,9 @@ export function App() {
     await api.deleteUser(id);
     await loadAllData();
   };
-  const handleSaveVillage = async (data: Partial<Village>) => {
+  const handleSaveVillage = async (
+    data: Partial<Village> & { effectiveFromDate?: string; acknowledged?: boolean }
+  ) => {
     await api.saveVillage(data);
     await loadAllData();
   };
@@ -664,6 +674,64 @@ export function App() {
     await loadAllData();
   };
 
+  // --- Absentee Calls & Complaints/Feedback Handlers ---
+  const handleSaveAbsenteeCall = async (payload: Partial<AbsenteeCallRecord> & { clearExpectedReturn?: boolean }) => {
+    const res = await api.saveAbsenteeCall({
+      ...payload,
+      calledBy: payload.calledBy || currentUser?.fullName || activeRole,
+      calledByRole: payload.calledByRole || activeRole,
+    });
+    await loadAllData();
+    return res;
+  };
+
+  const handleConfirmEarlyArrival = async (payload: {
+    studentId: string;
+    date: string;
+    confirmedBy?: string;
+    remarks?: string;
+  }) => {
+    const res = await api.confirmEarlyArrival({
+      ...payload,
+      confirmedBy: payload.confirmedBy || currentUser?.fullName || activeRole,
+    });
+    await loadAllData();
+    return res;
+  };
+
+  const handleSaveComplaint = async (payload: Partial<MemberComplaintRecord>) => {
+    const res = await api.saveComplaint({
+      ...payload,
+      loggedBy: payload.loggedBy || currentUser?.fullName || activeRole,
+      loggedByRole: payload.loggedByRole || activeRole,
+    });
+    await loadAllData();
+    return res;
+  };
+
+  const handleResolveComplaint = async (
+    id: string,
+    payload: {
+      status?: 'Pending' | 'Resolved';
+      actionTakenRemarks?: string;
+      resolvedBy?: string;
+      resolvedByRole?: UserRole;
+    }
+  ) => {
+    const res = await api.resolveComplaint(id, {
+      ...payload,
+      resolvedBy: payload.resolvedBy || currentUser?.fullName || activeRole,
+      resolvedByRole: payload.resolvedByRole || activeRole,
+    });
+    await loadAllData();
+    return res;
+  };
+
+  const handleDeleteComplaint = async (id: string) => {
+    await api.deleteComplaint(id);
+    await loadAllData();
+  };
+
   // --- Fees Setup & Member Lifecycle Requests Handlers ---
   const handleUpdateFeesSetup = async (payload: {
     attachedSessionMonths?: SessionMonthCode[];
@@ -674,8 +742,13 @@ export function App() {
     distanceRoute?: string;
     selectedMonths?: SessionMonthCode[];
     monthlyFee?: number;
+    effectiveFromDate?: string;
+    acknowledged?: boolean;
   }) => {
-    const res = await api.updateFeesSetup(payload);
+    const res = await api.updateFeesSetup({
+      ...payload,
+      applyMonthsToAllStops: payload.applyToAllStops,
+    });
     await loadAllData();
     return res;
   };
@@ -1074,6 +1147,11 @@ export function App() {
               >
                 {activeRole}
               </span>
+              {currentUser.campus && currentUser.campus !== 'All Campuses' && (
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                  Campus: {currentUser.campus}
+                </span>
+              )}
             </div>
 
             {/* Android App / APK Installer Button */}
@@ -1142,6 +1220,8 @@ export function App() {
                   dailyTrips={dailyTrips}
                   attendanceRecords={attendanceRecords}
                   memberRequests={memberRequests}
+                  absenteeCalls={absenteeCalls}
+                  complaints={complaints}
                   feeReceipts={receipts}
                   expenses={expenses}
                   maintenance={maintenance}
@@ -1149,6 +1229,7 @@ export function App() {
                   disciplineRecords={disciplineRecords}
                   isAdmin={isAdmin}
                   currentRoleName={activeRole}
+                  userCampus={currentUser?.campus}
                   onNavigate={handleNavigate as any}
                   onOpenMemberProfile={handleOpenMemberProfileFromAnywhere}
                   onUpdateExpenseApproval={handleUpdateExpenseApproval}
@@ -1157,6 +1238,7 @@ export function App() {
                   onReviewSuspensionRequest={handleReviewSuspensionRequest}
                   onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
                   onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
+                  onResolveComplaint={handleResolveComplaint}
                 />
               )}
 
@@ -1215,7 +1297,9 @@ export function App() {
                   schoolName={config.schoolName}
                   isAdmin={isAdmin}
                   currentRole={activeRole}
+                  userCampus={currentUser?.campus}
                   students={students}
+                  employees={employees}
                   villages={villages}
                   routes={routes}
                   vehicles={vehicles}
@@ -1228,10 +1312,14 @@ export function App() {
                   attendanceRecords={attendanceRecords}
                   feeFollowUps={feeFollowUps}
                   disciplineRecords={disciplineRecords}
+                  complaints={complaints}
                   memberRequests={memberRequests}
                   onCreateMemberRequest={handleCreateMemberRequest}
                   onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
                   onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
+                  onSaveComplaint={handleSaveComplaint}
+                  onResolveComplaint={handleResolveComplaint}
+                  onDeleteComplaint={handleDeleteComplaint}
                   initialStatusFilter={
                     activeSubTab === 'Suspended' || activeSubTab === 'suspended'
                       ? 'Suspended'
@@ -1239,6 +1327,8 @@ export function App() {
                       ? 'discipline'
                       : activeSubTab === 'requests'
                       ? 'requests'
+                      : activeSubTab === 'complaints'
+                      ? 'complaints'
                       : 'all'
                   }
                   externalOpenMemberId={externalOpenMemberId}
@@ -1339,10 +1429,12 @@ export function App() {
                   schoolName={config.schoolName}
                   isAdmin={isAdmin}
                   currentRole={activeRole}
+                  userCampus={currentUser?.campus}
                   campuses={campuses}
                   vehicles={vehicles}
                   trips={dailyTrips}
                   attendanceRecords={attendanceRecords}
+                  absenteeCalls={absenteeCalls}
                   routes={routes}
                   students={students}
                   initialSubTab={activeSubTab || 'board'}
@@ -1353,6 +1445,8 @@ export function App() {
                   onVerifyTrip={handleVerifyTrip}
                   onCancelTrip={handleCancelTrip}
                   onOpenPrintPack={handleOpenPrintPack}
+                  onSaveAbsenteeCall={handleSaveAbsenteeCall}
+                  onConfirmEarlyArrival={handleConfirmEarlyArrival}
                 />
               )}
 
@@ -1360,7 +1454,12 @@ export function App() {
                 <FeesView
                   schoolName={config.schoolName}
                   currentRole={activeRole}
+                  userCampus={currentUser?.campus}
+                  campuses={campuses}
                   classes={classes}
+                  sections={sections}
+                  routes={routes}
+                  vehicles={vehicles}
                   memberTypes={memberTypes}
                   invoices={invoices}
                   receipts={receipts}
@@ -1405,6 +1504,13 @@ export function App() {
                   schoolName={config.schoolName}
                   isAdmin={isAdmin}
                   currentRole={activeRole}
+                  userCampus={currentUser?.campus}
+                  campuses={campuses}
+                  classes={classes}
+                  sections={sections}
+                  routes={routes}
+                  followUps={feeFollowUps}
+                  onAddFollowUp={handleAddFeeFollowUp}
                   initialTab={
                     activeSubTab === 'income'
                       ? 'income'
@@ -1414,6 +1520,10 @@ export function App() {
                       ? 'vehicle_ledger'
                       : activeSubTab === 'student_ledger'
                       ? 'student_ledger'
+                      : activeSubTab === 'route_outstanding'
+                      ? 'route_outstanding'
+                      : activeSubTab === 'demand_slip'
+                      ? 'demand_slip'
                       : activeSubTab === 'trial_balance'
                       ? 'trial_balance'
                       : 'day_book'
@@ -1432,7 +1542,7 @@ export function App() {
                   onSaveIncomeHead={handleSaveIncomeHead}
                   onDeleteIncomeHead={handleDeleteIncomeHead}
                   onAddIncome={handleAddOtherIncome}
-                  onDeleteIncome={handleDeleteOtherIncome}
+                  onDeleteIncome={handleAddOtherIncome ? handleDeleteOtherIncome : undefined}
                   onDeleteExpense={handleDeleteExpense}
                   onCreateVoucher={handleCreateVoucher}
                 />

@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import {
   CreditCard, IndianRupee, Printer, CheckCircle,
   AlertTriangle, Phone, FileText,
-  Calendar, Search, ShieldCheck, UserX, Plus, X, Upload, Eye, Trash2, Lock
+  Calendar, Search, ShieldCheck, UserX, Plus, X, Upload, Eye, Trash2, Lock,
+  BarChart3, PhoneCall, MessageSquare, Layers
 } from 'lucide-react';
 import {
   FeeInvoice, FeeReceipt, FollowUpRecord, WarningLetter,
-  StudentMember, UserRole, MemberTypeMaster
+  StudentMember, UserRole, MemberTypeMaster, CampusMaster, Route, Vehicle
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
 import { api } from '../../services/api.js';
@@ -14,7 +15,12 @@ import { api } from '../../services/api.js';
 interface FeesViewProps {
   schoolName?: string;
   currentRole?: UserRole;
+  userCampus?: string;
+  campuses?: CampusMaster[];
   classes?: string[];
+  sections?: string[];
+  routes?: Route[];
+  vehicles?: Vehicle[];
   memberTypes?: MemberTypeMaster[];
   invoices: FeeInvoice[];
   receipts: FeeReceipt[];
@@ -37,9 +43,14 @@ interface FeesViewProps {
 }
 
 export const FeesView: React.FC<FeesViewProps> = ({
-  schoolName,
+  schoolName = 'Narendra Edu Valley',
   currentRole = 'Admin',
+  userCampus,
+  campuses = [],
   classes = [],
+  sections = [],
+  routes = [],
+  vehicles = [],
   memberTypes = [],
   invoices,
   receipts,
@@ -61,16 +72,50 @@ export const FeesView: React.FC<FeesViewProps> = ({
   onOpenStudentProfile,
 }) => {
   const isAdmin = currentRole === 'Admin';
+  const isAssistant = currentRole === 'Transport Assistant';
+  const lockedCampus =
+    isAssistant && userCampus && userCampus !== 'All Campuses' ? userCampus : null;
   const todayStr = new Date().toISOString().split('T')[0];
 
-  const [activeTab, setActiveTab] = useState<'billing' | 'receipts' | 'recovery'>('receipts');
+  const [activeTab, setActiveTab] = useState<
+    'billing' | 'receipts' | 'recovery' | 'demand_slip' | 'monthly_matrix'
+  >('receipts');
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'info' | 'warning'; text: string } | null>(null);
 
   useEffect(() => {
     if (initialSubTab === 'invoices') setActiveTab('billing');
     else if (initialSubTab === 'recovery' || initialSubTab === 'defaulters') setActiveTab('recovery');
+    else if (initialSubTab === 'demand_slip') setActiveTab('demand_slip');
+    else if (initialSubTab === 'monthly_matrix') setActiveTab('monthly_matrix');
     else if (initialSubTab === 'collect') setActiveTab('receipts');
   }, [initialSubTab]);
+
+  // Demand Slip State
+  const [demandCampusFilter, setDemandCampusFilter] = useState<string>(lockedCampus || 'all');
+  const [demandClassFilter, setDemandClassFilter] = useState<string>('all');
+  const [demandSectionFilter, setDemandSectionFilter] = useState<string>('all');
+  const [demandRouteFilter, setDemandRouteFilter] = useState<string>('all');
+  const [demandVehicleFilter, setDemandVehicleFilter] = useState<string>('all');
+  const [demandDuesMode, setDemandDuesMode] = useState<'overdue_only' | 'all'>('overdue_only');
+  const [demandSearch, setDemandSearch] = useState<string>('');
+  const [demandDueDate, setDemandDueDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return d.toISOString().split('T')[0];
+  });
+  const [demandFollowUpStudent, setDemandFollowUpStudent] = useState<StudentMember | null>(null);
+
+  // Month-wise Fee & Previous Dues Matrix State (Visible to Everyone)
+  const [matrixCampusFilter, setMatrixCampusFilter] = useState<string>('all');
+  const [matrixRouteFilter, setMatrixRouteFilter] = useState<string>('all');
+  const [matrixClassFilter, setMatrixClassFilter] = useState<string>('all');
+  const [matrixSearch, setMatrixSearch] = useState<string>('');
+
+  useEffect(() => {
+    if (lockedCampus) {
+      setDemandCampusFilter(lockedCampus);
+    }
+  }, [lockedCampus]);
 
   const [selectedMonth, setSelectedMonth] = useState('2026-11');
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
@@ -707,6 +752,82 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Sub-Module Navigation Bar */}
+      <div className="bg-slate-900 text-white p-3 rounded-2xl border border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-2 print:hidden">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setActiveTab('receipts')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'receipts'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <IndianRupee className="w-3.5 h-3.5" />
+            <span>Collect Fees &amp; Receipts</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('billing')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'billing'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Monthly Invoices</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('demand_slip')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'demand_slip'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Demand Slip &amp; Phone Follow-up</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('monthly_matrix')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'monthly_matrix'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Month-wise Fee &amp; Previous Dues</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('recovery')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'recovery'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Phone className="w-3.5 h-3.5" />
+            <span>Overdue &amp; Recovery</span>
+          </button>
+        </div>
+
+        {lockedCampus && (
+          <span className="px-2.5 py-1 rounded-lg bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[11px] font-bold">
+            Demand Slip Campus Scope: {lockedCampus}
+          </span>
+        )}
+      </div>
+
       {/* Unified Header & Toolbar (Scoped strictly to active Sidebar screen) */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
@@ -715,6 +836,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
               ? 'Monthly Invoices'
               : activeTab === 'recovery'
               ? 'Overdue Follow-ups & Recovery'
+              : activeTab === 'demand_slip'
+              ? 'Demand Slip & Phone Fee Follow-up'
+              : activeTab === 'monthly_matrix'
+              ? 'Month-wise Outstanding, Collection & Previous Dues (Separate Breakdown)'
               : 'Collect Fees & Receipts'}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
@@ -722,6 +847,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
               ? `${invoices.length} Invoices`
               : activeTab === 'recovery'
               ? `${followUps.length} Follow-ups`
+              : activeTab === 'demand_slip'
+              ? 'Print Slips & Call History'
+              : activeTab === 'monthly_matrix'
+              ? 'Visible to All Staff'
               : `${receipts.length} Receipts`}
           </span>
         </div>
@@ -1371,6 +1500,982 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     );
                   })
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================== */}
+      {/* TAB 4: DEMAND SLIP & PHONE FOLLOW-UP (With Past Communications)     */}
+      {/* =================================================================== */}
+      {activeTab === 'demand_slip' && (() => {
+        const filteredDemandStudents = students
+          .filter((s) => s.transportStatus !== 'Left School')
+          .filter((s) => {
+            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const stuCampus = s.campus || rt?.campus || 'Sr';
+            if (lockedCampus && stuCampus !== lockedCampus) return false;
+            if (demandCampusFilter !== 'all' && stuCampus !== demandCampusFilter) return false;
+            if (demandClassFilter !== 'all' && s.class !== demandClassFilter) return false;
+            if (demandSectionFilter !== 'all' && s.section !== demandSectionFilter) return false;
+            if (
+              demandRouteFilter !== 'all' &&
+              s.routeId !== demandRouteFilter &&
+              s.routeName !== demandRouteFilter &&
+              rt?.code !== demandRouteFilter
+            ) {
+              return false;
+            }
+            if (demandVehicleFilter !== 'all') {
+              const veh = s.vehicleNumber || rt?.assignedVehicleReg || '';
+              if (veh !== demandVehicleFilter) return false;
+            }
+            if (demandSearch.trim()) {
+              const q = demandSearch.toLowerCase();
+              const match =
+                s.name.toLowerCase().includes(q) ||
+                s.admissionNo.toLowerCase().includes(q) ||
+                (s.fatherName || '').toLowerCase().includes(q) ||
+                (s.parentPhone || s.mobile || '').toLowerCase().includes(q) ||
+                (s.villageName || s.stopName || '').toLowerCase().includes(q);
+              if (!match) return false;
+            }
+            return true;
+          })
+          .map((s) => {
+            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const stuInvoices = invoices.filter((i) => i.studentId === s.id);
+            const stuReceipts = receipts.filter((r) => r.studentId === s.id);
+            const prevDuesInv = stuInvoices.filter(
+              (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
+            );
+            const sessionInv = stuInvoices.filter(
+              (i) => i.month !== 'Previous Dues' && !i.id.startsWith('inv-prev-')
+            );
+            const prevDuesBilled =
+              prevDuesInv.length > 0
+                ? prevDuesInv.reduce((sum, i) => sum + Number(i.netPayable ?? i.netAmount ?? 0), 0)
+                : Number(s.previousDues || 0);
+            const sessionBilled = sessionInv.reduce(
+              (sum, i) => sum + Number(i.netPayable ?? i.netAmount ?? 0),
+              0
+            );
+            const totalBilled = prevDuesBilled + sessionBilled;
+            const totalCollected = stuReceipts.reduce(
+              (sum, r) => sum + Number(r.amountPaid ?? r.amount ?? 0),
+              0
+            );
+            const totalOutstanding = Math.max(0, totalBilled - totalCollected);
+            const stuFollowUps = followUps
+              .filter((f) => f.studentId === s.id || f.admissionNo === s.admissionNo)
+              .sort((a, b) => (b.callDate || b.date || '').localeCompare(a.callDate || a.date || ''));
+
+            return {
+              student: s,
+              campus: s.campus || rt?.campus || 'Sr',
+              routeCode: rt?.code || s.routeName || '—',
+              vehicleReg: s.vehicleNumber || rt?.assignedVehicleReg || '—',
+              prevDuesBilled,
+              sessionBilled,
+              totalCollected,
+              totalOutstanding,
+              stuFollowUps,
+              latestFollowUp: stuFollowUps[0] || null,
+            };
+          })
+          .filter((r) => (demandDuesMode === 'overdue_only' ? r.totalOutstanding > 0 : true))
+          .sort((a, b) => b.totalOutstanding - a.totalOutstanding);
+
+        const printSlipsPdf = (rowsToPrint: typeof filteredDemandStudents, title: string) => {
+          if (rowsToPrint.length === 0) return;
+          const html = rowsToPrint
+            .map(
+              (r, idx) => `
+              <div style="border: 2px solid #0f172a; border-radius: 10px; padding: 14px; margin-bottom: 14px; page-break-inside: avoid; font-family: Inter, Arial, sans-serif;">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 8px; margin-bottom: 10px;">
+                  <div>
+                    <div style="font-size: 15px; font-weight: 800; color: #0f172a; text-transform: uppercase;">${schoolName}</div>
+                    <div style="font-size: 11px; font-weight: 700; color: #b45309;">TRANSPORT FEE DEMAND / REMINDER SLIP</div>
+                  </div>
+                  <div style="text-align: right; font-size: 11px; color: #334155;">
+                    <div><strong>Slip #:</strong> DEM-${todayStr.replace(/-/g, '')}-${idx + 1}</div>
+                    <div><strong>Date:</strong> ${todayStr}</div>
+                  </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 14px; font-size: 11.5px; margin-bottom: 10px;">
+                  <div><strong>Student Name:</strong> ${r.student.name}</div>
+                  <div><strong>Admission No:</strong> <span style="font-family: monospace;">${r.student.admissionNo}</span></div>
+                  <div><strong>Class &amp; Sec:</strong> ${r.student.class}-${r.student.section}</div>
+                  <div><strong>Father's Name:</strong> ${r.student.fatherName || r.student.parentName || '—'}</div>
+                  <div><strong>Route / Vehicle:</strong> ${r.routeCode} (${r.vehicleReg})</div>
+                  <div><strong>Stop / Village:</strong> ${r.student.villageName || r.student.stopName || '—'}</div>
+                  <div><strong>Phone:</strong> ${r.student.parentPhone || r.student.mobile || '—'}</div>
+                  <div><strong>Campus:</strong> ${r.campus}</div>
+                  <div><strong>Pay By Date:</strong> <strong style="color: #be123c;">${demandDueDate}</strong></div>
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px;">
+                  <thead>
+                    <tr style="background: #f8fafc;">
+                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Previous Dues (₹)</th>
+                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Current Session Fee (₹)</th>
+                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Paid Amount (₹)</th>
+                      <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Net Outstanding Due (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${r.prevDuesBilled.toLocaleString('en-IN')}</td>
+                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${r.sessionBilled.toLocaleString('en-IN')}</td>
+                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857;">₹${r.totalCollected.toLocaleString('en-IN')}</td>
+                      <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-weight: 800; color: #be123c;">₹${r.totalOutstanding.toLocaleString('en-IN')}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div style="font-size: 10.5px; color: #475569;">
+                  Dear Parent, kindly deposit the pending transport dues of <strong>₹${r.totalOutstanding.toLocaleString('en-IN')}</strong> by <strong>${demandDueDate}</strong>.
+                </div>
+              </div>
+            `
+            )
+            .join('');
+          openHtmlPrintPreview(title, html);
+        };
+
+        return (
+          <div className="space-y-5">
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Filter &amp; Print Demand Slips / Take Phone Follow-up
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Click &quot;Follow-up&quot; against any member to call and view all past communications
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-xl text-xs">
+                    <span className="font-bold text-amber-900">Pay By:</span>
+                    <input
+                      type="date"
+                      value={demandDueDate}
+                      onChange={(e) => setDemandDueDate(e.target.value)}
+                      className="font-mono font-bold text-slate-900 bg-transparent focus:outline-hidden"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      printSlipsPdf(
+                        filteredDemandStudents,
+                        `Demand Slips (${filteredDemandStudents.length} Members)`
+                      )
+                    }
+                    className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Print All Filtered Slips ({filteredDemandStudents.length})</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Campus</label>
+                  <select
+                    value={lockedCampus || demandCampusFilter}
+                    disabled={Boolean(lockedCampus)}
+                    onChange={(e) => setDemandCampusFilter(e.target.value)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    {!lockedCampus && <option value="all">All Campuses</option>}
+                    <option value="Sr">Sr Campus</option>
+                    <option value="Jr">Jr Campus</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Class</label>
+                  <select
+                    value={demandClassFilter}
+                    onChange={(e) => setDemandClassFilter(e.target.value)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Classes</option>
+                    {classes.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Section</label>
+                  <select
+                    value={demandSectionFilter}
+                    onChange={(e) => setDemandSectionFilter(e.target.value)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Sections</option>
+                    {sections.map((sec) => (
+                      <option key={sec} value={sec}>
+                        Section {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Route</label>
+                  <select
+                    value={demandRouteFilter}
+                    onChange={(e) => setDemandRouteFilter(e.target.value)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Routes</option>
+                    {routes
+                      .filter((r) => !lockedCampus || (r.campus || 'Sr') === lockedCampus)
+                      .map((r) => (
+                        <option key={r.id} value={r.code}>
+                          {r.code} ({r.campus || 'Sr'})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Vehicle</label>
+                  <select
+                    value={demandVehicleFilter}
+                    onChange={(e) => setDemandVehicleFilter(e.target.value)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Vehicles</option>
+                    {vehicles.map((v) => (
+                      <option key={v.id} value={v.registrationNumber}>
+                        {v.registrationNumber}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Dues Filter</label>
+                  <select
+                    value={demandDuesMode}
+                    onChange={(e) => setDemandDuesMode(e.target.value as any)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="overdue_only">Overdue Only (&gt; ₹0)</option>
+                    <option value="all">All Members</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Search</label>
+                  <input
+                    type="text"
+                    placeholder="Name, Adm No, Phone..."
+                    value={demandSearch}
+                    onChange={(e) => setDemandSearch(e.target.value)}
+                    className="w-full p-2 rounded-xl border border-slate-200 text-xs bg-slate-50"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                    <tr>
+                      <th className="py-3 px-4">Member &amp; Stop</th>
+                      <th className="py-3 px-2.5">Campus / Class</th>
+                      <th className="py-3 px-3">Route &amp; Vehicle</th>
+                      <th className="py-3 px-3">Father &amp; Phone</th>
+                      <th className="py-3 px-2.5 text-right font-mono">Prev. Dues</th>
+                      <th className="py-3 px-2.5 text-right font-mono">Collected</th>
+                      <th className="py-3 px-3 text-right font-mono">Outstanding</th>
+                      <th className="py-3 px-3">Past Communications</th>
+                      <th className="py-3 px-4 text-right">Demand Slip / Follow-up</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredDemandStudents.map((r) => (
+                      <tr key={r.student.id} className="hover:bg-slate-50/80">
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-900">{r.student.name}</div>
+                          <div className="text-[11px] font-mono text-slate-500">
+                            {r.student.admissionNo} • {r.student.villageName || r.student.stopName || '—'}
+                          </div>
+                        </td>
+                        <td className="py-3 px-2.5">
+                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px] mr-1">
+                            {r.campus}
+                          </span>
+                          <span className="font-semibold text-slate-700">
+                            {r.student.class}-{r.student.section}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="font-mono font-bold text-slate-800">{r.routeCode}</div>
+                          <div className="text-[10px] font-mono text-slate-500">{r.vehicleReg}</div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="font-medium text-slate-800">
+                            {r.student.fatherName || r.student.parentName || '—'}
+                          </div>
+                          <a
+                            href={`tel:${r.student.parentPhone || r.student.mobile || ''}`}
+                            className="text-[11px] font-mono font-bold text-indigo-600 hover:underline inline-flex items-center gap-1"
+                          >
+                            <PhoneCall className="w-3 h-3" />
+                            <span>{r.student.parentPhone || r.student.mobile || '—'}</span>
+                          </a>
+                        </td>
+                        <td className="py-3 px-2.5 text-right font-mono">
+                          ₹{r.prevDuesBilled.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-2.5 text-right font-mono font-bold text-emerald-700">
+                          ₹{r.totalCollected.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
+                          ₹{r.totalOutstanding.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-3 max-w-xs">
+                          {r.latestFollowUp ? (
+                            <div className="p-2 rounded-lg bg-amber-50/70 border border-amber-200 text-[11px]">
+                              <div className="font-bold text-amber-950 flex justify-between">
+                                <span>{r.latestFollowUp.callOutcome || r.latestFollowUp.outcome}</span>
+                                <span className="font-mono text-[10px] text-slate-500">
+                                  {r.latestFollowUp.callDate || r.latestFollowUp.date}
+                                </span>
+                              </div>
+                              <div className="text-slate-700 truncate mt-0.5">
+                                {r.latestFollowUp.remarks || r.latestFollowUp.notes}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-slate-400 italic">No calls logged</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                printSlipsPdf([r], `Demand Slip — ${r.student.name}`)
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Print Slip</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDemandFollowUpStudent(r.student);
+                                setFolStudentId(r.student.id);
+                                setFolContactPerson(r.student.fatherName || r.student.parentName || 'Parent');
+                                setFolPhone(r.student.parentPhone || r.student.mobile || '');
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <PhoneCall className="w-3.5 h-3.5" />
+                              <span>Follow-up ({r.stuFollowUps.length})</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* =================================================================== */}
+      {/* TAB 5: MONTH-WISE OUTSTANDING, COLLECTION & PREVIOUS DUES           */}
+      {/* (Visible to Everyone: Admin, Coordinator & Transport Assistant)     */}
+      {/* =================================================================== */}
+      {activeTab === 'monthly_matrix' && (() => {
+        const SESSION_MONTHS = ['2026-11', '2026-12', '2027-01', '2027-02', '2027-03'];
+        const MONTH_LABELS: Record<string, string> = {
+          '2026-11': 'Nov 2026',
+          '2026-12': 'Dec 2026',
+          '2027-01': 'Jan 2027',
+          '2027-02': 'Feb 2027',
+          '2027-03': 'Mar 2027',
+        };
+
+        // 1. Separate Previous Dues Summary
+        const prevDuesInvoices = invoices.filter(
+          (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
+        );
+        const totalPrevDuesBilled = students
+          .filter((s) => s.transportStatus !== 'Left School')
+          .reduce((sum, s) => {
+            const inv = prevDuesInvoices.find((i) => i.studentId === s.id);
+            return sum + (inv ? Number(inv.netPayable ?? inv.netAmount ?? 0) : Number(s.previousDues || 0));
+          }, 0);
+        const totalPrevDuesPaid = prevDuesInvoices.reduce(
+          (sum, i) => sum + Number(i.paidAmount ?? 0),
+          0
+        );
+        const totalPrevDuesPending = Math.max(0, totalPrevDuesBilled - totalPrevDuesPaid);
+
+        // 2. Separate Month-by-Month Session Breakdown
+        const monthBreakdown = SESSION_MONTHS.map((mKey) => {
+          const mInvoices = invoices.filter((i) => i.month === mKey);
+          const billed = mInvoices.reduce((s, i) => s + Number(i.netPayable ?? i.netAmount ?? 0), 0);
+          const collected = mInvoices.reduce((s, i) => s + Number(i.paidAmount ?? 0), 0);
+          const outstanding = mInvoices.reduce((s, i) => s + Number(i.balanceDue ?? 0), 0);
+          return {
+            monthKey: mKey,
+            monthLabel: MONTH_LABELS[mKey] || mKey,
+            invoicesCount: mInvoices.length,
+            billed,
+            collected,
+            outstanding,
+          };
+        });
+
+        // 3. Member-wise Matrix (Previous Dues vs Month-wise Session Fees)
+        const matrixRows = students
+          .filter((s) => s.transportStatus !== 'Left School')
+          .filter((s) => {
+            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const stuCampus = s.campus || rt?.campus || 'Sr';
+            if (matrixCampusFilter !== 'all' && stuCampus !== matrixCampusFilter) return false;
+            if (matrixClassFilter !== 'all' && s.class !== matrixClassFilter) return false;
+            if (
+              matrixRouteFilter !== 'all' &&
+              s.routeId !== matrixRouteFilter &&
+              s.routeName !== matrixRouteFilter &&
+              rt?.code !== matrixRouteFilter
+            ) {
+              return false;
+            }
+            if (matrixSearch.trim()) {
+              const q = matrixSearch.toLowerCase();
+              return (
+                s.name.toLowerCase().includes(q) ||
+                s.admissionNo.toLowerCase().includes(q) ||
+                (s.villageName || s.stopName || '').toLowerCase().includes(q)
+              );
+            }
+            return true;
+          })
+          .map((s) => {
+            const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+            const stuInvoices = invoices.filter((i) => i.studentId === s.id);
+            const stuReceipts = receipts.filter((r) => r.studentId === s.id);
+            const prevInv = stuInvoices.find(
+              (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
+            );
+            const prevDuesBilled = prevInv
+              ? Number(prevInv.netPayable ?? prevInv.netAmount ?? 0)
+              : Number(s.previousDues || 0);
+            const prevDuesPaid = prevInv ? Number(prevInv.paidAmount ?? 0) : 0;
+            const prevDuesPending = Math.max(0, prevDuesBilled - prevDuesPaid);
+
+            const monthMap: Record<
+              string,
+              { billed: number; paid: number; due: number; status: string }
+            > = {};
+            SESSION_MONTHS.forEach((mKey) => {
+              const inv = stuInvoices.find((i) => i.month === mKey);
+              monthMap[mKey] = {
+                billed: inv ? Number(inv.netPayable ?? inv.netAmount ?? 0) : 0,
+                paid: inv ? Number(inv.paidAmount ?? 0) : 0,
+                due: inv ? Number(inv.balanceDue ?? 0) : 0,
+                status: inv ? inv.status : 'Not Billed',
+              };
+            });
+
+            const sessionBilled = SESSION_MONTHS.reduce((sum, k) => sum + monthMap[k].billed, 0);
+            const totalCollected = stuReceipts.reduce(
+              (sum, r) => sum + Number(r.amountPaid ?? r.amount ?? 0),
+              0
+            );
+            const netOutstanding = Math.max(0, prevDuesBilled + sessionBilled - totalCollected);
+
+            return {
+              student: s,
+              campus: s.campus || rt?.campus || 'Sr',
+              routeCode: rt?.code || s.routeName || '—',
+              prevDuesBilled,
+              prevDuesPaid,
+              prevDuesPending,
+              monthMap,
+              sessionBilled,
+              totalCollected,
+              netOutstanding,
+            };
+          });
+
+        return (
+          <div className="space-y-6">
+            {/* Part 1: Separate Previous Dues vs Session Months Summary Cards */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Previous Dues Separate Card */}
+              <div className="bg-amber-50/70 rounded-2xl border-2 border-amber-200 p-5 shadow-2xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold text-[10px] uppercase">
+                      Head 1 • Previous Dues (Opening Arrears)
+                    </span>
+                    <h3 className="text-base font-bold text-slate-900 mt-1">
+                      Previous Dues Statement (Shown Separately)
+                    </h3>
+                  </div>
+                  <Layers className="w-6 h-6 text-amber-600" />
+                </div>
+                <div className="grid grid-cols-3 gap-3 pt-1">
+                  <div className="bg-white p-3 rounded-xl border border-amber-200">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase">Opening Prev. Dues</div>
+                    <div className="text-base font-extrabold font-mono text-slate-900 mt-0.5">
+                      ₹{totalPrevDuesBilled.toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-emerald-200">
+                    <div className="text-[10px] font-bold text-emerald-700 uppercase">Prev. Dues Collected</div>
+                    <div className="text-base font-extrabold font-mono text-emerald-700 mt-0.5">
+                      ₹{totalPrevDuesPaid.toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-rose-200">
+                    <div className="text-[10px] font-bold text-rose-700 uppercase">Prev. Dues Outstanding</div>
+                    <div className="text-base font-extrabold font-mono text-rose-600 mt-0.5">
+                      ₹{totalPrevDuesPending.toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Session Months Overall Summary Card */}
+              <div className="bg-indigo-50/60 rounded-2xl border-2 border-indigo-200 p-5 shadow-2xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-bold text-[10px] uppercase">
+                      Head 2 • Session 2026-27 Monthly Fees (From Nov 2026)
+                    </span>
+                    <h3 className="text-base font-bold text-slate-900 mt-1">
+                      Month-wise Session Transport Fee Summary
+                    </h3>
+                  </div>
+                  <BarChart3 className="w-6 h-6 text-indigo-600" />
+                </div>
+                <div className="grid grid-cols-3 gap-3 pt-1">
+                  <div className="bg-white p-3 rounded-xl border border-indigo-200">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase">Session Fee Billed</div>
+                    <div className="text-base font-extrabold font-mono text-slate-900 mt-0.5">
+                      ₹{monthBreakdown.reduce((s, m) => s + m.billed, 0).toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-emerald-200">
+                    <div className="text-[10px] font-bold text-emerald-700 uppercase">Session Fee Collected</div>
+                    <div className="text-base font-extrabold font-mono text-emerald-700 mt-0.5">
+                      ₹{monthBreakdown.reduce((s, m) => s + m.collected, 0).toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-rose-200">
+                    <div className="text-[10px] font-bold text-rose-700 uppercase">Session Fee Outstanding</div>
+                    <div className="text-base font-extrabold font-mono text-rose-600 mt-0.5">
+                      ₹{monthBreakdown.reduce((s, m) => s + m.outstanding, 0).toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Part 2: Month-by-Month Breakdown Cards */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                Month-by-Month Collection &amp; Outstanding Breakdown (Session 2026-27)
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                {monthBreakdown.map((mb) => (
+                  <div
+                    key={mb.monthKey}
+                    className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900 text-xs">{mb.monthLabel}</span>
+                      <span className="text-[10px] font-mono bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">
+                        {mb.invoicesCount} Inv
+                      </span>
+                    </div>
+                    <div className="space-y-1 text-[11px] font-mono">
+                      <div className="flex justify-between text-slate-600">
+                        <span>Billed:</span>
+                        <span className="font-bold text-slate-900">
+                          ₹{mb.billed.toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-emerald-700">
+                        <span>Collected:</span>
+                        <span className="font-bold">₹{mb.collected.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between text-rose-600 border-t border-slate-200 pt-1">
+                        <span>Outstanding:</span>
+                        <span className="font-extrabold">
+                          ₹{mb.outstanding.toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Part 3: Member-wise Previous Dues + Month-by-Month Matrix Table */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">
+                    Member-wise Previous Dues, Month-wise Collection &amp; Outstanding Ledger
+                  </h4>
+                  <p className="text-xs text-slate-500">
+                    Shows Previous Dues and each session month separately for every member
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={matrixCampusFilter}
+                    onChange={(e) => setMatrixCampusFilter(e.target.value)}
+                    className="p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Campuses</option>
+                    <option value="Sr">Sr Campus</option>
+                    <option value="Jr">Jr Campus</option>
+                  </select>
+
+                  <select
+                    value={matrixRouteFilter}
+                    onChange={(e) => setMatrixRouteFilter(e.target.value)}
+                    className="p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Routes</option>
+                    {routes.map((r) => (
+                      <option key={r.id} value={r.code}>
+                        {r.code}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={matrixClassFilter}
+                    onChange={(e) => setMatrixClassFilter(e.target.value)}
+                    className="p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                  >
+                    <option value="all">All Classes</option>
+                    {classes.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    type="text"
+                    placeholder="Search member / Adm No..."
+                    value={matrixSearch}
+                    onChange={(e) => setMatrixSearch(e.target.value)}
+                    className="p-2 rounded-xl border border-slate-200 text-xs bg-slate-50 w-44"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[11px]">
+                  <thead className="bg-slate-900 text-white font-bold uppercase">
+                    <tr>
+                      <th className="py-3 px-3">Member &amp; Adm No</th>
+                      <th className="py-3 px-2.5">Campus / Route</th>
+                      <th className="py-3 px-2.5 text-right bg-amber-950/60 text-amber-300">
+                        Prev. Dues (Billed / Due)
+                      </th>
+                      {SESSION_MONTHS.map((mKey) => (
+                        <th key={mKey} className="py-3 px-2.5 text-right">
+                          {MONTH_LABELS[mKey]}
+                        </th>
+                      ))}
+                      <th className="py-3 px-2.5 text-right text-emerald-300">Total Collected</th>
+                      <th className="py-3 px-3 text-right text-rose-300">Net Outstanding</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {matrixRows.map((row) => (
+                      <tr key={row.student.id} className="hover:bg-slate-50">
+                        <td className="py-2.5 px-3">
+                          <div className="font-bold text-slate-900">{row.student.name}</div>
+                          <div className="font-mono text-[10px] text-slate-500">
+                            {row.student.admissionNo} • {row.student.class}-{row.student.section}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-2.5">
+                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px] mr-1">
+                            {row.campus}
+                          </span>
+                          <span className="font-mono font-bold text-slate-700">{row.routeCode}</span>
+                        </td>
+                        <td className="py-2.5 px-2.5 text-right font-mono bg-amber-50/40">
+                          {row.prevDuesBilled > 0 ? (
+                            <div>
+                              <div className="font-bold text-slate-800">
+                                Billed: ₹{row.prevDuesBilled.toLocaleString('en-IN')}
+                              </div>
+                              <div
+                                className={`text-[10px] font-bold ${
+                                  row.prevDuesPending > 0 ? 'text-rose-600' : 'text-emerald-700'
+                                }`}
+                              >
+                                Due: ₹{row.prevDuesPending.toLocaleString('en-IN')}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-slate-400">₹0</span>
+                          )}
+                        </td>
+                        {SESSION_MONTHS.map((mKey) => {
+                          const cell = row.monthMap[mKey];
+                          return (
+                            <td key={mKey} className="py-2.5 px-2.5 text-right font-mono">
+                              {cell.billed > 0 ? (
+                                <div>
+                                  <div className="font-semibold text-slate-800">
+                                    ₹{cell.billed.toLocaleString('en-IN')}
+                                  </div>
+                                  {cell.due > 0 ? (
+                                    <span className="text-[10px] font-bold text-rose-600">
+                                      Due: ₹{cell.due}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-bold text-emerald-700">
+                                      Paid
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-slate-300">—</span>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td className="py-2.5 px-2.5 text-right font-mono font-bold text-emerald-700">
+                          ₹{row.totalCollected.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono font-extrabold text-rose-600 text-xs">
+                          ₹{row.netOutstanding.toLocaleString('en-IN')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Demand Slip Phone Follow-up & Past Communications Modal */}
+      {demandFollowUpStudent && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <PhoneCall className="w-4 h-4 text-amber-400" />
+                  <span>Phone Fee Follow-up &amp; Past Communications</span>
+                </h3>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  {demandFollowUpStudent.name} ({demandFollowUpStudent.admissionNo}) • Phone:{' '}
+                  <strong className="font-mono text-amber-300">
+                    {demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile || '—'}
+                  </strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDemandFollowUpStudent(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs">
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!onAddFollowUp) return;
+                  await onAddFollowUp({
+                    studentId: demandFollowUpStudent.id,
+                    date: isAdmin ? folDate : todayStr,
+                    callDate: isAdmin ? folDate : todayStr,
+                    studentName: demandFollowUpStudent.name,
+                    admissionNo: demandFollowUpStudent.admissionNo,
+                    contactPerson:
+                      folContactPerson ||
+                      demandFollowUpStudent.fatherName ||
+                      demandFollowUpStudent.parentName ||
+                      'Parent',
+                    contactedPerson:
+                      folContactPerson ||
+                      demandFollowUpStudent.fatherName ||
+                      demandFollowUpStudent.parentName ||
+                      'Parent',
+                    phone:
+                      folPhone ||
+                      demandFollowUpStudent.parentPhone ||
+                      demandFollowUpStudent.mobile ||
+                      '',
+                    overdueAmount: demandFollowUpStudent.balanceDue,
+                    promiseDate: folPromiseDate || undefined,
+                    promisedPayDate: folPromiseDate || undefined,
+                    outcome: folOutcome,
+                    callOutcome: folOutcome as any,
+                    notes: folNotes || 'Phone follow-up from Demand Slip screen',
+                    remarks: folNotes || 'Phone follow-up from Demand Slip screen',
+                    officerName: currentRole,
+                    recordedBy: currentRole,
+                  });
+                  setFolNotes('');
+                  setFolPromiseDate('');
+                }}
+                className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-3"
+              >
+                <div className="font-bold text-indigo-950 flex items-center justify-between">
+                  <span>Record Phone Call Follow-up</span>
+                  <a
+                    href={`tel:${demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile || ''}`}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-mono font-bold text-[11px] inline-flex items-center gap-1"
+                  >
+                    <PhoneCall className="w-3 h-3" />
+                    <span>Call {demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile}</span>
+                  </a>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Talked To
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={folContactPerson}
+                      onChange={(e) => setFolContactPerson(e.target.value)}
+                      className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Call Outcome
+                    </label>
+                    <select
+                      value={folOutcome}
+                      onChange={(e) => setFolOutcome(e.target.value as any)}
+                      className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-bold"
+                    >
+                      <option value="Promise to Pay">Promise to Pay</option>
+                      <option value="Promised to Pay">Promised to Pay</option>
+                      <option value="Partial Payment Promised">Partial Payment Promised</option>
+                      <option value="No Answer">No Answer / Switched Off</option>
+                      <option value="Disputed">Disputed / Requested Time</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Promised Payment Date
+                    </label>
+                    <input
+                      type="date"
+                      value={folPromiseDate}
+                      onChange={(e) => setFolPromiseDate(e.target.value)}
+                      className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Parent Response / Conversation Remarks *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Enter conversation details with parent..."
+                    value={folNotes}
+                    onChange={(e) => setFolNotes(e.target.value)}
+                    className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer"
+                  >
+                    Save Phone Follow-up
+                  </button>
+                </div>
+              </form>
+
+              <div className="space-y-2.5">
+                <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px]">
+                  Past Communications History
+                </h4>
+                {(() => {
+                  const past = followUps
+                    .filter(
+                      (f) =>
+                        f.studentId === demandFollowUpStudent.id ||
+                        f.admissionNo === demandFollowUpStudent.admissionNo
+                    )
+                    .sort((a, b) =>
+                      (b.callDate || b.date || '').localeCompare(a.callDate || a.date || '')
+                    );
+                  if (past.length === 0) {
+                    return (
+                      <div className="p-6 text-center rounded-xl border border-slate-200 bg-slate-50 text-slate-400">
+                        No past communications recorded for this member yet.
+                      </div>
+                    );
+                  }
+                  return past.map((f) => (
+                    <div
+                      key={f.id}
+                      className="p-3 rounded-xl border border-slate-200 bg-white flex items-center justify-between gap-3"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]">
+                            {f.callOutcome || f.outcome}
+                          </span>
+                          <span className="font-mono font-bold text-slate-700">
+                            {f.callDate || f.date}
+                          </span>
+                          <span className="text-slate-500">
+                            • Talked to: <strong>{f.contactedPerson || f.contactPerson}</strong>
+                          </span>
+                        </div>
+                        <p className="text-slate-800 font-medium mt-1">
+                          {f.remarks || f.notes}
+                        </p>
+                      </div>
+                      {(f.promisedPayDate || f.promiseDate) && (
+                        <div className="text-right font-mono text-[11px] text-indigo-700 font-bold shrink-0">
+                          Promised: {f.promisedPayDate || f.promiseDate}
+                        </div>
+                      )}
+                    </div>
+                  ));
+                })()}
               </div>
             </div>
           </div>

@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import {
   CheckCircle, Printer, Calendar, Check, X,
-  ArrowDownLeft, ArrowUpRight, FileSpreadsheet
+  ArrowDownLeft, ArrowUpRight, FileSpreadsheet,
+  Phone, AlertTriangle, Clock, UserCheck, MessageSquare
 } from 'lucide-react';
 import {
-  DailyTrip, TripAttendanceRecord, Route, StudentMember, CampusMaster, Vehicle, UserRole
+  DailyTrip, TripAttendanceRecord, Route, StudentMember, CampusMaster, Vehicle, UserRole, AbsenteeCallRecord
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview, exportToCsv } from '../../utils/exportPrint.js';
 
@@ -12,12 +13,14 @@ interface DailyOperationsViewProps {
   schoolName?: string;
   isAdmin?: boolean;
   currentRole?: UserRole;
+  userCampus?: string;
   campuses?: CampusMaster[];
   vehicles?: Vehicle[];
   trips: DailyTrip[];
   attendanceRecords: TripAttendanceRecord[];
   routes: Route[];
   students?: StudentMember[];
+  absenteeCalls?: AbsenteeCallRecord[];
   initialSubTab?: string;
   onSelectTrip: (tripId: string) => void;
   onSelectRouteForDate?: (date: string, routeId: string) => Promise<void>;
@@ -37,6 +40,13 @@ interface DailyOperationsViewProps {
   ) => Promise<any>;
   onCancelTrip: (tripId: string, reason: string) => Promise<any>;
   onOpenPrintPack: (routeId: string, shiftName: string, weekStartDate: string, weekEndDate?: string) => Promise<void>;
+  onSaveAbsenteeCall?: (payload: Partial<AbsenteeCallRecord> & { clearExpectedReturn?: boolean }) => Promise<any>;
+  onConfirmEarlyArrival?: (payload: {
+    studentId: string;
+    date: string;
+    confirmedBy?: string;
+    remarks?: string;
+  }) => Promise<any>;
 }
 
 interface SummaryTimingOverride {
@@ -70,26 +80,36 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   schoolName,
   isAdmin = true,
   currentRole = 'Admin',
+  userCampus,
   campuses = [],
   vehicles = [],
   trips,
   attendanceRecords,
   routes,
   students = [],
+  absenteeCalls = [],
   initialSubTab,
   onSelectTrip,
   onSelectRouteForDate,
   onMarkAttendance,
   onVerifyTrip,
   onOpenPrintPack,
+  onSaveAbsenteeCall,
+  onConfirmEarlyArrival,
 }) => {
-  const [activeSubView, setActiveSubView] = useState<'board' | 'calendar' | 'summary' | 'pack'>(
+  const isAssistant = currentRole === 'Transport Assistant';
+  const isCoordinator = currentRole === 'Transport Coordinator';
+  const lockedCampus = isAssistant && userCampus && userCampus !== 'All' ? userCampus : null;
+
+  const [activeSubView, setActiveSubView] = useState<'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees'>(
     initialSubTab === 'pack'
       ? 'pack'
       : initialSubTab === 'summary'
       ? 'summary'
       : initialSubTab === 'calendar'
       ? 'calendar'
+      : initialSubTab === 'call_absentees'
+      ? 'call_absentees'
       : 'board'
   );
 
@@ -109,10 +129,20 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   } | null>(null);
   const [mismatchError, setMismatchError] = useState<string | null>(null);
 
+  // Early Arrival Confirmation Modal state (when student with future expectedReturnDate arrives early)
+  const [earlyArrivalModal, setEarlyArrivalModal] = useState<{
+    student: StudentMember;
+    record: TripAttendanceRecord;
+    mode: 'arrival' | 'departure';
+    remarks: string;
+  } | null>(null);
+  const [isConfirmingEarlyArrival, setIsConfirmingEarlyArrival] = useState(false);
+
   useEffect(() => {
     if (initialSubTab === 'pack') setActiveSubView('pack');
     else if (initialSubTab === 'summary') setActiveSubView('summary');
     else if (initialSubTab === 'calendar') setActiveSubView('calendar');
+    else if (initialSubTab === 'call_absentees') setActiveSubView('call_absentees');
     else if (initialSubTab === 'departure') {
       setActiveSubView('board');
       setBoardMode('departure');
@@ -124,7 +154,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
-  const [selectedCampus, setSelectedCampus] = useState<string>('all');
+  const [selectedCampus, setSelectedCampus] = useState<string>(lockedCampus || 'all');
   const [selectedVehicleFilter, setSelectedVehicleFilter] = useState<string>('all');
   const [selectedRouteId, setSelectedRouteId] = useState<string>(routes[0]?.id || '');
   const [selectedTripId, setSelectedTripId] = useState<string>(trips[0]?.id || '');
@@ -465,12 +495,31 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     setTimeout(() => setStatusFeedback(null), 3500);
   };
 
+  const checkRequiresEarlyArrivalConfirmation = (rec: TripAttendanceRecord, statusVal: string): StudentMember | null => {
+    if (statusVal !== 'Present') return null;
+    const stu = students.find((s) => s.id === rec.studentId);
+    if (stu && stu.expectedReturnDate && selectedDate < stu.expectedReturnDate) {
+      return stu;
+    }
+    return null;
+  };
+
   const handleArrivalAttendanceClick = async (rec: TripAttendanceRecord, newArrStatus: string) => {
     if (!isArrivalTimeMarked) {
       setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
       setTimeRequiredPrompt({
         mode: 'arrival',
         pendingAction: { type: 'single', rec, statusVal: newArrStatus },
+      });
+      return;
+    }
+    const earlyStu = checkRequiresEarlyArrivalConfirmation(rec, newArrStatus);
+    if (earlyStu) {
+      setEarlyArrivalModal({
+        student: earlyStu,
+        record: rec,
+        mode: 'arrival',
+        remarks: `Arrived early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
       });
       return;
     }
@@ -483,6 +532,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       setTimeRequiredPrompt({
         mode: 'departure',
         pendingAction: { type: 'single', rec, statusVal: newDepStatus },
+      });
+      return;
+    }
+    const earlyStu = checkRequiresEarlyArrivalConfirmation(rec, newDepStatus);
+    if (earlyStu) {
+      setEarlyArrivalModal({
+        student: earlyStu,
+        record: rec,
+        mode: 'departure',
+        remarks: `Departed / Present early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
       });
       return;
     }
@@ -501,6 +560,35 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       return;
     }
     await onMarkAttendance(rec.id, 'assistant', newDepStatus);
+  };
+
+  const handleConfirmEarlyArrivalAndMarkPresent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!earlyArrivalModal) return;
+    setIsConfirmingEarlyArrival(true);
+    try {
+      const { student, record, mode, remarks } = earlyArrivalModal;
+      if (onConfirmEarlyArrival) {
+        await onConfirmEarlyArrival({
+          studentId: student.id,
+          date: selectedDate,
+          confirmedBy: currentRole,
+          remarks: remarks.trim() || `Confirmed early arrival on ${selectedDate}`,
+        });
+      }
+      if (mode === 'arrival') {
+        await onMarkAttendance(record.id, 'driver', 'Present', remarks.trim());
+      } else {
+        await onMarkAttendance(record.id, 'assistant', 'Present', remarks.trim());
+      }
+      setStatusFeedback(
+        `Confirmed Early Arrival for ${student.name} (${student.admissionNo}) & marked Present on ${selectedDate}. Removed from Tentative Arrival list.`
+      );
+      setEarlyArrivalModal(null);
+      setTimeout(() => setStatusFeedback(null), 4000);
+    } finally {
+      setIsConfirmingEarlyArrival(false);
+    }
   };
 
   const handleConfirmMismatchDeparture = async (e: React.FormEvent) => {
@@ -578,6 +666,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           await onMarkAttendance(rec.id, targetSource, 'Holiday');
         }
       } else if (pending.type === 'single' && pending.rec && pending.statusVal) {
+        const earlyStu = checkRequiresEarlyArrivalConfirmation(pending.rec, pending.statusVal);
+        if (earlyStu) {
+          setEarlyArrivalModal({
+            student: earlyStu,
+            record: pending.rec,
+            mode: timeRequiredPrompt.mode,
+            remarks: `Arrived early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
+          });
+          return;
+        }
         if (timeRequiredPrompt.mode === 'arrival') {
           await onMarkAttendance(pending.rec.id, 'driver', pending.statusVal);
         } else {
@@ -597,6 +695,333 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           }
         }
       }
+    }
+  };
+
+  // =========================================================================
+  // CALL ABSENTEES SUB-MODULE STATE & COMPUTED DATA
+  // =========================================================================
+  const [absenteeDate, setAbsenteeDate] = useState<string>(todayStr);
+  const [absenteeCampusFilter, setAbsenteeCampusFilter] = useState<string>(lockedCampus || 'all');
+  const [absenteeRouteFilter, setAbsenteeRouteFilter] = useState<string>('all');
+  const [absenteeSearch, setAbsenteeSearch] = useState<string>('');
+  const [activeAbsenteeListTab, setActiveAbsenteeListTab] = useState<'main_calling' | 'escalation_3days' | 'scheduled_return'>('main_calling');
+
+  useEffect(() => {
+    if (lockedCampus) {
+      setAbsenteeCampusFilter(lockedCampus);
+      setSelectedCampus(lockedCampus);
+    }
+  }, [lockedCampus]);
+
+  const [callModalTarget, setCallModalTarget] = useState<{
+    student: StudentMember;
+    consecutiveDaysAbsent: number;
+    attendanceRemarks: string;
+    existingCall?: AbsenteeCallRecord;
+  } | null>(null);
+  const [callStatusInput, setCallStatusInput] = useState<AbsenteeCallRecord['callStatus']>('Answered - Will Return on Date');
+  const [callAssistantRemarksInput, setCallAssistantRemarksInput] = useState<string>('');
+  const [callCoordinatorRemarksInput, setCallCoordinatorRemarksInput] = useState<string>('');
+  const [callExpectedReturnDateInput, setCallExpectedReturnDateInput] = useState<string>('');
+  const [callExpectedReturnReasonInput, setCallExpectedReturnReasonInput] = useState<string>('');
+  const [isSavingCall, setIsSavingCall] = useState<boolean>(false);
+
+  // Compute consecutive days absent and daily absentee status for all active members
+  const enrichedAbsenteeItems = React.useMemo(() => {
+    const activeMembers = students.filter((s) => s.transportStatus === 'Active');
+
+    return activeMembers
+      .map((s) => {
+        const stuCampus = s.campus || (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+        // Attendance records for this student on absenteeDate
+        const dayAttRecs = attendanceRecords.filter(
+          (a) => a.studentId === s.id && a.date === absenteeDate
+        );
+        const isMarkedAbsentToday = dayAttRecs.some(
+          (a) =>
+            a.driverStatus === 'Absent' ||
+            a.assistantStatus === 'Absent' ||
+            a.finalStatus === 'Absent' ||
+            a.driverStatus === 'Leave' ||
+            a.assistantStatus === 'Leave'
+        );
+        const isMarkedPresentToday = dayAttRecs.some(
+          (a) =>
+            a.driverStatus === 'Present' ||
+            a.assistantStatus === 'Present' ||
+            a.finalStatus === 'Present'
+        );
+
+        const existingCallToday = absenteeCalls.find(
+          (c) => c.studentId === s.id && c.date === absenteeDate
+        );
+        const latestCallAnyDate = [...absenteeCalls]
+          .filter((c) => c.studentId === s.id)
+          .sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+
+        // Compute consecutive days absent backwards from absenteeDate
+        const stuAllAtt = attendanceRecords
+          .filter((a) => a.studentId === s.id && (a.date || '') <= absenteeDate)
+          .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+        const distinctDates = Array.from(new Set(stuAllAtt.map((a) => a.date).filter(Boolean))) as string[];
+        let streak = 0;
+        for (const dt of distinctDates) {
+          const recsOnDt = stuAllAtt.filter((a) => a.date === dt);
+          const presOnDt = recsOnDt.some(
+            (a) => a.driverStatus === 'Present' || a.assistantStatus === 'Present'
+          );
+          const absOnDt = recsOnDt.some(
+            (a) =>
+              a.driverStatus === 'Absent' ||
+              a.assistantStatus === 'Absent' ||
+              a.driverStatus === 'Leave' ||
+              a.assistantStatus === 'Leave'
+          );
+          if (presOnDt) break;
+          if (absOnDt) streak += 1;
+        }
+
+        if (isMarkedAbsentToday && streak === 0) streak = 1;
+        const effectiveExpectedReturn =
+          s.expectedReturnDate ||
+          existingCallToday?.expectedReturnDate ||
+          latestCallAnyDate?.expectedReturnDate ||
+          '';
+        const effectiveExpectedReason =
+          s.expectedReturnReason ||
+          existingCallToday?.expectedReturnReason ||
+          latestCallAnyDate?.expectedReturnReason ||
+          '';
+
+        // If student has an expected return date or call log, ensure streak reflects it
+        const consecutiveDaysAbsent = Math.max(
+          streak,
+          existingCallToday?.consecutiveDaysAbsent || 0,
+          (isMarkedAbsentToday || Boolean(effectiveExpectedReturn)) ? (s.absentDaysCount || 1) : 0
+        );
+
+        const attendanceRemarks =
+          dayAttRecs
+            .map((a) => a.resolutionReason || a.notes)
+            .filter(Boolean)
+            .join('; ') ||
+          existingCallToday?.attendanceRemarks ||
+          '';
+
+        const assistantRemarks =
+          existingCallToday?.assistantRemarks ||
+          s.lastAbsentAssistantRemark ||
+          latestCallAnyDate?.assistantRemarks ||
+          '';
+
+        const coordinatorRemarks =
+          existingCallToday?.coordinatorRemarks ||
+          s.lastAbsentCoordinatorRemark ||
+          latestCallAnyDate?.coordinatorRemarks ||
+          '';
+
+        // Categorize:
+        // 1. Is in Scheduled Return / Tentative Date of Arrival list? (expectedReturnDate > absenteeDate AND not marked Present today)
+        const isInScheduledReturnList = Boolean(
+          effectiveExpectedReturn &&
+            absenteeDate < effectiveExpectedReturn &&
+            !isMarkedPresentToday
+        );
+
+        // 2. Did NOT arrive on or after Expected Date of Arrival? (expectedReturnDate <= absenteeDate AND not marked Present today)
+        const isOverdueOrDueTodayReturn = Boolean(
+          effectiveExpectedReturn &&
+            absenteeDate >= effectiveExpectedReturn &&
+            !isMarkedPresentToday
+        );
+
+        // 3. Arrived Early before Expected Date of Arrival? (expectedReturnDate > absenteeDate AND marked Present today)
+        const isEarlyArrivalToday = Boolean(
+          effectiveExpectedReturn &&
+            absenteeDate < effectiveExpectedReturn &&
+            isMarkedPresentToday
+        );
+
+        // Should appear in Absentee Module today if:
+        // - Marked Absent today, OR
+        // - Has an absentee call logged today, OR
+        // - Has an active expectedReturnDate (either scheduled return, overdue return, or early arrival today), OR
+        // - Consecutive days absent > 3 and not marked Present today
+        const isRelevantAbsentee =
+          (!isMarkedPresentToday &&
+            (isMarkedAbsentToday ||
+              Boolean(existingCallToday) ||
+              Boolean(effectiveExpectedReturn) ||
+              (s.absentDaysCount || 0) >= 3)) ||
+          isEarlyArrivalToday;
+
+        return {
+          student: s,
+          campus: stuCampus,
+          isMarkedAbsentToday,
+          isMarkedPresentToday,
+          consecutiveDaysAbsent: Math.max(consecutiveDaysAbsent, isRelevantAbsentee && !isMarkedPresentToday ? 1 : 0),
+          attendanceRemarks,
+          assistantRemarks,
+          coordinatorRemarks,
+          expectedReturnDate: effectiveExpectedReturn,
+          expectedReturnReason: effectiveExpectedReason,
+          existingCallToday,
+          latestCallAnyDate,
+          isInScheduledReturnList,
+          isOverdueOrDueTodayReturn,
+          isEarlyArrivalToday,
+          isRelevantAbsentee,
+          isCalledToday: Boolean(existingCallToday && existingCallToday.callStatus !== 'Pending'),
+        };
+      })
+      .filter((item) => item.isRelevantAbsentee);
+  }, [students, attendanceRecords, absenteeCalls, absenteeDate]);
+
+  // Filter by Campus, Route, Search
+  const filteredAbsenteeItems = React.useMemo(() => {
+    return enrichedAbsenteeItems.filter((item) => {
+      if (lockedCampus && item.campus.toLowerCase() !== lockedCampus.toLowerCase()) {
+        return false;
+      }
+      if (
+        absenteeCampusFilter !== 'all' &&
+        item.campus.toLowerCase() !== absenteeCampusFilter.toLowerCase()
+      ) {
+        return false;
+      }
+      if (
+        absenteeRouteFilter !== 'all' &&
+        item.student.routeId !== absenteeRouteFilter &&
+        item.student.routeCode !== absenteeRouteFilter
+      ) {
+        return false;
+      }
+      if (absenteeSearch.trim()) {
+        const q = absenteeSearch.toLowerCase().trim();
+        const match =
+          (item.student.name || '').toLowerCase().includes(q) ||
+          (item.student.admissionNo || '').toLowerCase().includes(q) ||
+          (item.student.fatherName || '').toLowerCase().includes(q) ||
+          (item.student.mobile || '').toLowerCase().includes(q) ||
+          (item.student.routeCode || '').toLowerCase().includes(q) ||
+          (item.student.pickupDropStopName || '').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [enrichedAbsenteeItems, lockedCampus, absenteeCampusFilter, absenteeRouteFilter, absenteeSearch]);
+
+  // 1. Main Absentee Calling List (excludes students who are currently in Scheduled Return with future expectedReturnDate > absenteeDate, UNLESS they are due/overdue on expectedReturnDate)
+  const mainCallingQueue = React.useMemo(
+    () =>
+      filteredAbsenteeItems
+        .filter((i) => !i.isInScheduledReturnList && !i.isEarlyArrivalToday)
+        .sort((a, b) => {
+          // Overdue expected return first, then highest consecutive days absent
+          if (a.isOverdueOrDueTodayReturn !== b.isOverdueOrDueTodayReturn) {
+            return a.isOverdueOrDueTodayReturn ? -1 : 1;
+          }
+          return b.consecutiveDaysAbsent - a.consecutiveDaysAbsent;
+        }),
+    [filteredAbsenteeItems]
+  );
+
+  // 2. > 3 Consecutive Days Absent Escalation Queue (Across Both Campuses for Transport Coordinator & Admin; Campus-scoped for Assistant)
+  const escalationMoreThan3DaysQueue = React.useMemo(
+    () =>
+      enrichedAbsenteeItems
+        .filter((i) => {
+          if (lockedCampus && i.campus.toLowerCase() !== lockedCampus.toLowerCase()) return false;
+          return i.consecutiveDaysAbsent > 3 && !i.isMarkedPresentToday;
+        })
+        .sort((a, b) => b.consecutiveDaysAbsent - a.consecutiveDaysAbsent),
+    [enrichedAbsenteeItems, lockedCampus]
+  );
+
+  // 3. Scheduled Return / Tentative Date of Arrival List (Informed Leave — Do Not Disturb Until Expected Date)
+  const scheduledReturnQueue = React.useMemo(
+    () =>
+      filteredAbsenteeItems
+        .filter((i) => i.isInScheduledReturnList)
+        .sort((a, b) => (a.expectedReturnDate || '').localeCompare(b.expectedReturnDate || '')),
+    [filteredAbsenteeItems]
+  );
+
+  // 4. Early Arrivals Detected Today (arrived before expectedReturnDate)
+  const earlyArrivalsTodayList = React.useMemo(
+    () => filteredAbsenteeItems.filter((i) => i.isEarlyArrivalToday),
+    [filteredAbsenteeItems]
+  );
+
+  const openAbsenteeCallModal = (item: (typeof enrichedAbsenteeItems)[number]) => {
+    setCallModalTarget({
+      student: item.student,
+      consecutiveDaysAbsent: item.consecutiveDaysAbsent,
+      attendanceRemarks: item.attendanceRemarks,
+      existingCall: item.existingCallToday,
+    });
+    setCallStatusInput(
+      item.existingCallToday?.callStatus && item.existingCallToday.callStatus !== 'Pending'
+        ? item.existingCallToday.callStatus
+        : 'Answered - Will Return on Date'
+    );
+    setCallAssistantRemarksInput(item.assistantRemarks || '');
+    setCallCoordinatorRemarksInput(item.coordinatorRemarks || '');
+    setCallExpectedReturnDateInput(item.expectedReturnDate || '');
+    setCallExpectedReturnReasonInput(item.expectedReturnReason || '');
+  };
+
+  const handleSaveAbsenteeCallForm = async (e: React.FormEvent, clearExpectedReturn = false) => {
+    e.preventDefault();
+    if (!callModalTarget || !onSaveAbsenteeCall) return;
+    setIsSavingCall(true);
+    try {
+      const stu = callModalTarget.student;
+      const stuCampus = stu.campus || (stu.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+      await onSaveAbsenteeCall({
+        studentId: stu.id,
+        admissionNo: stu.admissionNo,
+        studentName: stu.name,
+        campus: stuCampus,
+        className: stu.class,
+        section: stu.section,
+        routeId: stu.routeId,
+        routeCode: stu.routeCode,
+        stopName: stu.pickupDropStopName || stu.villageName,
+        parentName: stu.fatherName,
+        phone: stu.mobile || stu.whatsappNo,
+        date: absenteeDate,
+        consecutiveDaysAbsent: callModalTarget.consecutiveDaysAbsent,
+        callStatus: callStatusInput,
+        calledByRole: currentRole,
+        calledByName:
+          currentRole === 'Transport Coordinator'
+            ? 'Transport Coordinator'
+            : currentRole === 'Transport Assistant'
+            ? `Transport Assistant (${stuCampus})`
+            : 'Transport Admin',
+        assistantRemarks: callAssistantRemarksInput.trim(),
+        coordinatorRemarks: callCoordinatorRemarksInput.trim(),
+        attendanceRemarks: callModalTarget.attendanceRemarks,
+        expectedReturnDate: clearExpectedReturn ? '' : callExpectedReturnDateInput,
+        expectedReturnReason: clearExpectedReturn ? '' : callExpectedReturnReasonInput.trim(),
+        clearExpectedReturn,
+      });
+
+      setStatusFeedback(
+        clearExpectedReturn
+          ? `Cleared Tentative Date of Arrival for ${stu.name} and saved call follow-up.`
+          : callExpectedReturnDateInput && callExpectedReturnDateInput > absenteeDate
+          ? `Saved follow-up for ${stu.name}. Moved to "Scheduled Return (Tentative Date: ${callExpectedReturnDateInput})" list so parents are not repeatedly called.`
+          : `Saved Absentee Parent Call Follow-up for ${stu.name} (${stu.admissionNo}).`
+      );
+      setCallModalTarget(null);
+      setTimeout(() => setStatusFeedback(null), 4500);
+    } finally {
+      setIsSavingCall(false);
     }
   };
 
@@ -1108,7 +1533,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     <div className="space-y-5">
       {/* Unified Header & Toolbar (Scoped strictly to active Sidebar screen) */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3 print:hidden">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
             {activeSubView === 'pack'
               ? 'Print Route List'
@@ -1116,6 +1541,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               ? 'Attendance Summary Sheet'
               : activeSubView === 'calendar'
               ? 'Monthly Calendar (P/A/L/H)'
+              : activeSubView === 'call_absentees'
+              ? 'Call Absentees — Parent Follow-up & Scheduled Return'
               : boardMode === 'departure'
               ? '2- Departure Attendance (School Dispersal)'
               : '1- Arrival Attendance (Morning Pickup)'}
@@ -1125,7 +1552,14 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             {activeSubView === 'calendar' && `${routes.length} Routes`}
             {activeSubView === 'summary' && `${summaryRows.length} Vehicles`}
             {activeSubView === 'pack' && `Route Sheet`}
+            {activeSubView === 'call_absentees' &&
+              `${mainCallingQueue.length} To Call • ${scheduledReturnQueue.length} Scheduled Return`}
           </span>
+          {lockedCampus && (
+            <span className="px-2.5 py-0.5 rounded-md text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200">
+              Campus Scoped: {lockedCampus} Campus
+            </span>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -1137,7 +1571,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   (selectedVehicleFilter !== 'all' ? 1 : 0)
                 }
                 onReset={() => {
-                  setSelectedCampus('all');
+                  setSelectedCampus(lockedCampus || 'all');
                   setSelectedVehicleFilter('all');
                 }}
               >
@@ -1147,15 +1581,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   </label>
                   <select
                     value={selectedCampus}
+                    disabled={Boolean(lockedCampus)}
                     onChange={(e) => setSelectedCampus(e.target.value)}
-                    className="w-full p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800"
+                    className="w-full p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800 disabled:opacity-60"
                   >
-                    <option value="all">All Campuses</option>
-                    {campuses.map((c) => (
-                      <option key={c.id} value={c.code}>
-                        {c.name} ({c.code})
-                      </option>
-                    ))}
+                    {!lockedCampus && <option value="all">All Campuses</option>}
+                    {campuses
+                      .filter((c) => !lockedCampus || c.code.toLowerCase() === lockedCampus.toLowerCase())
+                      .map((c) => (
+                        <option key={c.id} value={c.code}>
+                          {c.name} ({c.code})
+                        </option>
+                      ))}
                   </select>
                 </div>
                 <div>
@@ -2627,6 +3064,881 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* ===================================================================== */}
+      {/* SUB-VIEW 5: CALL ABSENTEES — PARENT FOLLOW-UP & SCHEDULED RETURN      */}
+      {/* ===================================================================== */}
+      {activeSubView === 'call_absentees' && (
+        <div className="space-y-5">
+          {statusFeedback && (
+            <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-3 rounded-xl text-xs font-bold flex items-center justify-between shadow-2xs">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{statusFeedback}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStatusFeedback(null)}
+                className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* Top KPI & Calling Progress Bar */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Daily Absentee Calling Queue
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-slate-900">{mainCallingQueue.length}</span>
+                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                  {mainCallingQueue.filter((i) => i.isCalledToday).length} / {mainCallingQueue.length} Called
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Campus-wise daily absentees &amp; due/overdue returns requiring parent follow-up
+              </p>
+            </div>
+
+            <div className="bg-rose-50/70 rounded-2xl border border-rose-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-rose-700 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
+                <span>&gt; 3 Consecutive Days Absent</span>
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-rose-900">
+                  {escalationMoreThan3DaysQueue.length}
+                </span>
+                <span className="text-[11px] font-bold text-rose-800 bg-white px-2 py-0.5 rounded-md border border-rose-200">
+                  Coordinator Escalation
+                </span>
+              </div>
+              <p className="text-[11px] text-rose-700 mt-1">
+                Shown in Transport Coordinator ID (Both Campuses) to call &amp; log remarks
+              </p>
+            </div>
+
+            <div className="bg-indigo-50/70 rounded-2xl border border-indigo-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-700 flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Scheduled Return (Informed Leave)</span>
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-indigo-900">
+                  {scheduledReturnQueue.length}
+                </span>
+                <span className="text-[11px] font-bold text-indigo-800 bg-white px-2 py-0.5 rounded-md border border-indigo-200">
+                  Tentative Arrival Set
+                </span>
+              </div>
+              <p className="text-[11px] text-indigo-700 mt-1">
+                Paused from daily calling until Tentative Date of Arrival to avoid disturbing parents
+              </p>
+            </div>
+
+            <div className="bg-amber-50/70 rounded-2xl border border-amber-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-800 flex items-center gap-1.5">
+                <UserCheck className="w-3.5 h-3.5 text-amber-600" />
+                <span>Overdue / Early Return Alerts</span>
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-amber-950">
+                  {mainCallingQueue.filter((i) => i.isOverdueOrDueTodayReturn).length +
+                    earlyArrivalsTodayList.length}
+                </span>
+                <span className="text-[11px] font-bold text-amber-900 bg-white px-2 py-0.5 rounded-md border border-amber-200">
+                  {mainCallingQueue.filter((i) => i.isOverdueOrDueTodayReturn).length} Not Arrived •{' '}
+                  {earlyArrivalsTodayList.length} Early
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-800 mt-1">
+                Auto-surfaced if not arrived on expected date or arrived early during attendance
+              </p>
+            </div>
+          </div>
+
+          {/* Filter Bar */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
+                Attendance / Calling Date
+              </label>
+              <input
+                type="date"
+                value={absenteeDate}
+                max={!isAdmin ? todayStr : undefined}
+                onChange={(e) => setAbsenteeDate(e.target.value)}
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-900"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
+                Campus {lockedCampus ? `(Locked: ${lockedCampus})` : '(Sr / Jr Campus)'}
+              </label>
+              <select
+                value={absenteeCampusFilter}
+                disabled={Boolean(lockedCampus)}
+                onChange={(e) => setAbsenteeCampusFilter(e.target.value)}
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-900 disabled:opacity-60"
+              >
+                {!lockedCampus && <option value="all">Both Campuses (Sr &amp; Jr)</option>}
+                {campuses
+                  .filter((c) => !lockedCampus || c.code.toLowerCase() === lockedCampus.toLowerCase())
+                  .map((c) => (
+                    <option key={c.id} value={c.code}>
+                      {c.name} ({c.code})
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
+                Route Filter
+              </label>
+              <select
+                value={absenteeRouteFilter}
+                onChange={(e) => setAbsenteeRouteFilter(e.target.value)}
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-900"
+              >
+                <option value="all">All Routes</option>
+                {routes
+                  .filter(
+                    (r) =>
+                      absenteeCampusFilter === 'all' ||
+                      (r.campus || '').toLowerCase() === absenteeCampusFilter.toLowerCase()
+                  )
+                  .map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.code} — {r.name} ({r.vehicleNumber})
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
+                Search Member / Parent / Phone
+              </label>
+              <input
+                type="text"
+                value={absenteeSearch}
+                onChange={(e) => setAbsenteeSearch(e.target.value)}
+                placeholder="Name, Adm No, Phone, Stop..."
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 text-slate-900"
+              />
+            </div>
+          </div>
+
+          {/* Early Arrivals Confirmation Banner (if any student with a future Tentative Date of Arrival was marked Present today) */}
+          {earlyArrivalsTodayList.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600" />
+                  <h4 className="text-xs font-black uppercase tracking-wider text-amber-950">
+                    Early Arrival Confirmation Required ({earlyArrivalsTodayList.length} Member
+                    {earlyArrivalsTodayList.length > 1 ? 's' : ''})
+                  </h4>
+                </div>
+                <span className="text-[11px] font-bold text-amber-800">
+                  Marked Present before Tentative Date of Arrival
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                {earlyArrivalsTodayList.map((item) => (
+                  <div
+                    key={item.student.id}
+                    className="bg-white rounded-xl border border-amber-200 p-3 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">
+                        {item.student.name}{' '}
+                        <span className="font-mono text-[11px] text-slate-500">
+                          ({item.student.admissionNo})
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-amber-800 font-semibold mt-0.5">
+                        Tentative Arrival was: <strong>{item.expectedReturnDate}</strong> • Reason:{' '}
+                        {item.expectedReturnReason || 'Informed Leave'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (onConfirmEarlyArrival) {
+                          await onConfirmEarlyArrival({
+                            studentId: item.student.id,
+                            date: absenteeDate,
+                            confirmedBy: currentRole,
+                            remarks: `Confirmed early arrival on ${absenteeDate} (Tentative date was ${item.expectedReturnDate})`,
+                          });
+                          setStatusFeedback(
+                            `Confirmed early arrival for ${item.student.name} and cleared Tentative Date of Arrival.`
+                          );
+                          setTimeout(() => setStatusFeedback(null), 3500);
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg cursor-pointer shrink-0"
+                    >
+                      Confirm Early Arrival
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Sub-Tabs for the 3 Absentee Lists */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-2">
+            <button
+              type="button"
+              onClick={() => setActiveAbsenteeListTab('main_calling')}
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-all ${
+                activeAbsenteeListTab === 'main_calling'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              <Phone className="w-3.5 h-3.5" />
+              <span>1. Main Daily Absentee Calling List</span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-mono ${
+                  activeAbsenteeListTab === 'main_calling'
+                    ? 'bg-amber-400 text-slate-950 font-black'
+                    : 'bg-slate-100 text-slate-700'
+                }`}
+              >
+                {mainCallingQueue.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveAbsenteeListTab('escalation_3days')}
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-all ${
+                activeAbsenteeListTab === 'escalation_3days'
+                  ? 'bg-rose-600 text-white shadow-xs'
+                  : 'bg-white text-rose-700 border border-rose-200 hover:bg-rose-50'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>2. &gt; 3 Days Consecutive Absent (Coordinator Escalation)</span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-mono ${
+                  activeAbsenteeListTab === 'escalation_3days'
+                    ? 'bg-white text-rose-700 font-black'
+                    : 'bg-rose-100 text-rose-800'
+                }`}
+              >
+                {escalationMoreThan3DaysQueue.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveAbsenteeListTab('scheduled_return')}
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-all ${
+                activeAbsenteeListTab === 'scheduled_return'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'bg-white text-indigo-700 border border-indigo-200 hover:bg-indigo-50'
+              }`}
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>3. Scheduled Return / Tentative Date of Arrival List</span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-mono ${
+                  activeAbsenteeListTab === 'scheduled_return'
+                    ? 'bg-white text-indigo-700 font-black'
+                    : 'bg-indigo-100 text-indigo-800'
+                }`}
+              >
+                {scheduledReturnQueue.length}
+              </span>
+            </button>
+          </div>
+
+          {/* Active List Table */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="p-4 border-b border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-black text-slate-900">
+                  {activeAbsenteeListTab === 'main_calling'
+                    ? 'Daily Absentee Parent Calling Queue (Campus-wise Across All Routes)'
+                    : activeAbsenteeListTab === 'escalation_3days'
+                    ? 'Students Absent > 3 Consecutive Days — Transport Coordinator Calling & Remarks Queue (Both Campuses)'
+                    : 'Scheduled Return / Tentative Date of Arrival List (Informed Leave — Paused from Daily Calling)'}
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  {activeAbsenteeListTab === 'main_calling'
+                    ? 'Call parents of absent members. If parent informs a return date, set "Tentative Date of Arrival" to move them out of daily calling until that date. Members who did not arrive on their expected date are automatically surfaced here.'
+                    : activeAbsenteeListTab === 'escalation_3days'
+                    ? 'Members absent for more than 3 consecutive days require Transport Coordinator follow-up call and coordinator remarks across both campuses.'
+                    : 'Parents of these members have already informed their Tentative Date of Arrival. They will not appear in the main calling queue until their expected arrival date.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                    <th className="p-3">Member &amp; Campus</th>
+                    <th className="p-3">Route &amp; Stop</th>
+                    <th className="p-3">Parent &amp; Phone</th>
+                    <th className="p-3 text-center">Absence Duration</th>
+                    <th className="p-3">Tentative Date of Arrival</th>
+                    <th className="p-3">Attendance &amp; Assistant Remarks</th>
+                    <th className="p-3">Coordinator Remarks</th>
+                    <th className="p-3 text-center">Calling Status</th>
+                    <th className="p-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {(() => {
+                    const activeRows =
+                      activeAbsenteeListTab === 'main_calling'
+                        ? mainCallingQueue
+                        : activeAbsenteeListTab === 'escalation_3days'
+                        ? escalationMoreThan3DaysQueue
+                        : scheduledReturnQueue;
+
+                    if (activeRows.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={9} className="p-10 text-center text-slate-400 font-medium">
+                            {activeAbsenteeListTab === 'main_calling'
+                              ? `No absentees pending parent call for ${absenteeDate} under current filters.`
+                              : activeAbsenteeListTab === 'escalation_3days'
+                              ? 'No students currently absent for more than 3 consecutive days.'
+                              : 'No students currently in the Scheduled Return / Tentative Date of Arrival list.'}
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return activeRows.map((item) => {
+                      const s = item.student;
+                      const isOver3Days = item.consecutiveDaysAbsent > 3;
+                      return (
+                        <tr
+                          key={s.id}
+                          className={`hover:bg-slate-50/90 transition-colors ${
+                            item.isOverdueOrDueTodayReturn
+                              ? 'bg-amber-50/60'
+                              : isOver3Days
+                              ? 'bg-rose-50/35'
+                              : ''
+                          }`}
+                        >
+                          <td className="p-3">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                                  item.campus.toLowerCase() === 'jr'
+                                    ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                    : 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                                }`}
+                              >
+                                {item.campus}
+                              </span>
+                              <div>
+                                <div className="font-bold text-slate-900">{s.name}</div>
+                                <div className="text-[11px] text-slate-500 font-mono">
+                                  {s.admissionNo} • {s.class}-{s.section}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+
+                          <td className="p-3">
+                            <div className="font-bold text-slate-800">{s.routeCode || '—'}</div>
+                            <div className="text-[11px] text-slate-500">
+                              {s.pickupDropStopName || s.villageName || '—'}
+                            </div>
+                          </td>
+
+                          <td className="p-3">
+                            <div className="font-semibold text-slate-800">
+                              {s.fatherName || s.guardianName || 'Parent'}
+                            </div>
+                            {s.mobile ? (
+                              <a
+                                href={`tel:${s.mobile}`}
+                                className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 font-mono font-bold text-[11px] mt-0.5"
+                              >
+                                <Phone className="w-3 h-3" />
+                                <span>{s.mobile}</span>
+                              </a>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">No Phone</span>
+                            )}
+                          </td>
+
+                          <td className="p-3 text-center">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black ${
+                                isOver3Days
+                                  ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                  : 'bg-slate-100 text-slate-800 border border-slate-200'
+                              }`}
+                            >
+                              {item.consecutiveDaysAbsent} Day
+                              {item.consecutiveDaysAbsent > 1 ? 's' : ''} Consecutive
+                            </span>
+                            {isOver3Days && (
+                              <div className="text-[10px] font-bold text-rose-600 mt-0.5">
+                                &gt;3 Days Escalated
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="p-3">
+                            {item.expectedReturnDate ? (
+                              <div>
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold font-mono ${
+                                    item.isOverdueOrDueTodayReturn
+                                      ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                      : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                                  }`}
+                                >
+                                  Arrival: {item.expectedReturnDate}
+                                </span>
+                                {item.isOverdueOrDueTodayReturn && (
+                                  <div className="text-[10px] font-black text-rose-600 mt-0.5">
+                                    Not Arrived on Expected Date — Call Today!
+                                  </div>
+                                )}
+                                {item.expectedReturnReason && (
+                                  <div className="text-[11px] text-slate-600 mt-0.5">
+                                    {item.expectedReturnReason}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">Not set</span>
+                            )}
+                          </td>
+
+                          <td className="p-3 max-w-xs">
+                            {item.attendanceRemarks && (
+                              <div className="text-[11px] text-slate-600 mb-1">
+                                <span className="font-bold text-slate-700">Attendance:</span>{' '}
+                                {item.attendanceRemarks}
+                              </div>
+                            )}
+                            {item.assistantRemarks ? (
+                              <div className="text-[11px] text-emerald-900 bg-emerald-50/80 border border-emerald-200 px-2 py-1 rounded-lg">
+                                <span className="font-bold">Assistant:</span> {item.assistantRemarks}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">
+                                No assistant remark yet
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="p-3 max-w-xs">
+                            {item.coordinatorRemarks ? (
+                              <div className="text-[11px] text-indigo-950 bg-indigo-50/90 border border-indigo-200 px-2 py-1 rounded-lg">
+                                <span className="font-bold">Coordinator:</span>{' '}
+                                {item.coordinatorRemarks}
+                              </div>
+                            ) : isOver3Days ? (
+                              <span className="inline-block px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold">
+                                Coordinator Call &amp; Remark Required
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">—</span>
+                            )}
+                          </td>
+
+                          <td className="p-3 text-center">
+                            {item.isCalledToday ? (
+                              <div>
+                                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-bold">
+                                  Called Today
+                                </span>
+                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                  {item.existingCallToday?.callStatus}
+                                </div>
+                              </div>
+                            ) : item.isInScheduledReturnList ? (
+                              <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200 text-[10px] font-bold">
+                                Scheduled Return
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[10px] font-bold">
+                                Call Pending
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="p-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => openAbsenteeCallModal(item)}
+                              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                            >
+                              <Phone className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Call &amp; Remarks</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL: ABSENTEE PARENT CALL, REMARKS & TENTATIVE DATE OF ARRIVAL      */}
+      {/* ===================================================================== */}
+      {callModalTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-2xl w-full overflow-hidden my-8">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Phone className="w-4 h-4 text-amber-400" />
+                  <h3 className="text-base font-black">
+                    Absentee Parent Call &amp; Follow-up Remarks
+                  </h3>
+                </div>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  {callModalTarget.student.name} ({callModalTarget.student.admissionNo}) • Class{' '}
+                  {callModalTarget.student.class}-{callModalTarget.student.section} • Route{' '}
+                  {callModalTarget.student.routeCode}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCallModalTarget(null)}
+                className="text-slate-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={(e) => handleSaveAbsenteeCallForm(e, false)} className="p-5 space-y-4">
+              {/* Parent Info & Absence Streak Banner */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs">
+                <div>
+                  <div className="text-[10px] font-bold uppercase text-slate-400">Parent / Guardian</div>
+                  <div className="font-bold text-slate-900 mt-0.5">
+                    {callModalTarget.student.fatherName || 'Parent'}
+                  </div>
+                  <a
+                    href={`tel:${callModalTarget.student.mobile}`}
+                    className="text-indigo-600 font-mono font-bold inline-flex items-center gap-1 mt-0.5"
+                  >
+                    <Phone className="w-3 h-3" />
+                    <span>{callModalTarget.student.mobile || '—'}</span>
+                  </a>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase text-slate-400">
+                    Consecutive Absence Duration
+                  </div>
+                  <div className="font-black text-rose-700 text-sm mt-0.5">
+                    {callModalTarget.consecutiveDaysAbsent} Consecutive Day
+                    {callModalTarget.consecutiveDaysAbsent > 1 ? 's' : ''}
+                  </div>
+                  {callModalTarget.consecutiveDaysAbsent > 3 && (
+                    <div className="text-[10px] font-bold text-rose-600">
+                      &gt; 3 Days Escalated to Coordinator
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase text-slate-400">
+                    Stop &amp; Campus
+                  </div>
+                  <div className="font-bold text-slate-800 mt-0.5">
+                    {callModalTarget.student.pickupDropStopName ||
+                      callModalTarget.student.villageName}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Campus: {callModalTarget.student.campus || 'Sr'}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Call Outcome / Status *
+                </label>
+                <select
+                  value={callStatusInput}
+                  onChange={(e) =>
+                    setCallStatusInput(e.target.value as AbsenteeCallRecord['callStatus'])
+                  }
+                  className="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-bold bg-white text-slate-900"
+                >
+                  <option value="Answered - Will Return on Date">
+                    Answered — Will Return on Tentative Date
+                  </option>
+                  <option value="Answered - Coming Tomorrow">Answered — Coming Tomorrow</option>
+                  <option value="Answered - Medical / Family Leave">
+                    Answered — Medical / Family Leave
+                  </option>
+                  <option value="No Answer / Switched Off">No Answer / Phone Switched Off</option>
+                  <option value="Busy / Call Back Later">Busy / Call Back Later</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Transport Assistant Remarks
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={callAssistantRemarksInput}
+                    onChange={(e) => setCallAssistantRemarksInput(e.target.value)}
+                    placeholder="Enter reason shared by parent during phone call (e.g. Fever, out of station for family function)..."
+                    className="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-medium bg-white text-slate-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-indigo-900 mb-1">
+                    Transport Coordinator Remarks{' '}
+                    {callModalTarget.consecutiveDaysAbsent > 3 && (
+                      <span className="text-rose-600 font-black">(* &gt;3 Days Absent)</span>
+                    )}
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={callCoordinatorRemarksInput}
+                    onChange={(e) => setCallCoordinatorRemarksInput(e.target.value)}
+                    placeholder="Coordinator verification remarks (especially for >3 consecutive days absent)..."
+                    className="w-full p-2.5 border border-indigo-200 rounded-xl text-xs font-medium bg-indigo-50/40 text-slate-900"
+                  />
+                </div>
+              </div>
+
+              {/* Tentative / Expected Date of Arrival Box */}
+              <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3.5 space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-black text-indigo-950 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>
+                        Tentative Date of Arrival (Move to Scheduled Return / Informed Leave List)
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-indigo-800 mt-0.5">
+                      If the parent states the member will come after a few days (e.g. 5 days), set
+                      the <strong>Tentative Date of Arrival</strong> below. The member will be moved
+                      to the separate Scheduled Return list so parents are not disturbed daily. If
+                      not arrived on that date, the name will automatically appear for calling!
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-indigo-950 mb-1">
+                      Tentative / Expected Date of Arrival
+                    </label>
+                    <input
+                      type="date"
+                      value={callExpectedReturnDateInput}
+                      min={absenteeDate}
+                      onChange={(e) => setCallExpectedReturnDateInput(e.target.value)}
+                      className="w-full p-2 border border-indigo-300 rounded-xl text-xs font-bold bg-white text-slate-900"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-indigo-950 mb-1">
+                      Informed Leave / Return Note
+                    </label>
+                    <input
+                      type="text"
+                      value={callExpectedReturnReasonInput}
+                      onChange={(e) => setCallExpectedReturnReasonInput(e.target.value)}
+                      placeholder="e.g. Going out of station for 5 days, will return on date"
+                      className="w-full p-2 border border-indigo-300 rounded-xl text-xs font-medium bg-white text-slate-900"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Past Call History for this Member */}
+              {(() => {
+                const pastCalls = absenteeCalls.filter(
+                  (c) => c.studentId === callModalTarget.student.id
+                );
+                if (pastCalls.length === 0) return null;
+                return (
+                  <div className="border-t border-slate-200 pt-3">
+                    <div className="text-[11px] font-bold uppercase text-slate-500 mb-2">
+                      Past Absentee Call History ({pastCalls.length})
+                    </div>
+                    <div className="max-h-32 overflow-y-auto space-y-1.5 pr-1">
+                      {pastCalls.map((pc) => (
+                        <div
+                          key={pc.id}
+                          className="text-[11px] bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2"
+                        >
+                          <div>
+                            <span className="font-mono font-bold text-slate-800">{pc.date}</span> •{' '}
+                            <span className="font-bold text-indigo-700">{pc.callStatus}</span>
+                            {pc.assistantRemarks && (
+                              <span className="text-slate-600">
+                                {' '}
+                                — Asst: &ldquo;{pc.assistantRemarks}&rdquo;
+                              </span>
+                            )}
+                            {pc.coordinatorRemarks && (
+                              <span className="text-indigo-800 font-semibold">
+                                {' '}
+                                | Coord: &ldquo;{pc.coordinatorRemarks}&rdquo;
+                              </span>
+                            )}
+                          </div>
+                          {pc.expectedReturnDate && (
+                            <span className="font-mono text-[10px] bg-indigo-100 text-indigo-800 px-1.5 py-0.5 rounded font-bold">
+                              Tentative Arrival: {pc.expectedReturnDate}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
+                <div>
+                  {callModalTarget.student.expectedReturnDate && (
+                    <button
+                      type="button"
+                      disabled={isSavingCall}
+                      onClick={(e) => handleSaveAbsenteeCallForm(e, true)}
+                      className="px-3 py-2 border border-rose-300 text-rose-700 hover:bg-rose-50 font-bold text-xs rounded-xl cursor-pointer"
+                    >
+                      Clear Tentative Arrival Date
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCallModalTarget(null)}
+                    className="px-4 py-2 border border-slate-300 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-50 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingCall}
+                    className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer"
+                  >
+                    {isSavingCall ? 'Saving...' : 'Save Call & Follow-up Remarks'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL: EARLY ARRIVAL CONFIRMATION DURING ATTENDANCE MARKING           */}
+      {/* ===================================================================== */}
+      {earlyArrivalModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-amber-300 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-amber-500 text-slate-950 px-5 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-slate-950" />
+                <h3 className="text-sm font-black uppercase tracking-wide">
+                  Confirm Early Arrival Before Tentative Date
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEarlyArrivalModal(null)}
+                className="text-slate-900 hover:text-slate-950 p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmEarlyArrivalAndMarkPresent} className="p-5 space-y-4">
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 text-xs text-amber-950 space-y-1.5">
+                <div className="font-black text-sm">
+                  {earlyArrivalModal.student.name} ({earlyArrivalModal.student.admissionNo})
+                </div>
+                <div>
+                  This member is currently marked on <strong>Scheduled Return / Informed Leave</strong>{' '}
+                  with a <strong>Tentative Date of Arrival</strong> of{' '}
+                  <span className="font-mono font-black underline">
+                    {earlyArrivalModal.student.expectedReturnDate}
+                  </span>
+                  .
+                </div>
+                {earlyArrivalModal.student.expectedReturnReason && (
+                  <div className="text-[11px] text-amber-900">
+                    Parent Note: &ldquo;{earlyArrivalModal.student.expectedReturnReason}&rdquo;
+                  </div>
+                )}
+                <div className="pt-1 font-semibold text-amber-900">
+                  Since today ({selectedDate}) is earlier than their Tentative Date of Arrival, please
+                  confirm that this student has arrived early to avoid any attendance error.
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Early Arrival Confirmation Remark
+                </label>
+                <input
+                  type="text"
+                  value={earlyArrivalModal.remarks}
+                  onChange={(e) =>
+                    setEarlyArrivalModal((prev) =>
+                      prev ? { ...prev, remarks: e.target.value } : null
+                    )
+                  }
+                  className="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-medium bg-white text-slate-900"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEarlyArrivalModal(null)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isConfirmingEarlyArrival}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer"
+                >
+                  {isConfirmingEarlyArrival
+                    ? 'Confirming...'
+                    : 'Confirm Early Arrival & Mark Present'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

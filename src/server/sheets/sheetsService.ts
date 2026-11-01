@@ -22,7 +22,7 @@ import {
   CandidateResume, ScheduledService, SuspensionAndPermissionEvent,
   VehicleAssignmentRecord, DisciplineRecord, ExpenseHead, IncomeHead, IncomeRecord,
   StaffAttendanceRecord, StaffAttendanceStatus, StaffAdvanceRecord, StaffPayrollRecord, HolidayRecord,
-  SystemUser, UserRole, SessionMonthCode, MemberLifecycleRequest
+  SystemUser, UserRole, SessionMonthCode, MemberLifecycleRequest, AbsenteeCallRecord, MemberComplaintRecord
 } from '../../types/index.js';
 
 export const ALL_ERP_SHEET_TABS = [
@@ -146,6 +146,8 @@ export class SheetsDatabaseManager {
   private accounts: AccountHead[] = [...initialAccountHeads];
   private vouchers: JournalVoucher[] = [...initialJournalVouchers];
   private memberRequests: MemberLifecycleRequest[] = [];
+  private absenteeCalls: AbsenteeCallRecord[] = [];
+  private complaints: MemberComplaintRecord[] = [];
 
   private writeQueue: Promise<any> = Promise.resolve();
   private isGoogleConfigured = false;
@@ -245,6 +247,8 @@ export class SheetsDatabaseManager {
           if (Array.isArray(parsed.accounts)) this.accounts = parsed.accounts;
           if (Array.isArray(parsed.vouchers)) this.vouchers = parsed.vouchers;
           if (Array.isArray(parsed.memberRequests)) this.memberRequests = parsed.memberRequests;
+          if (Array.isArray(parsed.absenteeCalls)) this.absenteeCalls = parsed.absenteeCalls;
+          if (Array.isArray(parsed.complaints)) this.complaints = parsed.complaints;
           this.ensureSeededRouteMembers();
         }
       } else {
@@ -298,6 +302,8 @@ export class SheetsDatabaseManager {
         accounts: this.accounts,
         vouchers: this.vouchers,
         memberRequests: this.memberRequests,
+        absenteeCalls: this.absenteeCalls,
+        complaints: this.complaints,
       };
       fs.writeFileSync(DB_SNAPSHOT_FILE, JSON.stringify(payload), 'utf-8');
     } catch (err) {
@@ -563,6 +569,9 @@ export class SheetsDatabaseManager {
                 if (Array.isArray(parsedMasters.sectionsMaster)) this.sectionsMaster = parsedMasters.sectionsMaster;
                 if (Array.isArray(parsedMasters.tripsMaster)) this.tripsMaster = parsedMasters.tripsMaster;
                 if (Array.isArray(parsedMasters.designationsMaster)) this.designationsMaster = parsedMasters.designationsMaster;
+                if (Array.isArray(parsedMasters.memberRequests)) this.memberRequests = parsedMasters.memberRequests;
+                if (Array.isArray(parsedMasters.absenteeCalls)) this.absenteeCalls = parsedMasters.absenteeCalls;
+                if (Array.isArray(parsedMasters.complaints)) this.complaints = parsedMasters.complaints;
                 parsedJsonOk = true;
               } catch {
                 // fallback to columns
@@ -847,6 +856,9 @@ export class SheetsDatabaseManager {
   }
 
   public getBootstrapSnapshot() {
+    if (this.purgeOctober2026AppliedFeesAndSyncBalances()) {
+      this.saveLocalSnapshot();
+    }
     this.runAutoFirstOfMonthBillingIfDue();
     const students = this.getStudents();
     const trips = this.getTrips();
@@ -919,6 +931,8 @@ export class SheetsDatabaseManager {
       staffPayrolls: [...this.getStaffPayrolls()],
       holidays: [...this.getHolidays()],
       memberRequests: [...this.getMemberRequests()],
+      absenteeCalls: [...this.getAbsenteeCalls()],
+      complaints: [...this.getComplaints()],
     };
   }
 
@@ -1058,6 +1072,9 @@ export class SheetsDatabaseManager {
                 sectionsMaster: this.sectionsMaster,
                 tripsMaster: this.tripsMaster,
                 designationsMaster: this.designationsMaster,
+                memberRequests: this.memberRequests,
+                absenteeCalls: this.absenteeCalls,
+                complaints: this.complaints,
               }),
             ],
             [],
@@ -2207,7 +2224,13 @@ export class SheetsDatabaseManager {
     return this.villages;
   }
 
-  public async saveVillage(villageData: Partial<Village> & { stops?: Partial<TransportStop>[] }): Promise<Village> {
+  public async saveVillage(
+    villageData: Partial<Village> & {
+      stops?: Partial<TransportStop>[];
+      effectiveFromDate?: string;
+      acknowledged?: boolean;
+    }
+  ): Promise<Village> {
     return this.enqueueWrite(async () => {
       if (!villageData.name || !villageData.name.trim()) {
         throw new Error('Village Name is mandatory.');
@@ -2225,12 +2248,20 @@ export class SheetsDatabaseManager {
         }
       }
 
+      const todayIst = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+      const currentMonthIst = todayIst.slice(0, 7);
+
       const stops: TransportStop[] = rawStops
         .map((s, idx) => ({
           id: s.id || `stp-${Date.now()}-${idx}`,
           name: s.name!.trim(),
           fee: Math.max(0, Number(s.fee) || 0),
           distanceKm: Number(s.distanceKm) || Number(villageData.distanceKm) || 5,
+          distanceRoute: s.distanceRoute || `School - ${s.name!.trim()}`,
+          selectedMonths: s.selectedMonths,
+          totalSessionFee: s.totalSessionFee,
+          effectiveFromDate: s.effectiveFromDate,
+          effectiveFromMonth: s.effectiveFromMonth,
           landmark: s.landmark || '',
         }))
         .sort((a, b) =>
@@ -2257,10 +2288,82 @@ export class SheetsDatabaseManager {
             }
           }
 
+          // Detect if any existing stop's monthly fee was changed
+          let feeChangedOnExistingStop = false;
+          for (const st of stops) {
+            const matchedOldStop = existingVillage.stops.find(
+              os => os.id === st.id || os.name.trim().toLowerCase() === st.name.trim().toLowerCase()
+            );
+            if (matchedOldStop) {
+              const oldFee = Number(matchedOldStop.fee ?? existingVillage.monthlyRate ?? 0);
+              const newFee = Number(st.fee ?? 0);
+              if (oldFee !== newFee) {
+                feeChangedOnExistingStop = true;
+              }
+            }
+          }
+
+          let effectiveDateToApply = (villageData.effectiveFromDate || '').trim();
+          let effectiveMonthToApply = effectiveDateToApply ? effectiveDateToApply.slice(0, 7) : currentMonthIst;
+
+          if (feeChangedOnExistingStop) {
+            if (!effectiveDateToApply || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDateToApply)) {
+              throw new Error('Effective Date is required when changing a Village or Stop Monthly Fee.');
+            }
+            if (effectiveDateToApply < todayIst) {
+              throw new Error(
+                `Effective Date (${effectiveDateToApply}) is from the past, which will affect previous entries. Fee change from a past effective date is not permitted.`
+              );
+            }
+            if (villageData.acknowledged === false) {
+              throw new Error('Please acknowledge the new monthly fee and effective month before saving.');
+            }
+          }
+
+          const vilMonths =
+            existingVillage.selectedMonths && existingVillage.selectedMonths.length > 0
+              ? existingVillage.selectedMonths
+              : this.config.attachedSessionMonths || (['nov', 'dec', 'jan', 'feb', 'mar'] as SessionMonthCode[]);
+
+          for (const st of stops) {
+            const matchedOldStop = existingVillage.stops.find(
+              os => os.id === st.id || os.name.trim().toLowerCase() === st.name.trim().toLowerCase()
+            );
+            st.selectedMonths =
+              st.selectedMonths && st.selectedMonths.length > 0
+                ? st.selectedMonths
+                : matchedOldStop?.selectedMonths && matchedOldStop.selectedMonths.length > 0
+                ? matchedOldStop.selectedMonths
+                : [...vilMonths];
+            st.distanceRoute = st.distanceRoute || matchedOldStop?.distanceRoute || `School - ${st.name}`;
+            st.totalSessionFee = st.fee * st.selectedMonths.length;
+            if (feeChangedOnExistingStop && effectiveDateToApply) {
+              st.effectiveFromDate = effectiveDateToApply;
+              st.effectiveFromMonth = effectiveMonthToApply;
+            } else if (matchedOldStop) {
+              st.effectiveFromDate = st.effectiveFromDate || matchedOldStop.effectiveFromDate;
+              st.effectiveFromMonth = st.effectiveFromMonth || matchedOldStop.effectiveFromMonth;
+            }
+          }
+
+          const primaryRate = stops[0]?.fee ?? existingVillage.monthlyRate ?? 0;
+
           const updatedVillage: Village = {
             ...existingVillage,
             name: villageData.name?.trim() || existingVillage.name,
             distanceKm: Number(villageData.distanceKm) || existingVillage.distanceKm,
+            distanceRoute: existingVillage.distanceRoute || `School - ${villageData.name?.trim() || existingVillage.name}`,
+            selectedMonths: [...vilMonths],
+            monthlyRate: primaryRate,
+            totalSessionFee: primaryRate * vilMonths.length,
+            effectiveFromDate:
+              feeChangedOnExistingStop && effectiveDateToApply
+                ? effectiveDateToApply
+                : existingVillage.effectiveFromDate,
+            effectiveFromMonth:
+              feeChangedOnExistingStop && effectiveDateToApply
+                ? effectiveMonthToApply
+                : existingVillage.effectiveFromMonth,
             stops,
           };
           this.villages[idx] = updatedVillage;
@@ -2295,45 +2398,99 @@ export class SheetsDatabaseManager {
           }
           for (const st of stops) {
             for (const member of this.students) {
-              if (
+              const matchesStopOrSingleStopVillage =
                 member.pickupDropStopId === st.id ||
-                (member.villageId === existingVillage.id && member.pickupDropStopName === st.name)
-              ) {
+                (member.villageId === updatedVillage.id &&
+                  (member.pickupDropStopName?.trim().toLowerCase() === st.name.trim().toLowerCase() ||
+                    stops.length === 1));
+              if (matchesStopOrSingleStopVillage && member.transportStatus !== 'Left') {
                 const nextFee = st.fee !== undefined && st.fee !== null ? Math.max(0, Number(st.fee) || 0) : member.monthlyFee;
                 member.monthlyFee = nextFee;
+                member.pickupDropStopId = st.id;
                 member.pickupDropStopName = st.name;
                 if (nextFee === 0) {
                   this.invoices = this.invoices.filter(
-                    inv => !(inv.studentId === member.id && (Number(inv.paidAmount) || 0) === 0)
+                    inv =>
+                      !(
+                        inv.studentId === member.id &&
+                        !String(inv.idempotencyKey || '').startsWith('PREV-DUES-') &&
+                        !String(inv.month || '').toLowerCase().includes('previous dues') &&
+                        (Number(inv.paidAmount) || 0) === 0
+                      )
                   );
-                  member.balanceDue = this.invoices
-                    .filter(inv => inv.studentId === member.id)
-                    .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+                } else {
+                  const targetEffMonth = st.effectiveFromMonth || updatedVillage.effectiveFromMonth || currentMonthIst;
+                  for (const inv of this.invoices) {
+                    if (inv.studentId !== member.id) continue;
+                    const key = String(inv.idempotencyKey || '');
+                    const mStr = String(inv.month || '').trim();
+                    if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) continue;
+                    if (/^\d{4}-\d{2}$/.test(mStr) && mStr < targetEffMonth) continue;
+                    const conc = Math.min(nextFee, Math.max(0, Number(member.concessionAmount) || Number(inv.concession) || 0));
+                    const net = Math.max(0, nextFee - conc);
+                    const paid = Math.max(0, Number(inv.paidAmount) || 0);
+                    inv.baseFee = nextFee;
+                    inv.concession = conc;
+                    inv.netAmount = net;
+                    inv.balanceDue = Math.max(0, net - paid);
+                    inv.status = inv.balanceDue <= 0 ? 'Paid' : paid > 0 ? 'Partially Paid' : 'Unpaid';
+                  }
                 }
+                member.balanceDue = this.invoices
+                  .filter(inv => inv.studentId === member.id && inv.status !== 'Paid')
+                  .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
               }
             }
           }
 
-          // Also update villageNames on any route that references this village
+          // Also update villageNames and stop fees on any route that references this village
           for (const rt of this.routes) {
             if (rt.villageIds.includes(updatedVillage.id)) {
               rt.villageNames = rt.villageIds
                 .map(id => this.villages.find(v => v.id === id)?.name)
                 .filter(Boolean) as string[];
             }
+            for (const rStop of rt.stops || []) {
+              const matchedStop = stops.find(
+                s => s.id === rStop.id || s.id === rStop.stopId || s.name.trim().toLowerCase() === rStop.name.trim().toLowerCase()
+              );
+              if (matchedStop) {
+                rStop.fee = matchedStop.fee;
+                rStop.name = matchedStop.name;
+              }
+            }
           }
 
+          this.purgeOctober2026AppliedFeesAndSyncBalances();
           this.sortVillagesAlphabetically();
           await this.internalSyncToGoogleSheets();
           return updatedVillage;
         }
       }
 
+      const defaultMonths =
+        this.config.attachedSessionMonths && this.config.attachedSessionMonths.length > 0
+          ? [...this.config.attachedSessionMonths]
+          : (['nov', 'dec', 'jan', 'feb', 'mar'] as SessionMonthCode[]);
+      const newPrimaryRate = stops[0]?.fee ?? 0;
+
       const newVillage: Village = {
         id: `vil-${Date.now()}`,
         name: villageData.name?.trim() || 'New Village',
         distanceKm: Number(villageData.distanceKm) || 5,
-        stops,
+        distanceRoute: `School - ${villageData.name?.trim() || 'New Village'}`,
+        selectedMonths: defaultMonths,
+        monthlyRate: newPrimaryRate,
+        totalSessionFee: newPrimaryRate * defaultMonths.length,
+        effectiveFromDate: villageData.effectiveFromDate || todayIst,
+        effectiveFromMonth: (villageData.effectiveFromDate || todayIst).slice(0, 7),
+        stops: stops.map(s => ({
+          ...s,
+          selectedMonths: defaultMonths,
+          totalSessionFee: s.fee * defaultMonths.length,
+          effectiveFromDate: s.effectiveFromDate || villageData.effectiveFromDate || todayIst,
+          effectiveFromMonth: (s.effectiveFromDate || villageData.effectiveFromDate || todayIst).slice(0, 7),
+        })),
       };
 
       this.villages.push(newVillage);
@@ -3313,7 +3470,16 @@ export class SheetsDatabaseManager {
       changed = true;
     }
 
-    // Ensure every village and stop has default distanceRoute & selectedMonths initialized
+    const normName = (raw?: string) =>
+      String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s*\(\s*/g, ' (')
+        .replace(/\s*\)\s*/g, ')')
+        .replace(/\s+/g, ' ')
+        .replace(/\bmubarakpur\b/g, 'mubarakhpur');
+
+    // 1. Ensure every village and stop has default distanceRoute, selectedMonths, monthlyRate, and totalSessionFee synced
     for (const vil of this.villages) {
       if (!vil.distanceRoute) {
         vil.distanceRoute = `School - ${vil.name}`;
@@ -3323,8 +3489,21 @@ export class SheetsDatabaseManager {
         vil.selectedMonths = [...this.config.attachedSessionMonths];
         changed = true;
       }
-      const vilRate = Number(vil.stops?.[0]?.fee ?? vil.monthlyRate ?? 0);
-      vil.totalSessionFee = vilRate * vil.selectedMonths.length;
+      const isOldSchool = normName(vil.name) === 'old school';
+      const vilRate = isOldSchool
+        ? 0
+        : vil.stops?.[0]?.fee !== undefined && vil.stops?.[0]?.fee !== null
+        ? Math.max(0, Number(vil.stops[0].fee) || 0)
+        : Math.max(0, Number(vil.monthlyRate) || 0);
+      if (vil.monthlyRate !== vilRate) {
+        vil.monthlyRate = vilRate;
+        changed = true;
+      }
+      const expectedVilTotal = vilRate * vil.selectedMonths.length;
+      if (vil.totalSessionFee !== expectedVilTotal) {
+        vil.totalSessionFee = expectedVilTotal;
+        changed = true;
+      }
       for (const st of vil.stops || []) {
         if (!st.distanceRoute) {
           st.distanceRoute = `School - ${st.name}`;
@@ -3334,11 +3513,54 @@ export class SheetsDatabaseManager {
           st.selectedMonths = [...vil.selectedMonths];
           changed = true;
         }
-        st.totalSessionFee = (Number(st.fee) || 0) * st.selectedMonths.length;
+        const stopFee = isOldSchool ? 0 : Math.max(0, Number(st.fee) || 0);
+        if (st.fee !== stopFee) {
+          st.fee = stopFee;
+          changed = true;
+        }
+        const expectedStopTotal = stopFee * st.selectedMonths.length;
+        if (st.totalSessionFee !== expectedStopTotal) {
+          st.totalSessionFee = expectedStopTotal;
+          changed = true;
+        }
       }
     }
 
-    // Remove all October 2026 ('2026-10' / 'October 2026') monthly transport fee invoices while preserving Previous Dues
+    // 2. Sync cached stop fees in Routes Master so route stops reflect current Village/Stop fee structure
+    for (const rt of this.routes) {
+      for (const rStop of rt.stops || []) {
+        const matchedVil = this.villages.find(
+          v =>
+            v.stops?.some(
+              s =>
+                s.id === rStop.id ||
+                s.id === rStop.stopId ||
+                normName(s.name) === normName(rStop.name)
+            ) ||
+            normName(v.name) === normName(rStop.name) ||
+            normName(v.name) === normName((rStop as any).villageName)
+        );
+        if (matchedVil) {
+          const matchedStop =
+            matchedVil.stops?.find(
+              s =>
+                s.id === rStop.id ||
+                s.id === rStop.stopId ||
+                normName(s.name) === normName(rStop.name)
+            ) || matchedVil.stops?.[0];
+          const targetRouteStopFee =
+            matchedStop !== undefined
+              ? Math.max(0, Number(matchedStop.fee) || 0)
+              : Math.max(0, Number(matchedVil.monthlyRate) || 0);
+          if (Number(rStop.fee) !== targetRouteStopFee) {
+            rStop.fee = targetRouteStopFee;
+            changed = true;
+          }
+        }
+      }
+    }
+
+    // 3. Remove all October 2026 ('2026-10' / 'October 2026') monthly transport fee invoices while preserving Previous Dues
     const beforeInvLen = this.invoices.length;
     this.invoices = this.invoices.filter(inv => {
       const m = String(inv.month || '').trim().toLowerCase();
@@ -3364,8 +3586,111 @@ export class SheetsDatabaseManager {
       changed = true;
     }
 
-    // Ensure Previous Dues invoices are intact and recalculate every student's balanceDue accurately
+    // 4. Sync every student's monthlyFee and reconcile monthly invoices (including November 2026 '2026-11' auto-due & trial invoices) with Village/Stop Fee Structure
     for (const st of this.students) {
+      const matchedVil =
+        this.villages.find(v => st.villageId && v.id === st.villageId) ||
+        this.villages.find(v => normName(v.name) === normName(st.villageName)) ||
+        this.villages.find(v => normName(v.name) === normName(st.pickupDropStopName)) ||
+        this.villages.find(v =>
+          v.stops?.some(
+            s =>
+              (st.pickupDropStopId && s.id === st.pickupDropStopId) ||
+              normName(s.name) === normName(st.pickupDropStopName) ||
+              normName(s.name) === normName(st.villageName)
+          )
+        );
+
+      const matchedStop =
+        matchedVil?.stops?.find(
+          s =>
+            (st.pickupDropStopId && s.id === st.pickupDropStopId) ||
+            normName(s.name) === normName(st.pickupDropStopName)
+        ) || matchedVil?.stops?.[0];
+
+      if (matchedVil && st.transportStatus !== 'Left') {
+        if (!st.villageId) {
+          st.villageId = matchedVil.id;
+          changed = true;
+        }
+        if (matchedStop && !st.pickupDropStopId) {
+          st.pickupDropStopId = matchedStop.id;
+          changed = true;
+        }
+        const isOldSchool =
+          normName(matchedVil.name) === 'old school' ||
+          normName(st.villageName) === 'old school' ||
+          normName(st.pickupDropStopName) === 'old school';
+        const expectedFee = isOldSchool
+          ? 0
+          : matchedStop && matchedStop.fee !== undefined && matchedStop.fee !== null
+          ? Math.max(0, Number(matchedStop.fee) || 0)
+          : matchedVil.monthlyRate !== undefined && matchedVil.monthlyRate !== null
+          ? Math.max(0, Number(matchedVil.monthlyRate) || 0)
+          : Math.max(0, Number(st.monthlyFee) || 0);
+
+        if (Number(st.monthlyFee) !== expectedFee) {
+          st.monthlyFee = expectedFee;
+          changed = true;
+        }
+
+        const effectiveMonth =
+          matchedStop?.effectiveFromMonth || matchedVil.effectiveFromMonth || '2026-11';
+
+        if (expectedFee === 0) {
+          const beforeZeroFilter = this.invoices.length;
+          this.invoices = this.invoices.filter(
+            inv =>
+              !(
+                inv.studentId === st.id &&
+                !String(inv.idempotencyKey || '').startsWith('PREV-DUES-') &&
+                !String(inv.month || '').toLowerCase().includes('previous dues') &&
+                (Number(inv.paidAmount) || 0) === 0
+              )
+          );
+          if (this.invoices.length !== beforeZeroFilter) {
+            changed = true;
+          }
+        } else {
+          for (const inv of this.invoices) {
+            if (inv.studentId !== st.id) continue;
+            const key = String(inv.idempotencyKey || '').trim();
+            const mStr = String(inv.month || '').trim();
+            if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) {
+              continue;
+            }
+            // If an explicit future effectiveFromMonth is set on the stop/village (e.g. '2026-12'), do not alter earlier months ('2026-11')
+            if (/^\d{4}-\d{2}$/.test(mStr) && mStr < effectiveMonth) {
+              continue;
+            }
+            const conc = Math.min(
+              expectedFee,
+              Math.max(0, Number(st.concessionAmount) || Number(inv.concession) || 0)
+            );
+            const expectedNet = Math.max(0, expectedFee - conc);
+            const paid = Math.max(0, Number(inv.paidAmount) || 0);
+            const expectedBal = Math.max(0, expectedNet - paid);
+            const expectedStatus =
+              expectedBal <= 0 ? 'Paid' : paid > 0 ? 'Partially Paid' : 'Unpaid';
+
+            if (
+              Number(inv.baseFee) !== expectedFee ||
+              Number(inv.concession) !== conc ||
+              Number(inv.netAmount) !== expectedNet ||
+              Number(inv.balanceDue) !== expectedBal ||
+              inv.status !== expectedStatus
+            ) {
+              inv.baseFee = expectedFee;
+              inv.concession = conc;
+              inv.netAmount = expectedNet;
+              inv.balanceDue = expectedBal;
+              inv.status = expectedStatus;
+              changed = true;
+            }
+          }
+        }
+      }
+
       if ((Number(st.previousDues) || 0) > 0) {
         this.syncPreviousDuesInvoiceForStudent(st, st.previousDues, st.previousDuesRemarks);
       }
@@ -3374,6 +3699,16 @@ export class SheetsDatabaseManager {
         .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
       if (Number(st.balanceDue) !== recalculatedDue) {
         st.balanceDue = recalculatedDue;
+        changed = true;
+      }
+    }
+
+    // 5. Keep Student Transport Fee Receivables account (acc-103) aligned with total outstanding student balances
+    const receivableAcc = this.accounts.find(a => a.id === 'acc-103' || a.code === '1100');
+    if (receivableAcc) {
+      const totalOutstanding = this.students.reduce((sum, s) => sum + (Number(s.balanceDue) || 0), 0);
+      if (Number(receivableAcc.balance) !== totalOutstanding) {
+        receivableAcc.balance = totalOutstanding;
         changed = true;
       }
     }
@@ -10286,8 +10621,13 @@ export class SheetsDatabaseManager {
     distanceRoute?: string;
     selectedMonths?: SessionMonthCode[];
     monthlyFee?: number;
+    effectiveFromDate?: string;
+    acknowledged?: boolean;
   }) {
     return this.enqueueWrite(async () => {
+      const todayIst = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+      const currentMonthIst = todayIst.slice(0, 7);
+
       if (payload.effectiveBillingStartMonth) {
         this.config.effectiveBillingStartMonth = payload.effectiveBillingStartMonth;
       }
@@ -10314,6 +10654,9 @@ export class SheetsDatabaseManager {
             (payload.transportName && v.name.trim().toLowerCase() === payload.transportName.trim().toLowerCase())
         );
         if (vil) {
+          const targetStop =
+            (payload.stopId ? vil.stops?.find(s => s.id === payload.stopId) : undefined) || vil.stops?.[0];
+          const oldFee = Number(targetStop?.fee ?? vil.monthlyRate ?? 0);
           const months =
             payload.selectedMonths && payload.selectedMonths.length > 0
               ? payload.selectedMonths
@@ -10322,12 +10665,34 @@ export class SheetsDatabaseManager {
           const newFee =
             payload.monthlyFee !== undefined && !isNaN(Number(payload.monthlyFee))
               ? Math.max(0, Number(payload.monthlyFee))
-              : Number(vil.stops?.[0]?.fee ?? vil.monthlyRate ?? 0);
+              : oldFee;
+
+          const isFeeChanged = oldFee !== newFee;
+          const effectiveDateToApply = (payload.effectiveFromDate || '').trim();
+          const effectiveMonthToApply = effectiveDateToApply ? effectiveDateToApply.slice(0, 7) : currentMonthIst;
+
+          if (isFeeChanged) {
+            if (!effectiveDateToApply || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDateToApply)) {
+              throw new Error('Effective Date is required when changing a Village or Stop Monthly Fee.');
+            }
+            if (effectiveDateToApply < todayIst) {
+              throw new Error(
+                `Effective Date (${effectiveDateToApply}) is from the past, which will affect previous entries. Fee change from a past effective date is not permitted.`
+              );
+            }
+            if (payload.acknowledged === false) {
+              throw new Error('Please acknowledge the new monthly fee and effective month before saving.');
+            }
+          }
 
           vil.distanceRoute = distRoute;
           vil.selectedMonths = [...months];
           vil.monthlyRate = newFee;
           vil.totalSessionFee = newFee * months.length;
+          if (isFeeChanged && effectiveDateToApply) {
+            vil.effectiveFromDate = effectiveDateToApply;
+            vil.effectiveFromMonth = effectiveMonthToApply;
+          }
 
           for (const st of vil.stops || []) {
             if (!payload.stopId || st.id === payload.stopId || vil.stops.length === 1) {
@@ -10335,6 +10700,10 @@ export class SheetsDatabaseManager {
               st.distanceRoute = distRoute;
               st.selectedMonths = [...months];
               st.totalSessionFee = newFee * months.length;
+              if (isFeeChanged && effectiveDateToApply) {
+                st.effectiveFromDate = effectiveDateToApply;
+                st.effectiveFromMonth = effectiveMonthToApply;
+              }
             }
           }
 
@@ -10645,6 +11014,319 @@ export class SheetsDatabaseManager {
         student.version = (student.version || 1) + 1;
       }
     }
+  }
+
+  // --- Attendance Module: Call Absentees, Consecutive Absence Escalation & Expected Date of Arrival ---
+  public getAbsenteeCalls(date?: string, campus?: string): AbsenteeCallRecord[] {
+    let list = [...this.absenteeCalls];
+    if (date) list = list.filter(c => c.date === date);
+    if (campus && campus !== 'all' && campus !== 'All Campuses') {
+      const cLower = campus.trim().toLowerCase();
+      list = list.filter(c => {
+        const itemC = (c.campus || '').trim().toLowerCase();
+        if (cLower === 'sr' || cLower.includes('senior')) return itemC === 'sr' || itemC.includes('senior');
+        if (cLower === 'jr' || cLower.includes('junior')) return itemC === 'jr' || itemC.includes('junior');
+        return itemC === cLower;
+      });
+    }
+    return list;
+  }
+
+  public async saveAbsenteeCall(
+    payload: Partial<AbsenteeCallRecord> & { studentId: string; date: string; callerRole?: UserRole; callerName?: string; clearExpectedReturn?: boolean }
+  ): Promise<AbsenteeCallRecord> {
+    return this.enqueueWrite(async () => {
+      const student = this.students.find(s => s.id === payload.studentId);
+      if (!student) throw new Error('Student member not found.');
+
+      const routeObj = this.routes.find(r => r.id === student.routeId || r.code === student.routeCode);
+      const dateStr = payload.date || new Date().toISOString().split('T')[0];
+      const nowTimeStr = new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      const existingIdx = this.absenteeCalls.findIndex(
+        c => c.studentId === student.id && c.date === dateStr
+      );
+      const existing = existingIdx >= 0 ? this.absenteeCalls[existingIdx] : undefined;
+
+      const isCoordinatorOrAdmin =
+        payload.callerRole === 'Transport Coordinator' ||
+        payload.callerRole === 'Admin' ||
+        Boolean(payload.coordinatorRemarks !== undefined && payload.coordinatorRemarks.trim() !== '');
+      const isAssistant =
+        payload.callerRole === 'Transport Assistant' ||
+        Boolean(payload.assistantRemarks !== undefined && payload.assistantRemarks.trim() !== '');
+
+      const nextAssistantRemarks =
+        payload.assistantRemarks !== undefined
+          ? payload.assistantRemarks.trim()
+          : existing?.assistantRemarks || student.lastAbsentAssistantRemark || '';
+      const nextCoordinatorRemarks =
+        payload.coordinatorRemarks !== undefined
+          ? payload.coordinatorRemarks.trim()
+          : existing?.coordinatorRemarks || student.lastAbsentCoordinatorRemark || '';
+
+      let nextExpectedReturnDate =
+        payload.clearExpectedReturn
+          ? undefined
+          : payload.expectedReturnDate !== undefined
+          ? payload.expectedReturnDate.trim() || undefined
+          : existing?.expectedReturnDate || student.expectedReturnDate;
+
+      const nextExpectedReturnReason =
+        payload.clearExpectedReturn
+          ? undefined
+          : payload.expectedReturnReason !== undefined
+          ? payload.expectedReturnReason.trim() || undefined
+          : existing?.expectedReturnReason || student.expectedReturnReason || nextAssistantRemarks || nextCoordinatorRemarks;
+
+      // Update student's persistent expectedReturnDate and latest absentee remarks
+      student.expectedReturnDate = nextExpectedReturnDate;
+      student.expectedReturnReason = nextExpectedReturnReason;
+      if (nextExpectedReturnDate) {
+        student.expectedReturnSetOn = dateStr;
+        student.expectedReturnSetBy = payload.callerName || payload.callerRole || 'Transport Staff';
+      } else if (payload.clearExpectedReturn) {
+        student.expectedReturnSetOn = undefined;
+        student.expectedReturnSetBy = undefined;
+      }
+      if (nextAssistantRemarks) student.lastAbsentAssistantRemark = nextAssistantRemarks;
+      if (nextCoordinatorRemarks) student.lastAbsentCoordinatorRemark = nextCoordinatorRemarks;
+
+      const computedStatus: AbsenteeCallRecord['status'] = nextExpectedReturnDate
+        ? nextExpectedReturnDate <= dateStr
+          ? 'Overdue Return'
+          : 'Scheduled Return'
+        : nextAssistantRemarks || nextCoordinatorRemarks || payload.calledByAssistant || payload.calledByCoordinator
+        ? 'Called'
+        : 'Pending Call';
+
+      const record: AbsenteeCallRecord = {
+        id: existing?.id || `abcall-${student.id}-${dateStr}`,
+        date: dateStr,
+        studentId: student.id,
+        admissionNo: student.admissionNo,
+        studentName: student.name,
+        classSection: `${student.class}-${student.section}`,
+        campus: student.campus || routeObj?.campus || 'Sr',
+        routeId: student.routeId || routeObj?.id || '',
+        routeCode: student.routeCode || routeObj?.code || '',
+        stopName: student.pickupDropStopName || student.villageName || '',
+        fatherName: student.fatherName,
+        phone: payload.phone || student.mobile || student.emergencyContact || '',
+        consecutiveAbsentDays: Number(payload.consecutiveAbsentDays ?? existing?.consecutiveAbsentDays ?? 1),
+        absentSinceDate: payload.absentSinceDate || existing?.absentSinceDate || dateStr,
+        attendanceRemarks: payload.attendanceRemarks ?? existing?.attendanceRemarks ?? '',
+        calledByAssistant: isAssistant ? true : existing?.calledByAssistant || Boolean(nextAssistantRemarks),
+        assistantName: isAssistant
+          ? payload.callerName || payload.assistantName || 'Transport Assistant'
+          : existing?.assistantName,
+        assistantCalledAt: isAssistant ? nowTimeStr : existing?.assistantCalledAt,
+        assistantRemarks: nextAssistantRemarks,
+        calledByCoordinator: isCoordinatorOrAdmin
+          ? true
+          : existing?.calledByCoordinator || Boolean(nextCoordinatorRemarks),
+        coordinatorName: isCoordinatorOrAdmin
+          ? payload.callerName || payload.coordinatorName || payload.callerRole || 'Transport Coordinator'
+          : existing?.coordinatorName,
+        coordinatorCalledAt: isCoordinatorOrAdmin ? nowTimeStr : existing?.coordinatorCalledAt,
+        coordinatorRemarks: nextCoordinatorRemarks,
+        expectedReturnDate: nextExpectedReturnDate,
+        expectedReturnReason: nextExpectedReturnReason,
+        earlyArrivalConfirmedAt: existing?.earlyArrivalConfirmedAt,
+        earlyArrivalConfirmedBy: existing?.earlyArrivalConfirmedBy,
+        earlyArrivalRemarks: existing?.earlyArrivalRemarks,
+        status: computedStatus,
+      };
+
+      if (existingIdx >= 0) {
+        this.absenteeCalls[existingIdx] = record;
+      } else {
+        this.absenteeCalls.unshift(record);
+      }
+
+      await this.internalSyncToGoogleSheets();
+      return record;
+    });
+  }
+
+  public async confirmEarlyArrival(payload: {
+    studentId: string;
+    date: string;
+    confirmedBy: string;
+    remarks?: string;
+  }): Promise<{ student: StudentMember; callRecord?: AbsenteeCallRecord }> {
+    return this.enqueueWrite(async () => {
+      const student = this.students.find(s => s.id === payload.studentId);
+      if (!student) throw new Error('Student member not found.');
+
+      const nowTimeStr = new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      const previousExpectedDate = student.expectedReturnDate;
+      student.expectedReturnDate = undefined;
+      student.expectedReturnReason = undefined;
+      student.expectedReturnSetOn = undefined;
+      student.expectedReturnSetBy = undefined;
+
+      // Update any active Scheduled Return call record for this student
+      let updatedCall: AbsenteeCallRecord | undefined;
+      for (const c of this.absenteeCalls) {
+        if (c.studentId === student.id && (c.status === 'Scheduled Return' || c.expectedReturnDate)) {
+          c.status = 'Returned Early';
+          c.earlyArrivalConfirmedAt = nowTimeStr;
+          c.earlyArrivalConfirmedBy = payload.confirmedBy || 'Transport Staff';
+          c.earlyArrivalRemarks =
+            payload.remarks || `Arrived early on ${payload.date} (was scheduled for ${previousExpectedDate})`;
+          c.expectedReturnDate = undefined;
+          updatedCall = c;
+        }
+      }
+
+      await this.internalSyncToGoogleSheets();
+      return { student, callRecord: updatedCall };
+    });
+  }
+
+  // --- Feedback & Complaint Module (Grievances & Feedbacks from Members / Parents) ---
+  public getComplaints(campus?: string, status?: string): MemberComplaintRecord[] {
+    let list = [...this.complaints];
+    if (campus && campus !== 'all' && campus !== 'All Campuses') {
+      const cLower = campus.trim().toLowerCase();
+      list = list.filter(c => {
+        const itemC = (c.campus || '').trim().toLowerCase();
+        if (cLower === 'sr' || cLower.includes('senior')) return itemC === 'sr' || itemC.includes('senior');
+        if (cLower === 'jr' || cLower.includes('junior')) return itemC === 'jr' || itemC.includes('junior');
+        return itemC === cLower;
+      });
+    }
+    if (status && status !== 'all') {
+      list = list.filter(c => c.status.toLowerCase() === status.toLowerCase());
+    }
+    return list.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+  }
+
+  public async saveComplaint(payload: Partial<MemberComplaintRecord>): Promise<MemberComplaintRecord> {
+    return this.enqueueWrite(async () => {
+      const student = this.students.find(
+        s => s.id === payload.memberId || (payload.admissionNo && s.admissionNo === payload.admissionNo)
+      );
+      if (!student && !payload.memberName?.trim()) {
+        throw new Error('Please select a valid Member from whom the complaint or feedback is received.');
+      }
+      const words = (payload.wordsOfMember || '').trim();
+      if (!words) {
+        throw new Error('Words of Member / Parent (complaint or feedback details) are mandatory.');
+      }
+
+      const routeObj =
+        this.routes.find(r => r.id === payload.routeId || r.code === payload.routeCode) ||
+        (student ? this.routes.find(r => r.id === student.routeId || r.code === student.routeCode) : undefined);
+      const vehicleObj =
+        this.vehicles.find(v => v.id === payload.vehicleId || v.registrationNumber === payload.vehicleNumber) ||
+        (routeObj ? this.vehicles.find(v => v.id === routeObj.vehicleId || v.registrationNumber === routeObj.vehicleNumber) : undefined);
+
+      const today = new Date().toISOString().split('T')[0];
+
+      if (payload.id) {
+        const idx = this.complaints.findIndex(c => c.id === payload.id);
+        if (idx >= 0) {
+          const existing = this.complaints[idx];
+          const updated: MemberComplaintRecord = {
+            ...existing,
+            ...payload,
+            wordsOfMember: words,
+            seriousness: payload.seriousness || existing.seriousness || 'General',
+            status: payload.status || existing.status || 'Pending',
+          };
+          this.complaints[idx] = updated;
+          await this.internalSyncToGoogleSheets();
+          return updated;
+        }
+      }
+
+      const complaintNo = `CMP-${new Date().getFullYear()}-${String(this.complaints.length + 1).padStart(3, '0')}`;
+      const newRec: MemberComplaintRecord = {
+        id: `cmp-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        complaintNo,
+        date: payload.date || today,
+        memberId: student?.id || payload.memberId || '',
+        admissionNo: student?.admissionNo || payload.admissionNo || '',
+        memberName: student?.name || payload.memberName?.trim() || '',
+        fatherName: student?.fatherName || payload.fatherName || '',
+        mobile: student?.mobile || payload.mobile || '',
+        campus: student?.campus || payload.campus || routeObj?.campus || 'Sr',
+        classSection: student ? `${student.class}-${student.section}` : payload.classSection || '',
+        routeId: routeObj?.id || payload.routeId || student?.routeId || '',
+        routeCode: routeObj?.code || payload.routeCode || student?.routeCode || '',
+        vehicleId: vehicleObj?.id || payload.vehicleId || routeObj?.vehicleId || '',
+        vehicleNumber: vehicleObj?.registrationNumber || payload.vehicleNumber || routeObj?.vehicleNumber || '',
+        driverName:
+          payload.driverName?.trim() ||
+          vehicleObj?.assignedDriverName ||
+          routeObj?.driverName ||
+          'Assigned Driver',
+        seriousness: payload.seriousness || 'General',
+        wordsOfMember: words,
+        status: payload.status || 'Pending',
+        actionTaken: payload.actionTaken?.trim() || '',
+        resolvedBy: payload.status === 'Resolved' ? payload.resolvedBy || payload.recordedBy || 'Admin' : undefined,
+        resolvedAt: payload.status === 'Resolved' ? today : undefined,
+        recordedBy: payload.recordedBy || 'Transport Staff',
+        recordedByRole: payload.recordedByRole || 'Admin',
+        createdAt: new Date().toISOString(),
+      };
+
+      this.complaints.unshift(newRec);
+      await this.internalSyncToGoogleSheets();
+      return newRec;
+    });
+  }
+
+  public async resolveComplaint(
+    id: string,
+    payload: {
+      status: 'Pending' | 'Resolved';
+      actionTaken: string;
+      resolvedBy?: string;
+    }
+  ): Promise<MemberComplaintRecord> {
+    return this.enqueueWrite(async () => {
+      const rec = this.complaints.find(c => c.id === id);
+      if (!rec) throw new Error('Complaint / Feedback record not found.');
+      const today = new Date().toISOString().split('T')[0];
+      rec.status = payload.status || 'Resolved';
+      if (payload.actionTaken !== undefined) {
+        rec.actionTaken = payload.actionTaken.trim();
+      }
+      if (rec.status === 'Resolved') {
+        rec.resolvedBy = payload.resolvedBy || 'Admin';
+        rec.resolvedAt = today;
+      } else {
+        rec.resolvedBy = undefined;
+        rec.resolvedAt = undefined;
+      }
+      await this.internalSyncToGoogleSheets();
+      return rec;
+    });
+  }
+
+  public async deleteComplaint(id: string) {
+    return this.enqueueWrite(async () => {
+      this.complaints = this.complaints.filter(c => c.id !== id);
+      await this.internalSyncToGoogleSheets();
+      return { success: true };
+    });
   }
 }
 

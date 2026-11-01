@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import {
   Search, Plus, AlertTriangle, X, Eye, Trash2, RotateCcw,
   Camera, Edit2, Printer, FileText, Upload,
-  MapPin, Award, PhoneCall, Gavel, IndianRupee, ShieldAlert, Check, Ban
+  MapPin, Award, PhoneCall, Gavel, IndianRupee, ShieldAlert, Check, Ban,
+  MessageSquareWarning, CheckCircle2
 } from 'lucide-react';
 import {
   StudentMember, CampusId, Village, Route, CampusMaster, MemberTypeMaster,
   FeeInvoice, FeeReceipt, TripAttendanceRecord, DocumentAttachment,
-  FeeFollowUpRecord, DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest
+  FeeFollowUpRecord, DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest,
+  Employee, MemberComplaintRecord, ComplaintSeriousness
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview, FilterPopover } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
@@ -17,10 +19,12 @@ interface MembersViewProps {
   schoolName?: string;
   isAdmin?: boolean;
   currentRole?: UserRole;
+  userCampus?: string;
   students: StudentMember[];
   villages: Village[];
   routes: Route[];
   vehicles?: Vehicle[];
+  employees?: Employee[];
   campuses: CampusMaster[];
   memberTypes: MemberTypeMaster[];
   classes: string[];
@@ -30,6 +34,7 @@ interface MembersViewProps {
   attendanceRecords?: TripAttendanceRecord[];
   feeFollowUps?: FeeFollowUpRecord[];
   disciplineRecords?: DisciplineRecord[];
+  complaints?: MemberComplaintRecord[];
   initialStatusFilter?: string;
   externalOpenMemberId?: string | null;
   onClearExternalMemberId?: () => void;
@@ -53,6 +58,12 @@ interface MembersViewProps {
   onDeleteFeeFollowUp?: (id: string) => Promise<void>;
   onAddDisciplineRecord?: (data: Omit<DisciplineRecord, 'id'>) => Promise<void>;
   onDeleteDisciplineRecord?: (id: string) => Promise<void>;
+  onSaveComplaint?: (payload: Partial<MemberComplaintRecord>) => Promise<any>;
+  onResolveComplaint?: (
+    id: string,
+    payload: { status?: 'Pending' | 'Resolved'; actionTaken?: string; resolvedBy?: string }
+  ) => Promise<any>;
+  onDeleteComplaint?: (id: string) => Promise<any>;
   onQuickCollectFeeForMember?: (memberId: string) => void;
   onNavigateToMasters?: () => void;
   onAddClass?: (name: string) => Promise<any>;
@@ -85,6 +96,7 @@ type ProfileTabKey =
   | 'fee_structure'
   | 'followups'
   | 'discipline'
+  | 'complaints'
   | 'attendance'
   | 'documents'
   | 'special';
@@ -93,10 +105,12 @@ export const MembersView: React.FC<MembersViewProps> = ({
   schoolName = 'Institute Transport ERP',
   isAdmin = true,
   currentRole = 'Admin',
+  userCampus,
   students = [],
   villages = [],
   routes = [],
   vehicles = [],
+  employees = [],
   campuses = [],
   memberTypes = [],
   classes = [],
@@ -106,6 +120,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   attendanceRecords = [],
   feeFollowUps = [],
   disciplineRecords = [],
+  complaints = [],
   initialStatusFilter = 'all',
   externalOpenMemberId,
   onClearExternalMemberId,
@@ -120,6 +135,9 @@ export const MembersView: React.FC<MembersViewProps> = ({
   onDeleteFeeFollowUp,
   onAddDisciplineRecord,
   onDeleteDisciplineRecord,
+  onSaveComplaint,
+  onResolveComplaint,
+  onDeleteComplaint,
   onQuickCollectFeeForMember,
   memberRequests = [],
   onCreateMemberRequest,
@@ -128,15 +146,19 @@ export const MembersView: React.FC<MembersViewProps> = ({
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
   const canInitiateSuspension = currentRole === 'Admin' || currentRole === 'Transport Coordinator';
+  const isAssistant = currentRole === 'Transport Assistant';
+  const lockedCampus = isAssistant && userCampus && userCampus !== 'All' ? userCampus : null;
 
-  // Mode: 'directory' vs 'suspended' vs 'discipline' vs 'requests'
-  const [subModule, setSubModule] = useState<'directory' | 'suspended' | 'discipline' | 'requests'>(
+  // Mode: 'directory' vs 'suspended' vs 'discipline' vs 'requests' vs 'complaints'
+  const [subModule, setSubModule] = useState<'directory' | 'suspended' | 'discipline' | 'requests' | 'complaints'>(
     initialStatusFilter === 'discipline'
       ? 'discipline'
       : initialStatusFilter === 'Suspended'
       ? 'suspended'
       : initialStatusFilter === 'requests'
       ? 'requests'
+      : initialStatusFilter === 'complaints'
+      ? 'complaints'
       : 'directory'
   );
 
@@ -163,7 +185,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [suspendedSubFilter, setSuspendedSubFilter] = useState<
     'all' | 'suspended_only' | 'pending_approval' | 'with_permission'
   >('all');
-  const [campusFilter, setCampusFilter] = useState<string>('all');
+  const [campusFilter, setCampusFilter] = useState<string>(lockedCampus || 'all');
   const [memberTypeFilter, setMemberTypeFilter] = useState<string>('all');
   const [routeFilter, setRouteFilter] = useState<string>('all');
   const [vehicleFilter, setVehicleFilter] = useState<string>('all');
@@ -184,6 +206,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
       setSubModule('suspended');
     } else if (initialStatusFilter === 'requests') {
       setSubModule('requests');
+    } else if (initialStatusFilter === 'complaints') {
+      setSubModule('complaints');
     } else {
       setSubModule('directory');
       setStatusFilter('all');
@@ -1021,6 +1045,169 @@ export const MembersView: React.FC<MembersViewProps> = ({
         d => d.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && d.admissionNo === activeProfileAdmNo)
       )
     : [];
+  const memberComplaints = activeProfileMember
+    ? complaints.filter(
+        c => c.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && c.admissionNo === activeProfileAdmNo)
+      )
+    : [];
+
+  // =========================================================================
+  // FEEDBACK & COMPLAINT SUB-MODULE STATE & HANDLERS
+  // =========================================================================
+  const campusScopedStudentsForComplaints = React.useMemo(() => {
+    return students.filter(s => {
+      if (lockedCampus) {
+        const stuCampus = s.campus || (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+        return stuCampus.toLowerCase() === lockedCampus.toLowerCase();
+      }
+      return true;
+    });
+  }, [students, lockedCampus]);
+
+  const [compMemberId, setCompMemberId] = useState<string>(campusScopedStudentsForComplaints[0]?.id || '');
+  const [compMemberSearch, setCompMemberSearch] = useState<string>('');
+  const [compDate, setCompDate] = useState<string>(todayStr);
+  const [compSeriousness, setCompSeriousness] = useState<ComplaintSeriousness>('General');
+  const [compRouteId, setCompRouteId] = useState<string>('');
+  const [compVehicleNumber, setCompVehicleNumber] = useState<string>('');
+  const [compDriverName, setCompDriverName] = useState<string>('');
+  const [compWordsOfMember, setCompWordsOfMember] = useState<string>('');
+  const [compActionTaken, setCompActionTaken] = useState<string>('');
+  const [compStatusFilter, setCompStatusFilter] = useState<'all' | 'Pending' | 'Resolved'>('all');
+  const [compSeriousnessFilter, setCompSeriousnessFilter] = useState<'all' | ComplaintSeriousness>('all');
+  const [compCampusFilter, setCompCampusFilter] = useState<string>(lockedCampus || 'all');
+  const [compRouteFilter, setCompRouteFilter] = useState<string>('all');
+  const [compSearchQuery, setCompSearchQuery] = useState<string>('');
+  const [resolveComplaintTarget, setResolveComplaintTarget] = useState<MemberComplaintRecord | null>(null);
+  const [resolveActionNotes, setResolveActionNotes] = useState<string>('');
+  const [complaintFeedbackBanner, setComplaintFeedbackBanner] = useState<string | null>(null);
+
+  // Sync Route, Vehicle, Driver when Member changes in Complaint form
+  const handleSelectComplaintMember = (newMemberId: string) => {
+    setCompMemberId(newMemberId);
+    const stu = students.find(s => s.id === newMemberId);
+    if (stu) {
+      const rt = routes.find(r => r.id === stu.routeId || r.code === stu.routeCode);
+      const veh = vehicles.find(
+        v => v.id === rt?.vehicleId || v.registrationNumber === rt?.vehicleNumber
+      );
+      setCompRouteId(rt?.id || stu.routeId || '');
+      setCompVehicleNumber(rt?.vehicleNumber || veh?.registrationNumber || '');
+      setCompDriverName(rt?.driverName || veh?.assignedDriverName || 'Assigned Driver');
+    }
+  };
+
+  useEffect(() => {
+    if (!compMemberId && campusScopedStudentsForComplaints.length > 0) {
+      handleSelectComplaintMember(campusScopedStudentsForComplaints[0].id);
+    }
+  }, [campusScopedStudentsForComplaints]);
+
+  const handleSubmitComplaintForm = async (e: React.FormEvent, forProfileMember?: StudentMember) => {
+    e.preventDefault();
+    if (!onSaveComplaint) return;
+    const targetStu = forProfileMember || students.find(s => s.id === compMemberId);
+    if (!targetStu) return;
+    if (!compWordsOfMember.trim()) return;
+
+    const rt =
+      routes.find(r => r.id === (forProfileMember ? targetStu.routeId : compRouteId)) ||
+      routes.find(r => r.code === targetStu.routeCode);
+    const veh = vehicles.find(
+      v =>
+        v.registrationNumber === (forProfileMember ? rt?.vehicleNumber : compVehicleNumber) ||
+        v.id === rt?.vehicleId
+    );
+    const resolvedCampus =
+      targetStu.campus || (targetStu.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+
+    setSubmitting(true);
+    try {
+      await onSaveComplaint({
+        memberId: targetStu.id,
+        admissionNo: targetStu.admissionNo,
+        memberName: targetStu.name,
+        memberType: targetStu.memberType,
+        campus: resolvedCampus,
+        className: targetStu.class,
+        section: targetStu.section,
+        fatherName: targetStu.fatherName,
+        phone: targetStu.mobile || targetStu.whatsappNo,
+        date: compDate || todayStr,
+        seriousness: compSeriousness,
+        routeId: rt?.id || targetStu.routeId || '',
+        routeCode: rt?.code || targetStu.routeCode || '',
+        routeName: rt?.name || targetStu.routeCode || '',
+        vehicleId: veh?.id || rt?.vehicleId || '',
+        vehicleNumber:
+          (forProfileMember ? rt?.vehicleNumber || veh?.registrationNumber : compVehicleNumber) ||
+          rt?.vehicleNumber ||
+          '—',
+        driverName:
+          (forProfileMember
+            ? rt?.driverName || veh?.assignedDriverName
+            : compDriverName.trim()) ||
+          rt?.driverName ||
+          veh?.assignedDriverName ||
+          'Assigned Driver',
+        wordsOfMember: compWordsOfMember.trim(),
+        status: compActionTaken.trim() ? 'Resolved' : 'Pending',
+        actionTaken: compActionTaken.trim() || undefined,
+        receivedByRole: currentRole,
+        receivedByName:
+          currentRole === 'Transport Assistant'
+            ? `Transport Assistant (${resolvedCampus})`
+            : currentRole === 'Transport Coordinator'
+            ? 'Transport Coordinator'
+            : 'Transport Admin',
+      });
+      setCompWordsOfMember('');
+      setCompActionTaken('');
+      setComplaintFeedbackBanner(
+        `Saved ${compSeriousness} record for ${targetStu.name} (${targetStu.admissionNo}). Linked to Member Profile & Dashboard.`
+      );
+      setTimeout(() => setComplaintFeedbackBanner(null), 4000);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const filteredComplaintsList = React.useMemo(() => {
+    return complaints.filter(c => {
+      const cCampus = c.campus || (c.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+      if (lockedCampus && cCampus.toLowerCase() !== lockedCampus.toLowerCase()) return false;
+      if (compCampusFilter !== 'all' && cCampus.toLowerCase() !== compCampusFilter.toLowerCase()) return false;
+      if (compStatusFilter !== 'all' && c.status !== compStatusFilter) return false;
+      if (compSeriousnessFilter !== 'all' && c.seriousness !== compSeriousnessFilter) return false;
+      if (
+        compRouteFilter !== 'all' &&
+        c.routeId !== compRouteFilter &&
+        c.routeCode !== compRouteFilter
+      ) {
+        return false;
+      }
+      if (compSearchQuery.trim()) {
+        const q = compSearchQuery.toLowerCase().trim();
+        const match =
+          (c.memberName || '').toLowerCase().includes(q) ||
+          (c.admissionNo || '').toLowerCase().includes(q) ||
+          (c.wordsOfMember || '').toLowerCase().includes(q) ||
+          (c.driverName || '').toLowerCase().includes(q) ||
+          (c.vehicleNumber || '').toLowerCase().includes(q) ||
+          (c.routeCode || '').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [
+    complaints,
+    lockedCampus,
+    compCampusFilter,
+    compStatusFilter,
+    compSeriousnessFilter,
+    compRouteFilter,
+    compSearchQuery,
+  ]);
 
   const isStudentMember = (m: StudentMember) =>
     m.memberType.toLowerCase().includes('student') || (!m.memberType.toLowerCase().includes('staff') && !m.memberType.toLowerCase().includes('teacher'));
@@ -1270,10 +1457,544 @@ export const MembersView: React.FC<MembersViewProps> = ({
         </div>
       )}
 
+      {complaintFeedbackBanner && (
+        <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold flex items-center justify-between shadow-2xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{complaintFeedbackBanner}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setComplaintFeedbackBanner(null)}
+            className="text-emerald-700 hover:underline cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* =====================================================================
-          SUB-MODULE 4: MULTI-STAGE APPROVAL WORKFLOW (ADD / DROP / SUSPEND MEMBERS)
+          SUB-MODULE 5: FEEDBACK & COMPLAINT REGISTER (GRIEVANCES & FEEDBACK)
          ===================================================================== */}
-      {subModule === 'requests' ? (
+      {subModule === 'complaints' ? (
+        <div className="space-y-5">
+          {/* Top Header */}
+          <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <MessageSquareWarning className="w-4 h-4 text-amber-400" />
+                <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                  Member &amp; Parent Grievance &amp; Feedback Module ({currentRole}
+                  {lockedCampus ? ` — ${lockedCampus} Campus` : ' — Whole School'})
+                </span>
+              </div>
+              <h2 className="text-lg font-bold text-white mt-0.5">
+                Feedback &amp; Complaint Register (Linked to Member Profile, Route, Vehicle &amp; Driver)
+              </h2>
+              <p className="text-xs text-slate-300 mt-1">
+                Log grievances or feedback received from members or their parents. Automatically linked to the member&apos;s profile under the <strong>Complaint &amp; Feedback</strong> tab and surfaced on Dashboards with Pending &amp; Resolved filters.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setSubModule('directory')}
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 cursor-pointer"
+              >
+                &larr; Back to Directory
+              </button>
+            </div>
+          </div>
+
+          {/* KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Total Complaints &amp; Feedback
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-slate-900">
+                  {filteredComplaintsList.length}
+                </span>
+                <span className="text-xs font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md">
+                  {lockedCampus ? `${lockedCampus} Campus` : 'All Campuses'}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-rose-50/70 rounded-2xl border border-rose-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-rose-700">
+                Urgent Seriousness
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-rose-900">
+                  {filteredComplaintsList.filter(c => c.seriousness === 'Urgent').length}
+                </span>
+                <span className="text-[11px] font-bold text-rose-800 bg-white px-2 py-0.5 rounded-md border border-rose-200">
+                  {
+                    filteredComplaintsList.filter(
+                      c => c.seriousness === 'Urgent' && c.status === 'Pending'
+                    ).length
+                  }{' '}
+                  Pending
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-amber-50/70 rounded-2xl border border-amber-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-800">
+                Pending Action
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-amber-950">
+                  {filteredComplaintsList.filter(c => c.status === 'Pending').length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCompStatusFilter('Pending')}
+                  className="text-[11px] font-bold text-amber-900 underline cursor-pointer"
+                >
+                  Filter Pending
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-emerald-50/70 rounded-2xl border border-emerald-200 p-4 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-800">
+                Resolved Records
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-2xl font-black text-emerald-950">
+                  {filteredComplaintsList.filter(c => c.status === 'Resolved').length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCompStatusFilter('Resolved')}
+                  className="text-[11px] font-bold text-emerald-900 underline cursor-pointer"
+                >
+                  Filter Resolved
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Log New Complaint / Feedback Form */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5">
+            <h3 className="text-sm font-black text-slate-900 mb-3 flex items-center gap-2">
+              <Plus className="w-4 h-4 text-amber-500" />
+              <span>Log New Grievance, Complaint or Parent/Member Feedback</span>
+            </h3>
+
+            <form onSubmit={e => handleSubmitComplaintForm(e)} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="md:col-span-2">
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Select Linked Member (Student / Staff) *
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={compMemberSearch}
+                      onChange={e => setCompMemberSearch(e.target.value)}
+                      placeholder="Quick search member..."
+                      className="w-40 p-2.5 border border-slate-300 rounded-xl bg-slate-50 text-xs"
+                    />
+                    <select
+                      value={compMemberId}
+                      onChange={e => handleSelectComplaintMember(e.target.value)}
+                      className="flex-1 p-2.5 border border-slate-300 rounded-xl bg-white font-semibold text-slate-900"
+                    >
+                      {campusScopedStudentsForComplaints
+                        .filter(s => {
+                          if (!compMemberSearch.trim()) return true;
+                          const q = compMemberSearch.toLowerCase();
+                          return (
+                            s.name.toLowerCase().includes(q) ||
+                            s.admissionNo.toLowerCase().includes(q) ||
+                            (s.routeCode || '').toLowerCase().includes(q)
+                          );
+                        })
+                        .map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} ({s.admissionNo}) — {s.class}-{s.section} • Campus:{' '}
+                            {s.campus || 'Sr'} • Route {s.routeCode}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Seriousness Level *
+                  </label>
+                  <select
+                    value={compSeriousness}
+                    onChange={e => setCompSeriousness(e.target.value as ComplaintSeriousness)}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-bold text-slate-900"
+                  >
+                    <option value="Urgent">Urgent (Immediate Action Required)</option>
+                    <option value="General">General (Routine Transport Concern)</option>
+                    <option value="Feedback">Feedback (Suggestion / Appreciation)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Date Received *</label>
+                  <input
+                    type="date"
+                    value={compDate}
+                    max={!isAdmin ? todayStr : undefined}
+                    onChange={e => setCompDate(e.target.value)}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-semibold"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Linked Route *</label>
+                  <select
+                    value={compRouteId}
+                    onChange={e => {
+                      const nextId = e.target.value;
+                      setCompRouteId(nextId);
+                      const rt = routes.find(r => r.id === nextId || r.code === nextId);
+                      if (rt) {
+                        setCompVehicleNumber(rt.vehicleNumber || '');
+                        const veh = vehicles.find(
+                          v => v.id === rt.vehicleId || v.registrationNumber === rt.vehicleNumber
+                        );
+                        setCompDriverName(
+                          rt.driverName || veh?.assignedDriverName || 'Assigned Driver'
+                        );
+                      }
+                    }}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-semibold"
+                  >
+                    {routes.map(r => (
+                      <option key={r.id} value={r.id}>
+                        {r.code} — {r.name} ({r.vehicleNumber})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Vehicle *</label>
+                  <select
+                    value={compVehicleNumber}
+                    onChange={e => {
+                      const nextVeh = e.target.value;
+                      setCompVehicleNumber(nextVeh);
+                      const veh = vehicles.find(v => v.registrationNumber === nextVeh);
+                      if (veh?.assignedDriverName) {
+                        setCompDriverName(veh.assignedDriverName);
+                      }
+                    }}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-semibold"
+                  >
+                    <option value="">Select Vehicle</option>
+                    {vehicles.map(v => (
+                      <option key={v.id} value={v.registrationNumber}>
+                        {v.registrationNumber} ({v.type})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Driver Name *</label>
+                  <input
+                    type="text"
+                    value={compDriverName}
+                    onChange={e => setCompDriverName(e.target.value)}
+                    placeholder="Driver Name..."
+                    list="complaint-drivers-list"
+                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-semibold"
+                  />
+                  <datalist id="complaint-drivers-list">
+                    {employees
+                      .filter(emp => emp.role === 'Driver')
+                      .map(emp => (
+                        <option key={emp.id} value={emp.name} />
+                      ))}
+                  </datalist>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="md:col-span-2">
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Words of Member / Parent (Exact Grievance or Feedback Statement) *
+                  </label>
+                  <textarea
+                    rows={2}
+                    required
+                    value={compWordsOfMember}
+                    onChange={e => setCompWordsOfMember(e.target.value)}
+                    placeholder="Write the exact words/concern shared by the member or parent (e.g., Bus arrived 12 minutes early at stop without horn, or request for stop timing coordination)..."
+                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white font-medium"
+                  />
+                </div>
+
+                <div className="flex flex-col justify-between">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Initial Action / Resolution Note (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={compActionTaken}
+                      onChange={e => setCompActionTaken(e.target.value)}
+                      placeholder="Leave blank to keep status Pending..."
+                      className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="mt-2 w-full py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-xs cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <Plus className="w-4 h-4 text-amber-400" />
+                    <span>{submitting ? 'Saving...' : 'Save Complaint / Feedback'}</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          {/* Filters & List */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                {(['all', 'Pending', 'Resolved'] as const).map(st => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setCompStatusFilter(st)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                      compStatusFilter === st
+                        ? 'bg-slate-900 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {st === 'all' ? 'All Status' : st}
+                  </button>
+                ))}
+              </div>
+
+              <select
+                value={compSeriousnessFilter}
+                onChange={e => setCompSeriousnessFilter(e.target.value as any)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800"
+              >
+                <option value="all">Seriousness: All</option>
+                <option value="Urgent">Urgent</option>
+                <option value="General">General</option>
+                <option value="Feedback">Feedback</option>
+              </select>
+
+              <select
+                value={compCampusFilter}
+                disabled={Boolean(lockedCampus)}
+                onChange={e => setCompCampusFilter(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 disabled:opacity-60"
+              >
+                {!lockedCampus && <option value="all">Campus: Both (Sr &amp; Jr)</option>}
+                {campuses
+                  .filter(c => !lockedCampus || c.code.toLowerCase() === lockedCampus.toLowerCase())
+                  .map(c => (
+                    <option key={c.id} value={c.code}>
+                      {c.name} ({c.code})
+                    </option>
+                  ))}
+              </select>
+
+              <select
+                value={compRouteFilter}
+                onChange={e => setCompRouteFilter(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800"
+              >
+                <option value="all">All Routes</option>
+                {routes.map(r => (
+                  <option key={r.id} value={r.id}>
+                    {r.code} — {r.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <input
+              type="text"
+              value={compSearchQuery}
+              onChange={e => setCompSearchQuery(e.target.value)}
+              placeholder="Search member, words, driver, vehicle..."
+              className="px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium w-full sm:w-64"
+            />
+          </div>
+
+          {/* Complaints Table */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase text-[11px]">
+                    <th className="p-3.5">Date &amp; Seriousness</th>
+                    <th className="p-3.5">Linked Member &amp; Campus</th>
+                    <th className="p-3.5">Route, Vehicle &amp; Driver</th>
+                    <th className="p-3.5">Words of Member / Parent</th>
+                    <th className="p-3.5">Resolution / Action Taken</th>
+                    <th className="p-3.5 text-center">Status</th>
+                    <th className="p-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {filteredComplaintsList.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-10 text-center text-slate-400 font-medium">
+                        No complaints or feedback records match the selected filters.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredComplaintsList.map(c => (
+                      <tr
+                        key={c.id}
+                        className={`hover:bg-slate-50/80 ${
+                          c.seriousness === 'Urgent' && c.status === 'Pending'
+                            ? 'bg-rose-50/35'
+                            : ''
+                        }`}
+                      >
+                        <td className="p-3.5 whitespace-nowrap">
+                          <div className="font-mono font-bold text-slate-900">{c.date}</div>
+                          <span
+                            className={`mt-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                              c.seriousness === 'Urgent'
+                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                : c.seriousness === 'General'
+                                ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                : 'bg-sky-100 text-sky-900 border border-sky-300'
+                            }`}
+                          >
+                            {c.seriousness}
+                          </span>
+                        </td>
+
+                        <td className="p-3.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setProfileMemberId(c.memberId);
+                              setProfileTab('complaints');
+                            }}
+                            className="text-left group cursor-pointer"
+                          >
+                            <div className="font-bold text-slate-900 group-hover:text-amber-600 underline decoration-slate-300">
+                              {c.memberName}
+                            </div>
+                            <div className="text-[11px] text-slate-500 font-mono">
+                              {c.admissionNo} • {c.className}-{c.section} • Campus: {c.campus || 'Sr'}
+                            </div>
+                            {c.phone && (
+                              <div className="text-[11px] text-indigo-600 font-mono">{c.phone}</div>
+                            )}
+                          </button>
+                        </td>
+
+                        <td className="p-3.5">
+                          <div className="font-bold text-slate-900">
+                            Route: <span className="font-mono">{c.routeCode || '—'}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-600">
+                            Vehicle: <strong>{c.vehicleNumber || '—'}</strong>
+                          </div>
+                          <div className="text-[11px] text-slate-600">
+                            Driver: <strong>{c.driverName || '—'}</strong>
+                          </div>
+                        </td>
+
+                        <td className="p-3.5 max-w-md">
+                          <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 font-medium italic">
+                            &ldquo;{c.wordsOfMember}&rdquo;
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-1">
+                            Logged by {c.receivedByName || c.receivedByRole || 'Staff'}
+                          </div>
+                        </td>
+
+                        <td className="p-3.5 max-w-xs">
+                          {c.actionTaken ? (
+                            <div className="text-[11px] text-emerald-950 bg-emerald-50 border border-emerald-200 p-2 rounded-xl">
+                              <div className="font-bold">{c.actionTaken}</div>
+                              {c.resolvedBy && (
+                                <div className="text-[10px] text-emerald-700 mt-0.5">
+                                  By {c.resolvedBy} {c.resolvedAt ? `on ${c.resolvedAt}` : ''}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-slate-400 italic text-[11px]">
+                              Awaiting resolution notes
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="p-3.5 text-center">
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${
+                              c.status === 'Resolved'
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                : 'bg-amber-100 text-amber-900 border border-amber-300'
+                            }`}
+                          >
+                            {c.status}
+                          </span>
+                        </td>
+
+                        <td className="p-3.5 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setProfileMemberId(c.memberId);
+                                setProfileTab('complaints');
+                              }}
+                              className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-[11px] font-bold cursor-pointer"
+                            >
+                              Member Profile
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResolveComplaintTarget(c);
+                                setResolveActionNotes(c.actionTaken || '');
+                              }}
+                              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                            >
+                              {c.status === 'Resolved' ? 'Update Action' : 'Resolve'}
+                            </button>
+                            {isAdmin && onDeleteComplaint && (
+                              <button
+                                type="button"
+                                onClick={() => onDeleteComplaint(c.id)}
+                                className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                                title="Delete Complaint (Admin Only)"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : subModule === 'requests' ? (
         <div className="space-y-4">
           <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 shadow-xs space-y-3">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -2689,6 +3410,13 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   <Gavel className="w-3.5 h-3.5 text-rose-400" />
                   <span>Discipline Irregularity Reporting</span>
                 </button>
+                <button
+                  onClick={() => setProfileTab('complaints')}
+                  className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl text-xs border border-slate-700 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MessageSquareWarning className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Complaint &amp; Feedback ({memberComplaints.length})</span>
+                </button>
                 {isAdmin && (
                   <button
                     onClick={() => {
@@ -2713,6 +3441,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 { key: 'fee_structure', label: '2- Fee Structure' },
                 { key: 'followups', label: `Fee Follow-Ups (${memberFollowUps.length})` },
                 { key: 'discipline', label: `Discipline & Behaviour (${memberDisciplines.length})` },
+                { key: 'complaints', label: `Complaint & Feedback (${memberComplaints.length})` },
                 { key: 'attendance', label: `3- Attendance (${memberAttendance.length})` },
                 { key: 'documents', label: `4- Documents (${(activeProfileMember.documents || []).length})` },
                 { key: 'special', label: '5- Special (Suspension & Permission)' },
@@ -3167,6 +3896,206 @@ export const MembersView: React.FC<MembersViewProps> = ({
                           <tr>
                             <td colSpan={isAdmin ? 5 : 4} className="py-6 text-center text-slate-400">
                               No transit discipline concerns recorded for this member.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB: COMPLAINT & FEEDBACK (With Dates & Pattern Analysis) */}
+              {profileTab === 'complaints' && (
+                <div className="space-y-5">
+                  {/* Pattern Summary Strip */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                      <span className="text-[11px] font-bold uppercase text-slate-500">
+                        Total Records
+                      </span>
+                      <div className="text-xl font-black text-slate-900 mt-0.5">
+                        {memberComplaints.length}
+                      </div>
+                      <span className="text-[10px] text-slate-500">
+                        Complaints &amp; Feedback History
+                      </span>
+                    </div>
+                    <div className="p-3.5 rounded-xl bg-rose-50/70 border border-rose-200">
+                      <span className="text-[11px] font-bold uppercase text-rose-700">
+                        Urgent Seriousness
+                      </span>
+                      <div className="text-xl font-black text-rose-900 mt-0.5">
+                        {memberComplaints.filter(c => c.seriousness === 'Urgent').length}
+                      </div>
+                      <span className="text-[10px] text-rose-700">High-priority grievances</span>
+                    </div>
+                    <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200">
+                      <span className="text-[11px] font-bold uppercase text-amber-800">
+                        Pending Action
+                      </span>
+                      <div className="text-xl font-black text-amber-950 mt-0.5">
+                        {memberComplaints.filter(c => c.status === 'Pending').length}
+                      </div>
+                      <span className="text-[10px] text-amber-800">Awaiting resolution</span>
+                    </div>
+                    <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                      <span className="text-[11px] font-bold uppercase text-emerald-800">
+                        Resolved
+                      </span>
+                      <div className="text-xl font-black text-emerald-950 mt-0.5">
+                        {memberComplaints.filter(c => c.status === 'Resolved').length}
+                      </div>
+                      <span className="text-[10px] text-emerald-800">Action taken &amp; closed</span>
+                    </div>
+                  </div>
+
+                  {/* Inline Form to Log Complaint / Feedback for this Member */}
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                    <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                      <MessageSquareWarning className="w-4 h-4 text-amber-500" />
+                      <span>
+                        Log New Complaint or Feedback for {activeProfileMember.name} (Linked to Route{' '}
+                        {activeProfileMember.routeCode})
+                      </span>
+                    </h4>
+                    <form
+                      onSubmit={e => handleSubmitComplaintForm(e, activeProfileMember)}
+                      className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs"
+                    >
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">Date *</label>
+                        <input
+                          type="date"
+                          value={compDate}
+                          max={!isAdmin ? todayStr : undefined}
+                          onChange={e => setCompDate(e.target.value)}
+                          className="w-full p-2 border border-slate-300 rounded-xl bg-white font-semibold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">Seriousness *</label>
+                        <select
+                          value={compSeriousness}
+                          onChange={e =>
+                            setCompSeriousness(e.target.value as ComplaintSeriousness)
+                          }
+                          className="w-full p-2 border border-slate-300 rounded-xl bg-white font-bold"
+                        >
+                          <option value="Urgent">Urgent</option>
+                          <option value="General">General</option>
+                          <option value="Feedback">Feedback</option>
+                        </select>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Action Taken / Resolution (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={compActionTaken}
+                          onChange={e => setCompActionTaken(e.target.value)}
+                          placeholder="Leave blank if Pending action..."
+                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Words of Member / Parent (Exact Statement) *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={compWordsOfMember}
+                          onChange={e => setCompWordsOfMember(e.target.value)}
+                          placeholder="Write verbatim grievance or feedback received from member/parent..."
+                          className="w-full p-2 border border-slate-300 rounded-xl bg-white font-medium"
+                        />
+                      </div>
+                      <div className="flex items-end">
+                        <button
+                          type="submit"
+                          disabled={submitting}
+                          className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold rounded-xl cursor-pointer"
+                        >
+                          {submitting ? 'Saving...' : '+ Add Record'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+
+                  {/* Chronological History Table */}
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
+                          <th className="py-2.5 px-4">Date &amp; Seriousness</th>
+                          <th className="py-2.5 px-3">Route, Vehicle &amp; Driver</th>
+                          <th className="py-2.5 px-3">Words of Member / Parent</th>
+                          <th className="py-2.5 px-3">Resolution / Action Taken</th>
+                          <th className="py-2.5 px-3 text-center">Status</th>
+                          <th className="py-2.5 px-3 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {memberComplaints.map(c => (
+                          <tr key={c.id} className="hover:bg-slate-50">
+                            <td className="py-2.5 px-4 whitespace-nowrap">
+                              <div className="font-mono font-bold text-slate-900">{c.date}</div>
+                              <span
+                                className={`mt-0.5 inline-block px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                                  c.seriousness === 'Urgent'
+                                    ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                    : c.seriousness === 'General'
+                                    ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                    : 'bg-sky-100 text-sky-900 border border-sky-300'
+                                }`}
+                              >
+                                {c.seriousness}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-[11px]">
+                              <div className="font-bold text-slate-900">Route: {c.routeCode}</div>
+                              <div className="text-slate-600">Vehicle: {c.vehicleNumber}</div>
+                              <div className="text-slate-600">Driver: {c.driverName}</div>
+                            </td>
+                            <td className="py-2.5 px-3 font-medium text-slate-900 italic max-w-xs">
+                              &ldquo;{c.wordsOfMember}&rdquo;
+                            </td>
+                            <td className="py-2.5 px-3 text-emerald-800 font-medium">
+                              {c.actionTaken || (
+                                <span className="text-slate-400 italic">Pending action</span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-center">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  c.status === 'Resolved'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-amber-100 text-amber-900'
+                                }`}
+                              >
+                                {c.status}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setResolveComplaintTarget(c);
+                                  setResolveActionNotes(c.actionTaken || '');
+                                }}
+                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                              >
+                                {c.status === 'Resolved' ? 'Edit Note' : 'Resolve'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {memberComplaints.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="py-8 text-center text-slate-400">
+                              No complaints or feedback recorded for this member yet.
                             </td>
                           </tr>
                         )}
@@ -4914,6 +5843,107 @@ export const MembersView: React.FC<MembersViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* =====================================================================
+          MODAL: RESOLVE / UPDATE COMPLAINT OR FEEDBACK ACTION NOTES
+         ===================================================================== */}
+      {resolveComplaintTarget && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                  {resolveComplaintTarget.seriousness} Complaint / Feedback
+                </span>
+                <h3 className="text-sm font-black text-white">
+                  Record Action Taken &amp; Mark Resolved
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResolveComplaintTarget(null)}
+                className="text-slate-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async e => {
+                e.preventDefault();
+                if (!onResolveComplaint) return;
+                setSubmitting(true);
+                try {
+                  await onResolveComplaint(resolveComplaintTarget.id, {
+                    status: 'Resolved',
+                    actionTaken: resolveActionNotes.trim() || 'Resolved after review with driver and parent.',
+                    resolvedBy:
+                      currentRole === 'Transport Assistant'
+                        ? `Transport Assistant (${resolveComplaintTarget.campus || 'Sr'})`
+                        : currentRole === 'Transport Coordinator'
+                        ? 'Transport Coordinator'
+                        : 'Transport Admin',
+                  });
+                  setComplaintFeedbackBanner(
+                    `Marked complaint/feedback for ${resolveComplaintTarget.memberName} as Resolved.`
+                  );
+                  setResolveComplaintTarget(null);
+                  setTimeout(() => setComplaintFeedbackBanner(null), 3500);
+                } finally {
+                  setSubmitting(false);
+                }
+              }}
+              className="p-5 space-y-4 text-xs"
+            >
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="font-bold text-slate-900">
+                  {resolveComplaintTarget.memberName} ({resolveComplaintTarget.admissionNo})
+                </div>
+                <div className="text-[11px] text-slate-600">
+                  Route: {resolveComplaintTarget.routeCode} • Vehicle:{' '}
+                  {resolveComplaintTarget.vehicleNumber} • Driver:{' '}
+                  {resolveComplaintTarget.driverName}
+                </div>
+                <div className="italic text-slate-800 pt-1">
+                  &ldquo;{resolveComplaintTarget.wordsOfMember}&rdquo;
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Action Taken / Resolution Remarks *
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={resolveActionNotes}
+                  onChange={e => setResolveActionNotes(e.target.value)}
+                  placeholder="Describe action taken (e.g. Counselled driver, verified stop arrival timing, informed parent on phone)..."
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setResolveComplaintTarget(null)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl cursor-pointer shadow-xs"
+                >
+                  {submitting ? 'Saving...' : 'Mark Resolved & Save Action'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

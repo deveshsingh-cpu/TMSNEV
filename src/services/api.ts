@@ -6,7 +6,7 @@ import {
   ExpenseRecord, DesignationMaster, TripMaster, CampusMaster, MemberTypeMaster, CandidateResume,
   VehicleAssignmentRecord, DisciplineRecord, ExpenseHead, IncomeHead, IncomeRecord,
   StaffAttendanceRecord, StaffAttendanceStatus, StaffAdvanceRecord, StaffPayrollRecord, HolidayRecord,
-  SystemUser
+  SystemUser, AbsenteeCallRecord, MemberComplaintRecord, UserRole
 } from '../types/index.js';
 
 export interface SheetsTabInfo {
@@ -344,7 +344,9 @@ export const api = {
     const villages: Village[] = await parseApiJson(res, 'Failed to fetch stops');
     return villages.flatMap(v => v.stops.map(s => ({ ...s, villageName: v.name })));
   },
-  saveVillage: async (data: Partial<Village>): Promise<Village> => {
+  saveVillage: async (
+    data: Partial<Village> & { effectiveFromDate?: string; acknowledged?: boolean }
+  ): Promise<Village> => {
     const res = await fetch('/api/masters/villages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1104,6 +1106,8 @@ export const api = {
     distanceRoute?: string;
     selectedMonths?: string[];
     monthlyFee?: number;
+    effectiveFromDate?: string;
+    acknowledged?: boolean;
   }) => {
     const res = await fetch('/api/masters/fees-setup', {
       method: 'POST',
@@ -1170,6 +1174,76 @@ export const api = {
       throw new Error(err.error || 'Failed to save Admin review');
     }
     return res.json();
+  },
+
+  // Attendance Module: Call Absentees & Expected Return Date
+  getAbsenteeCalls: async (date?: string, campus?: string): Promise<AbsenteeCallRecord[]> => {
+    const sp = new URLSearchParams();
+    if (date) sp.set('date', date);
+    if (campus) sp.set('campus', campus);
+    const res = await fetch(`/api/absentee-calls?${sp.toString()}`);
+    return parseApiJson(res, 'Failed to fetch absentee call records');
+  },
+  saveAbsenteeCall: async (
+    payload: Partial<AbsenteeCallRecord> & {
+      studentId: string;
+      date: string;
+      callerRole?: UserRole;
+      callerName?: string;
+      clearExpectedReturn?: boolean;
+    }
+  ): Promise<AbsenteeCallRecord> => {
+    const res = await fetch('/api/absentee-calls', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return parseApiJson(res, 'Failed to save absentee call follow-up');
+  },
+  confirmEarlyArrival: async (payload: {
+    studentId: string;
+    date: string;
+    confirmedBy: string;
+    remarks?: string;
+  }): Promise<{ student: StudentMember; callRecord?: AbsenteeCallRecord }> => {
+    const res = await fetch('/api/absentee-calls/confirm-early-arrival', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return parseApiJson(res, 'Failed to confirm early arrival');
+  },
+
+  // Feedback & Complaint Module
+  getComplaints: async (campus?: string, status?: string): Promise<MemberComplaintRecord[]> => {
+    const sp = new URLSearchParams();
+    if (campus) sp.set('campus', campus);
+    if (status) sp.set('status', status);
+    const res = await fetch(`/api/complaints?${sp.toString()}`);
+    return parseApiJson(res, 'Failed to fetch complaints and feedback');
+  },
+  saveComplaint: async (payload: Partial<MemberComplaintRecord>): Promise<MemberComplaintRecord> => {
+    const res = await fetch('/api/complaints', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return parseApiJson(res, 'Failed to save complaint / feedback');
+  },
+  resolveComplaint: async (
+    id: string,
+    payload: { status: 'Pending' | 'Resolved'; actionTaken: string; resolvedBy?: string }
+  ): Promise<MemberComplaintRecord> => {
+    const res = await fetch(`/api/complaints/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return parseApiJson(res, 'Failed to update complaint resolution');
+  },
+  deleteComplaint: async (id: string): Promise<{ success: boolean }> => {
+    const res = await fetch(`/api/complaints/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    return parseApiJson(res, 'Failed to delete complaint record');
   },
 };
 

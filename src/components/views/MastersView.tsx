@@ -42,7 +42,9 @@ interface MastersViewProps {
   onRemoveTrip: (id: string) => Promise<any>;
   onSaveDesignation: (des: Partial<DesignationMaster>) => Promise<any>;
   onRemoveDesignation: (id: string) => Promise<any>;
-  onSaveVillage: (data: Partial<Village>) => Promise<any>;
+  onSaveVillage: (
+    data: Partial<Village> & { effectiveFromDate?: string; acknowledged?: boolean }
+  ) => Promise<any>;
   onDeleteVillage: (id: string) => Promise<any>;
   onSaveVehicle: (data: Partial<Vehicle>) => Promise<any>;
   onDeleteVehicle: (id: string) => Promise<any>;
@@ -67,6 +69,8 @@ interface MastersViewProps {
     distanceRoute?: string;
     selectedMonths?: SessionMonthCode[];
     monthlyFee?: number;
+    effectiveFromDate?: string;
+    acknowledged?: boolean;
   }) => Promise<any>;
 }
 
@@ -165,6 +169,36 @@ export const MastersView: React.FC<MastersViewProps> = ({
   }, [initialSubTab]);
 
   // --- Fees Setup (Session Months & Edit Transport Fees) State ---
+  const todayIstStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+
+  const formatEffectiveDateDisplay = (dateStr?: string) => {
+    const clean = (dateStr || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean || '—';
+    const [yyyy, mm, dd] = clean.split('-');
+    return `${dd}/${mm}/${yyyy}`;
+  };
+
+  const formatEffectiveMonthLabel = (dateStr?: string) => {
+    const clean = (dateStr || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) return 'Upcoming Month';
+    const [yyyy, mm] = clean.split('-');
+    const monthNames: Record<string, string> = {
+      '01': 'January',
+      '02': 'February',
+      '03': 'March',
+      '04': 'April',
+      '05': 'May',
+      '06': 'June',
+      '07': 'July',
+      '08': 'August',
+      '09': 'September',
+      '10': 'October',
+      '11': 'November',
+      '12': 'December',
+    };
+    return `${monthNames[mm] || mm} ${yyyy}`;
+  };
+
   const defaultChainpurVil =
     villages.find((v) => v.name.toLowerCase() === 'chainpur') || villages[0];
   const [feeSetupVillageId, setFeeSetupVillageId] = useState<string>(defaultChainpurVil?.id || '');
@@ -180,11 +214,22 @@ export const MastersView: React.FC<MastersViewProps> = ({
       ? defaultChainpurVil.selectedMonths
       : config.attachedSessionMonths && config.attachedSessionMonths.length > 0
       ? config.attachedSessionMonths
-      : ['apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct']
+      : ['nov', 'dec', 'jan', 'feb', 'mar']
   );
   const [feeSetupMonthlyFee, setFeeSetupMonthlyFee] = useState<number>(
-    defaultChainpurVil?.monthlyRate ?? 525
+    defaultChainpurVil?.stops?.[0]?.fee ?? defaultChainpurVil?.monthlyRate ?? 525
   );
+  const [feeSetupEffectiveDate, setFeeSetupEffectiveDate] = useState<string>(
+    defaultChainpurVil?.effectiveFromDate || todayIstStr
+  );
+  const [villageFeeEffectiveDate, setVillageFeeEffectiveDate] = useState<string>(todayIstStr);
+  const [pendingFeeChangeAckModal, setPendingFeeChangeAckModal] = useState<{
+    source: 'fees_setup' | 'village_modal';
+    targetName: string;
+    feeChanges: { stopName: string; oldFee: number; newFee: number }[];
+    effectiveDate: string;
+    acknowledged: boolean;
+  } | null>(null);
   const [sessionGlobalMonths, setSessionGlobalMonths] = useState<SessionMonthCode[]>(
     config.attachedSessionMonths && config.attachedSessionMonths.length > 0
       ? config.attachedSessionMonths
@@ -218,6 +263,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
         : ['nov', 'dec', 'jan', 'feb', 'mar']) as SessionMonthCode[];
     setFeeSetupMonths(months);
     setFeeSetupMonthlyFee(stp?.fee ?? vil.monthlyRate ?? 525);
+    setFeeSetupEffectiveDate(stp?.effectiveFromDate || vil.effectiveFromDate || todayIstStr);
   };
 
   // --- User & Password Management State ---
@@ -691,11 +737,13 @@ export const MastersView: React.FC<MastersViewProps> = ({
       setVillageName(vil.name);
       setVillageDistance(vil.distanceKm);
       setVillageStops(vil.stops.map(s => ({ id: s.id, name: s.name, fee: s.fee, distanceKm: s.distanceKm })));
+      setVillageFeeEffectiveDate(vil.effectiveFromDate || todayIstStr);
     } else {
       setEditingVillageId(null);
       setVillageName('');
       setVillageDistance(5);
       setVillageStops([{ name: '', fee: 700, distanceKm: 5 }]);
+      setVillageFeeEffectiveDate(todayIstStr);
     }
     setIsVillageModalOpen(true);
   };
@@ -715,26 +763,70 @@ export const MastersView: React.FC<MastersViewProps> = ({
     setVillageStops(prev => prev.filter((_, i) => i !== index));
   };
 
+  const getVillageModalFeeChanges = (): { stopName: string; oldFee: number; newFee: number }[] => {
+    if (!editingVillageId) return [];
+    const existingVil = villages.find(v => v.id === editingVillageId);
+    if (!existingVil) return [];
+    const diffs: { stopName: string; oldFee: number; newFee: number }[] = [];
+    for (const s of villageStops) {
+      const matchedOld = existingVil.stops.find(
+        os => (s.id && os.id === s.id) || os.name.trim().toLowerCase() === s.name.trim().toLowerCase()
+      );
+      if (matchedOld) {
+        const oldFee = Number(matchedOld.fee ?? existingVil.monthlyRate ?? 0);
+        const newFee = s.fee !== undefined && s.fee !== null && !isNaN(Number(s.fee)) ? Math.max(0, Number(s.fee)) : 0;
+        if (oldFee !== newFee) {
+          diffs.push({
+            stopName: s.name.trim() || matchedOld.name,
+            oldFee,
+            newFee,
+          });
+        }
+      }
+    }
+    return diffs;
+  };
+
+  const executeSaveVillageWithEffectiveDate = async (effectiveFromDate?: string, acknowledged?: boolean) => {
+    await runMasterAction(async () => {
+      await onSaveVillage({
+        id: editingVillageId || undefined,
+        name: villageName.trim(),
+        distanceKm: Number(villageDistance),
+        effectiveFromDate,
+        acknowledged,
+        stops: villageStops.map((s, idx) => ({
+          id: s.id || `stp-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+          name: s.name.trim() || `Stop ${idx + 1}`,
+          fee: s.fee !== undefined && s.fee !== null && !isNaN(Number(s.fee)) ? Math.max(0, Number(s.fee)) : 0,
+          distanceKm: Number(s.distanceKm) || Number(villageDistance),
+          effectiveFromDate,
+          effectiveFromMonth: effectiveFromDate ? effectiveFromDate.slice(0, 7) : undefined,
+        })),
+      });
+      setIsVillageModalOpen(false);
+      setPendingFeeChangeAckModal(null);
+    });
+  };
+
   const handleSaveVillageSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!villageName.trim()) {
       setMasterError('Village name is required.');
       return;
     }
-    await runMasterAction(async () => {
-      await onSaveVillage({
-        id: editingVillageId || undefined,
-        name: villageName.trim(),
-        distanceKm: Number(villageDistance),
-        stops: villageStops.map((s, idx) => ({
-          id: s.id || `stp-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
-          name: s.name.trim() || `Stop ${idx + 1}`,
-          fee: s.fee !== undefined && s.fee !== null && !isNaN(Number(s.fee)) ? Math.max(0, Number(s.fee)) : 0,
-          distanceKm: Number(s.distanceKm) || Number(villageDistance),
-        })),
+    const feeDiffs = getVillageModalFeeChanges();
+    if (feeDiffs.length > 0) {
+      setPendingFeeChangeAckModal({
+        source: 'village_modal',
+        targetName: villageName.trim(),
+        feeChanges: feeDiffs,
+        effectiveDate: villageFeeEffectiveDate || todayIstStr,
+        acknowledged: false,
       });
-      setIsVillageModalOpen(false);
-    });
+      return;
+    }
+    await executeSaveVillageWithEffectiveDate(villageFeeEffectiveDate || todayIstStr, true);
   };
 
   // Calculate Route Nomenclature Preview: Campus/VehicleLast4/Trip
@@ -2605,6 +2697,29 @@ export const MastersView: React.FC<MastersViewProps> = ({
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!isAdmin) return;
+                const currentVil = villages.find((v) => v.id === feeSetupVillageId);
+                const currentStp =
+                  currentVil?.stops?.find((s) => s.id === feeSetupStopId) || currentVil?.stops?.[0];
+                const savedOldFee = Number(currentStp?.fee ?? currentVil?.monthlyRate ?? 0);
+                const nextFeeVal = Math.max(0, Number(feeSetupMonthlyFee) || 0);
+
+                if (currentVil && savedOldFee !== nextFeeVal) {
+                  setPendingFeeChangeAckModal({
+                    source: 'fees_setup',
+                    targetName: feeSetupTransportName.trim() || currentVil.name,
+                    feeChanges: [
+                      {
+                        stopName: currentStp?.name || currentVil.name,
+                        oldFee: savedOldFee,
+                        newFee: nextFeeVal,
+                      },
+                    ],
+                    effectiveDate: feeSetupEffectiveDate || todayIstStr,
+                    acknowledged: false,
+                  });
+                  return;
+                }
+
                 runMasterAction(async () => {
                   if (!onUpdateFeesSetup) return;
                   await onUpdateFeesSetup({
@@ -2613,10 +2728,12 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     transportName: feeSetupTransportName.trim(),
                     distanceRoute: feeSetupDistanceRoute.trim(),
                     selectedMonths: feeSetupMonths,
-                    monthlyFee: Number(feeSetupMonthlyFee) || 0,
+                    monthlyFee: nextFeeVal,
+                    effectiveFromDate: feeSetupEffectiveDate || todayIstStr,
+                    acknowledged: true,
                   });
                   setFeeSetupSavedMsg(
-                    `Updated Transport Fees for "${feeSetupTransportName}": ₹${Number(feeSetupMonthlyFee) || 0}/mo × ${feeSetupMonths.length} months = ₹${(Number(feeSetupMonthlyFee) || 0) * feeSetupMonths.length}.`
+                    `Updated Transport Fees for "${feeSetupTransportName}": ₹${nextFeeVal}/mo × ${feeSetupMonths.length} months = ₹${nextFeeVal * feeSetupMonths.length}.`
                   );
                 });
               }}
@@ -2739,7 +2856,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 </div>
 
                 {/* Monthly Fees * */}
-                <div className="md:col-span-3">
+                <div className="md:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-2">
                     Monthly Fees <span className="text-rose-600">*</span>
                   </label>
@@ -2754,8 +2871,23 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   />
                 </div>
 
+                {/* Effective Date (when Monthly Fee is modified) */}
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Effective Date <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    disabled={!isAdmin}
+                    value={feeSetupEffectiveDate}
+                    onChange={(e) => setFeeSetupEffectiveDate(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-sm text-slate-800 focus:outline-none focus:border-slate-400"
+                  />
+                </div>
+
                 {/* Total Fees * */}
-                <div className="md:col-span-3">
+                <div className="md:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-2">
                     Total Fees <span className="text-rose-600">*</span>
                   </label>
@@ -2767,6 +2899,41 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   />
                 </div>
               </div>
+
+              {(() => {
+                const currentVil = villages.find((v) => v.id === feeSetupVillageId);
+                const currentStp =
+                  currentVil?.stops?.find((s) => s.id === feeSetupStopId) || currentVil?.stops?.[0];
+                const savedOldFee = Number(currentStp?.fee ?? currentVil?.monthlyRate ?? 0);
+                const nextFeeVal = Math.max(0, Number(feeSetupMonthlyFee) || 0);
+                if (!currentVil || savedOldFee === nextFeeVal) return null;
+                const isPastDate = feeSetupEffectiveDate < todayIstStr;
+                return isPastDate ? (
+                  <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-bold">Past Effective Date Not Permitted</p>
+                      <p className="text-rose-700 mt-0.5">
+                        Effective date ({formatEffectiveDateDisplay(feeSetupEffectiveDate)}) is from the past and will affect previous entries. Changing Village/Stop monthly fee from a past date is not permitted.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 text-xs flex items-start gap-2.5">
+                    <Calendar className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-bold">Fee Change Effective Date Notice</p>
+                      <p className="text-amber-900 mt-0.5">
+                        From <strong>{formatEffectiveMonthLabel(feeSetupEffectiveDate)}</strong> (as per effective date{' '}
+                        <strong>{formatEffectiveDateDisplay(feeSetupEffectiveDate)}</strong>),{' '}
+                        <strong>₹{nextFeeVal.toLocaleString('en-IN')}/month</strong> (changed from ₹
+                        {savedOldFee.toLocaleString('en-IN')}) will be charged from members of{' '}
+                        <strong>{feeSetupTransportName}</strong>. Clicking Save will ask for your acknowledgment.
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {isAdmin && (
                 <div className="flex justify-end pt-2">
@@ -2824,11 +2991,11 @@ export const MastersView: React.FC<MastersViewProps> = ({
                           .map((m) => m.toUpperCase())
                           .join(', '),
                     },
-                    { header: 'Monthly Fees', accessor: (v) => v.monthlyRate },
+                    { header: 'Monthly Fees', accessor: (v) => v.stops?.[0]?.fee ?? v.monthlyRate ?? 0 },
                     {
                       header: 'Total Session Fees',
                       accessor: (v) =>
-                        (v.monthlyRate || 0) *
+                        (v.stops?.[0]?.fee ?? v.monthlyRate ?? 0) *
                         (v.selectedMonths && v.selectedMonths.length > 0
                           ? v.selectedMonths.length
                           : sessionGlobalMonths.length),
@@ -2862,10 +3029,18 @@ export const MastersView: React.FC<MastersViewProps> = ({
                         v.selectedMonths && v.selectedMonths.length > 0
                           ? v.selectedMonths
                           : sessionGlobalMonths;
-                      const totalFee = (v.monthlyRate || 0) * vMonths.length;
+                      const vRate = v.stops?.[0]?.fee ?? v.monthlyRate ?? 0;
+                      const totalFee = vRate * vMonths.length;
                       return (
                         <tr key={v.id} className="hover:bg-slate-50/80">
-                          <td className="py-3 px-4 font-bold text-slate-900">{v.name}</td>
+                          <td className="py-3 px-4 font-bold text-slate-900">
+                            <div>{v.name}</div>
+                            {v.effectiveFromDate && (
+                              <div className="text-[10px] font-normal text-slate-500">
+                                Effective: {formatEffectiveDateDisplay(v.effectiveFromDate)} ({formatEffectiveMonthLabel(v.effectiveFromDate)})
+                              </div>
+                            )}
+                          </td>
                           <td className="py-3 px-3 text-slate-600">
                             {v.distanceRoute || `School - ${v.name}`}
                           </td>
@@ -2882,7 +3057,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                             </div>
                           </td>
                           <td className="py-3 px-3 font-mono font-bold text-slate-900">
-                            ₹{(v.monthlyRate || 0).toLocaleString('en-IN')}
+                            ₹{vRate.toLocaleString('en-IN')}
                           </td>
                           <td className="py-3 px-3 font-mono font-bold text-emerald-700">
                             ₹{totalFee.toLocaleString('en-IN')}
@@ -4667,6 +4842,54 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 </div>
               </div>
 
+              {(() => {
+                const modalDiffs = getVillageModalFeeChanges();
+                if (modalDiffs.length === 0) return null;
+                const isPast = villageFeeEffectiveDate < todayIstStr;
+                return (
+                  <div className="p-3.5 rounded-2xl bg-amber-50/90 border border-amber-200 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                        <Calendar className="w-4 h-4 text-amber-600" />
+                        <span>Effective Date for Monthly Fee Change *</span>
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={villageFeeEffectiveDate}
+                        onChange={(e) => setVillageFeeEffectiveDate(e.target.value)}
+                        className="px-3 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                    {isPast ? (
+                      <div className="p-2.5 rounded-xl bg-rose-100 border border-rose-300 text-rose-900 text-[11px] font-semibold flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        <span>
+                          Effective date ({formatEffectiveDateDisplay(villageFeeEffectiveDate)}) is from the past, which will affect previous entries — change is not permitted.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="p-2.5 rounded-xl bg-white border border-amber-200 text-slate-800 text-[11px] space-y-1">
+                        {modalDiffs.map((d, i) => (
+                          <p key={i}>
+                            • <strong>{d.stopName}</strong>: From{' '}
+                            <strong className="text-emerald-700">
+                              {formatEffectiveMonthLabel(villageFeeEffectiveDate)}
+                            </strong>{' '}
+                            (as per effective date{' '}
+                            <strong>{formatEffectiveDateDisplay(villageFeeEffectiveDate)}</strong>),{' '}
+                            <strong className="text-emerald-700">
+                              ₹{d.newFee.toLocaleString('en-IN')}/month
+                            </strong>{' '}
+                            (previously ₹{d.oldFee.toLocaleString('en-IN')}) will be charged from members.
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
                 <button
                   type="button"
@@ -4683,6 +4906,183 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Fee Change Effective Date & Mandatory User Acknowledgment Modal */}
+      {pendingFeeChangeAckModal && (
+        <div className="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                  <Calendar className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Confirm Effective Date &amp; Acknowledge Fee Change
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Village / Stop: <strong>{pendingFeeChangeAckModal.targetName}</strong>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingFeeChangeAckModal(null)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1.5">
+                  Select Effective Date for Monthly Fee Change <span className="text-rose-600">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={pendingFeeChangeAckModal.effectiveDate}
+                  onChange={(e) => {
+                    const nextDate = e.target.value;
+                    setPendingFeeChangeAckModal((prev) =>
+                      prev ? { ...prev, effectiveDate: nextDate, acknowledged: false } : null
+                    );
+                    if (pendingFeeChangeAckModal.source === 'fees_setup') {
+                      setFeeSetupEffectiveDate(nextDate);
+                    } else {
+                      setVillageFeeEffectiveDate(nextDate);
+                    }
+                  }}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-900 focus:outline-none focus:border-slate-500"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Current System Date: <strong>{formatEffectiveDateDisplay(todayIstStr)}</strong>
+                </p>
+              </div>
+
+              {!pendingFeeChangeAckModal.effectiveDate ||
+              pendingFeeChangeAckModal.effectiveDate < todayIstStr ? (
+                <div className="p-4 rounded-2xl bg-rose-50 border-2 border-rose-300 text-rose-950 space-y-1.5">
+                  <div className="flex items-center gap-2 font-bold text-sm text-rose-700">
+                    <AlertTriangle className="w-5 h-5 shrink-0" />
+                    <span>Past Effective Date — Change Not Permitted</span>
+                  </div>
+                  <p className="text-xs text-rose-800 leading-relaxed">
+                    The selected Effective Date (
+                    <strong>{formatEffectiveDateDisplay(pendingFeeChangeAckModal.effectiveDate)}</strong>) is from the
+                    past. A past effective date will affect our previous entries and is{' '}
+                    <strong>not permitted</strong>. Please select today&apos;s date or a future effective date to
+                    proceed.
+                  </p>
+                </div>
+              ) : (
+                <div className="p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-200 text-emerald-950 space-y-3">
+                  <div className="flex items-center gap-2 font-bold text-sm text-emerald-800">
+                    <CheckCircle className="w-5 h-5 shrink-0 text-emerald-600" />
+                    <span>Member Billing Notice &amp; Acknowledgment</span>
+                  </div>
+
+                  <div className="space-y-2 bg-white p-3.5 rounded-xl border border-emerald-200 text-slate-800">
+                    {pendingFeeChangeAckModal.feeChanges.map((fc, idx) => (
+                      <p key={idx} className="text-xs leading-relaxed">
+                        From{' '}
+                        <strong className="text-emerald-700 underline">
+                          {formatEffectiveMonthLabel(pendingFeeChangeAckModal.effectiveDate)}
+                        </strong>{' '}
+                        (as per effective date{' '}
+                        <strong>{formatEffectiveDateDisplay(pendingFeeChangeAckModal.effectiveDate)}</strong>),{' '}
+                        <strong className="text-emerald-700 text-sm">
+                          ₹{fc.newFee.toLocaleString('en-IN')}
+                        </strong>{' '}
+                        per month will be charged from members of{' '}
+                        <strong>{fc.stopName || pendingFeeChangeAckModal.targetName}</strong>{' '}
+                        <span className="text-slate-500">
+                          (changed from ₹{fc.oldFee.toLocaleString('en-IN')}/month)
+                        </span>
+                        .
+                      </p>
+                    ))}
+                  </div>
+
+                  <label className="flex items-start gap-2.5 pt-1 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={pendingFeeChangeAckModal.acknowledged}
+                      onChange={(e) =>
+                        setPendingFeeChangeAckModal((prev) =>
+                          prev ? { ...prev, acknowledged: e.target.checked } : null
+                        )
+                      }
+                      className="w-4 h-4 mt-0.5 rounded border-emerald-400 accent-emerald-600 cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-emerald-950">
+                      I acknowledge that from{' '}
+                      {formatEffectiveMonthLabel(pendingFeeChangeAckModal.effectiveDate)} (as per effective date{' '}
+                      {formatEffectiveDateDisplay(pendingFeeChangeAckModal.effectiveDate)}), ₹
+                      {pendingFeeChangeAckModal.feeChanges.map((f) => f.newFee.toLocaleString('en-IN')).join(' / ₹')}{' '}
+                      will be charged from members.
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setPendingFeeChangeAckModal(null)}
+                className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold text-xs cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={
+                  !pendingFeeChangeAckModal.effectiveDate ||
+                  pendingFeeChangeAckModal.effectiveDate < todayIstStr ||
+                  !pendingFeeChangeAckModal.acknowledged
+                }
+                onClick={async () => {
+                  const modalData = pendingFeeChangeAckModal;
+                  if (!modalData || modalData.effectiveDate < todayIstStr || !modalData.acknowledged) {
+                    return;
+                  }
+                  if (modalData.source === 'village_modal') {
+                    await executeSaveVillageWithEffectiveDate(modalData.effectiveDate, true);
+                  } else {
+                    await runMasterAction(async () => {
+                      if (!onUpdateFeesSetup) return;
+                      const nextFeeVal = Math.max(0, Number(feeSetupMonthlyFee) || 0);
+                      await onUpdateFeesSetup({
+                        villageId: feeSetupVillageId || undefined,
+                        stopId: feeSetupStopId || undefined,
+                        transportName: feeSetupTransportName.trim(),
+                        distanceRoute: feeSetupDistanceRoute.trim(),
+                        selectedMonths: feeSetupMonths,
+                        monthlyFee: nextFeeVal,
+                        effectiveFromDate: modalData.effectiveDate,
+                        acknowledged: true,
+                      });
+                      setPendingFeeChangeAckModal(null);
+                      setFeeSetupSavedMsg(
+                        `Acknowledged & Saved: From ${formatEffectiveMonthLabel(
+                          modalData.effectiveDate
+                        )} (effective date ${formatEffectiveDateDisplay(
+                          modalData.effectiveDate
+                        )}), ₹${nextFeeVal.toLocaleString('en-IN')}/month will be charged from members of "${feeSetupTransportName}".`
+                      );
+                    });
+                  }
+                }}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5"
+              >
+                <CheckCircle className="w-4 h-4" />
+                <span>I Acknowledge &amp; Save Fee Change</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

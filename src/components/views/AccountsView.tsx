@@ -2,22 +2,40 @@ import React, { useState, useEffect } from 'react';
 import { 
   Landmark, BookOpen, Scale, Plus, Search, 
   CheckCircle, AlertTriangle, Truck, GraduationCap, 
-  FileText, X, IndianRupee, Tag, Upload, Eye, Trash2, Lock, Calendar
+  FileText, X, IndianRupee, Tag, Upload, Eye, Trash2, Lock, Calendar,
+  BarChart3, Printer, PhoneCall, ChevronDown, ChevronRight, Users, Filter, Clock, MessageSquare
 } from 'lucide-react';
 import { 
   AccountHead, JournalVoucher, JournalLine, 
   Vehicle, Student, FeeInvoice, FeeReceipt, ExpenseRecord,
-  OdometerLog, IncomeHead, IncomeRecord
+  OdometerLog, IncomeHead, IncomeRecord, CampusMaster, Route, FeeFollowUpRecord
 } from '../../types/index.js';
-import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
+
+type AccountsTabKey =
+  | 'day_book'
+  | 'route_outstanding'
+  | 'demand_slip'
+  | 'income'
+  | 'vouchers'
+  | 'vehicle_ledger'
+  | 'student_ledger'
+  | 'trial_balance';
 
 interface AccountsViewProps {
   schoolName?: string;
   isAdmin?: boolean;
   currentRole?: string;
-  initialTab?: 'day_book' | 'income' | 'vouchers' | 'vehicle_ledger' | 'student_ledger' | 'trial_balance';
-  onTabChange?: (tab: 'day_book' | 'income' | 'vouchers' | 'vehicle_ledger' | 'student_ledger' | 'trial_balance') => void;
+  userCampus?: string;
+  campuses?: CampusMaster[];
+  classes?: string[];
+  sections?: string[];
+  routes?: Route[];
+  followUps?: FeeFollowUpRecord[];
+  onAddFollowUp?: (data: Partial<FeeFollowUpRecord>) => Promise<any>;
+  initialTab?: AccountsTabKey;
+  onTabChange?: (tab: AccountsTabKey) => void;
   accounts: AccountHead[];
   vouchers: JournalVoucher[];
   vehicles: Vehicle[];
@@ -31,15 +49,22 @@ interface AccountsViewProps {
   onSaveIncomeHead: (data: Partial<IncomeHead>) => Promise<IncomeHead>;
   onDeleteIncomeHead: (id: string) => Promise<void>;
   onAddIncome: (data: Omit<IncomeRecord, 'id' | 'incomeNo'>) => Promise<IncomeRecord>;
-  onDeleteIncome: (id: string) => Promise<void>;
+  onDeleteIncome?: (id: string) => Promise<void>;
   onDeleteExpense?: (id: string) => Promise<void>;
   onCreateVoucher: (data: Omit<JournalVoucher, 'id' | 'voucherNo' | 'totalDebit' | 'totalCredit' | 'status'>) => Promise<any>;
 }
 
 export const AccountsView: React.FC<AccountsViewProps> = ({
-  schoolName,
+  schoolName = 'Narendra Edu Valley',
   isAdmin = true,
   currentRole = 'Admin',
+  userCampus,
+  campuses = [],
+  classes = [],
+  sections = [],
+  routes = [],
+  followUps = [],
+  onAddFollowUp,
   initialTab = 'day_book',
   onTabChange,
   accounts = [],
@@ -64,18 +89,60 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   const approvedExpenses = expenses.filter(
     (e) => !e.approvalStatus || e.approvalStatus === 'Approved'
   );
-  const [activeTab, setActiveTab] = useState<'day_book' | 'income' | 'vouchers' | 'vehicle_ledger' | 'student_ledger' | 'trial_balance'>(initialTab);
+  const [activeTab, setActiveTab] = useState<AccountsTabKey>(initialTab);
 
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
 
-  const handleSelectTab = (tab: 'day_book' | 'income' | 'vouchers' | 'vehicle_ledger' | 'student_ledger' | 'trial_balance') => {
+  const handleSelectTab = (tab: AccountsTabKey) => {
     setActiveTab(tab);
     if (onTabChange) {
       onTabChange(tab);
     }
   };
+
+  // Campus scoping for Transport Assistant vs Coordinator/Admin
+  const isAssistant = currentRole === 'Transport Assistant';
+  const lockedCampus =
+    isAssistant && userCampus && userCampus !== 'All Campuses' ? userCampus : null;
+
+  // Route-wise Outstanding State
+  const [routeOutCampusFilter, setRouteOutCampusFilter] = useState<string>(lockedCampus || 'all');
+  const [routeOutVehicleFilter, setRouteOutVehicleFilter] = useState<string>('all');
+  const [routeOutSearch, setRouteOutSearch] = useState<string>('');
+  const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
+
+  // Demand Slip State
+  const [demandCampusFilter, setDemandCampusFilter] = useState<string>(lockedCampus || 'all');
+  const [demandClassFilter, setDemandClassFilter] = useState<string>('all');
+  const [demandSectionFilter, setDemandSectionFilter] = useState<string>('all');
+  const [demandRouteFilter, setDemandRouteFilter] = useState<string>('all');
+  const [demandVehicleFilter, setDemandVehicleFilter] = useState<string>('all');
+  const [demandDuesMode, setDemandDuesMode] = useState<'overdue_only' | 'all'>('overdue_only');
+  const [demandSearch, setDemandSearch] = useState<string>('');
+  const [demandDueDate, setDemandDueDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return d.toISOString().split('T')[0];
+  });
+
+  // Follow-up Modal State (for Demand Slip & Route-wise Outstanding)
+  const [followUpModalStudent, setFollowUpModalStudent] = useState<Student | null>(null);
+  const [fuCallDate, setFuCallDate] = useState<string>(todayStr);
+  const [fuContactedPerson, setFuContactedPerson] = useState<string>('Father / Guardian');
+  const [fuOutcome, setFuOutcome] = useState<FeeFollowUpRecord['callOutcome']>('Promised to Pay');
+  const [fuPromisedDate, setFuPromisedDate] = useState<string>('');
+  const [fuNextFollowUpDate, setFuNextFollowUpDate] = useState<string>('');
+  const [fuRemarks, setFuRemarks] = useState<string>('');
+  const [isSavingFollowUp, setIsSavingFollowUp] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (lockedCampus) {
+      setRouteOutCampusFilter(lockedCampus);
+      setDemandCampusFilter(lockedCampus);
+    }
+  }, [lockedCampus]);
 
   // Day Book Filters
   const [dayBookDateFrom, setDayBookDateFrom] = useState<string>('');
@@ -406,6 +473,354 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   });
 
   // ============================================================================
+  // 4. ROUTE-WISE OUTSTANDING & DEMAND SLIP COMPUTATION
+  // ============================================================================
+  const getStudentFeeStats = (student: Student) => {
+    const stuInvoices = invoices.filter((i) => i.studentId === student.id);
+    const stuReceipts = receipts.filter((r) => r.studentId === student.id);
+    const previousDuesAmount = Number(student.previousDues || 0);
+    const prevDuesInv = stuInvoices.filter(
+      (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
+    );
+    const sessionInv = stuInvoices.filter(
+      (i) => i.month !== 'Previous Dues' && !i.id.startsWith('inv-prev-')
+    );
+    const totalBilledInvoices = stuInvoices.reduce(
+      (s, i) => s + Number(i.netPayable ?? i.netAmount ?? 0),
+      0
+    );
+    const hasPrevInvoice = prevDuesInv.length > 0;
+    const totalBilled = totalBilledInvoices + (!hasPrevInvoice ? previousDuesAmount : 0);
+    const totalCollected = stuReceipts.reduce(
+      (s, r) => s + Number(r.amountPaid ?? r.amount ?? 0),
+      0
+    );
+    const totalOutstanding = Math.max(0, totalBilled - totalCollected);
+    const pendingMonths = stuInvoices
+      .filter((i) => i.status !== 'Paid' && (i.balanceDue ?? 0) > 0)
+      .map((i) => i.month);
+    const stuFollowUps = followUps
+      .filter((f) => f.studentId === student.id)
+      .sort((a, b) => (b.callDate || '').localeCompare(a.callDate || ''));
+
+    return {
+      previousDuesAmount,
+      sessionBilled: sessionInv.reduce((s, i) => s + Number(i.netPayable ?? i.netAmount ?? 0), 0),
+      totalBilled,
+      totalCollected,
+      totalOutstanding,
+      pendingMonths,
+      followUps: stuFollowUps,
+      latestFollowUp: stuFollowUps[0] || null,
+    };
+  };
+
+  interface RouteOutstandingSummary {
+    routeId: string;
+    routeCode: string;
+    routeName: string;
+    campus: string;
+    vehicleNumber: string;
+    activeMembersCount: number;
+    overdueMembersCount: number;
+    previousDuesTotal: number;
+    sessionBilledTotal: number;
+    totalBilled: number;
+    totalCollected: number;
+    totalOutstanding: number;
+    collectionRate: number;
+    members: Array<{
+      student: Student;
+      stats: ReturnType<typeof getStudentFeeStats>;
+    }>;
+  }
+
+  const routeSummaries: RouteOutstandingSummary[] = routes
+    .filter((rt) => {
+      if (lockedCampus && (rt.campus || 'Sr') !== lockedCampus) return false;
+      if (routeOutCampusFilter !== 'all' && (rt.campus || 'Sr') !== routeOutCampusFilter) return false;
+      if (routeOutVehicleFilter !== 'all' && rt.assignedVehicleReg !== routeOutVehicleFilter) return false;
+      if (routeOutSearch.trim()) {
+        const q = routeOutSearch.toLowerCase();
+        const matchRoute =
+          rt.code.toLowerCase().includes(q) ||
+          rt.name.toLowerCase().includes(q) ||
+          (rt.assignedVehicleReg || '').toLowerCase().includes(q);
+        if (!matchRoute) return false;
+      }
+      return true;
+    })
+    .map((rt) => {
+      const routeMembers = students.filter(
+        (s) =>
+          s.transportStatus !== 'Left School' &&
+          (s.routeId === rt.id || s.routeName === rt.code || s.routeName === rt.name)
+      );
+      const memberRows = routeMembers.map((s) => ({
+        student: s,
+        stats: getStudentFeeStats(s),
+      }));
+      const previousDuesTotal = memberRows.reduce((sum, m) => sum + m.stats.previousDuesAmount, 0);
+      const sessionBilledTotal = memberRows.reduce((sum, m) => sum + m.stats.sessionBilled, 0);
+      const totalBilled = memberRows.reduce((sum, m) => sum + m.stats.totalBilled, 0);
+      const totalCollected = memberRows.reduce((sum, m) => sum + m.stats.totalCollected, 0);
+      const totalOutstanding = memberRows.reduce((sum, m) => sum + m.stats.totalOutstanding, 0);
+      const overdueMembersCount = memberRows.filter((m) => m.stats.totalOutstanding > 0).length;
+      const collectionRate = totalBilled > 0 ? Math.round((totalCollected / totalBilled) * 100) : 0;
+
+      return {
+        routeId: rt.id,
+        routeCode: rt.code,
+        routeName: rt.name,
+        campus: rt.campus || 'Sr',
+        vehicleNumber: rt.assignedVehicleReg || 'Unassigned',
+        activeMembersCount: routeMembers.length,
+        overdueMembersCount,
+        previousDuesTotal,
+        sessionBilledTotal,
+        totalBilled,
+        totalCollected,
+        totalOutstanding,
+        collectionRate,
+        members: memberRows.sort((a, b) => b.stats.totalOutstanding - a.stats.totalOutstanding),
+      };
+    });
+
+  const maxRouteGraphAmount = Math.max(
+    1,
+    ...routeSummaries.map((r) => Math.max(r.totalCollected, r.totalOutstanding, r.totalBilled))
+  );
+
+  const demandFilteredMembers = students
+    .filter((s) => s.transportStatus !== 'Left School')
+    .filter((s) => {
+      const stuCampus =
+        s.campus ||
+        routes.find((r) => r.id === s.routeId || r.code === s.routeName)?.campus ||
+        'Sr';
+      if (lockedCampus && stuCampus !== lockedCampus) return false;
+      if (demandCampusFilter !== 'all' && stuCampus !== demandCampusFilter) return false;
+      if (demandClassFilter !== 'all' && s.class !== demandClassFilter) return false;
+      if (demandSectionFilter !== 'all' && s.section !== demandSectionFilter) return false;
+      if (
+        demandRouteFilter !== 'all' &&
+        s.routeId !== demandRouteFilter &&
+        s.routeName !== demandRouteFilter
+      ) {
+        return false;
+      }
+      if (demandVehicleFilter !== 'all') {
+        const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+        const vehReg = s.vehicleNumber || rt?.assignedVehicleReg || '';
+        if (vehReg !== demandVehicleFilter) return false;
+      }
+      if (demandSearch.trim()) {
+        const q = demandSearch.toLowerCase();
+        const match =
+          s.name.toLowerCase().includes(q) ||
+          s.admissionNo.toLowerCase().includes(q) ||
+          (s.fatherName || '').toLowerCase().includes(q) ||
+          (s.parentPhone || '').toLowerCase().includes(q) ||
+          (s.villageName || s.stopName || '').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    })
+    .map((s) => {
+      const rt = routes.find((r) => r.id === s.routeId || r.code === s.routeName);
+      return {
+        student: s,
+        campus: s.campus || rt?.campus || 'Sr',
+        routeCode: rt?.code || s.routeName || '—',
+        vehicleReg: s.vehicleNumber || rt?.assignedVehicleReg || '—',
+        stats: getStudentFeeStats(s),
+      };
+    })
+    .filter((row) => (demandDuesMode === 'overdue_only' ? row.stats.totalOutstanding > 0 : true))
+    .sort((a, b) => b.stats.totalOutstanding - a.stats.totalOutstanding);
+
+  const printRouteReminderListPdf = (routeSummary: RouteOutstandingSummary, overdueOnly = true) => {
+    const rows = overdueOnly
+      ? routeSummary.members.filter((m) => m.stats.totalOutstanding > 0)
+      : routeSummary.members;
+    const totalOut = rows.reduce((s, r) => s + r.stats.totalOutstanding, 0);
+    const totalCol = rows.reduce((s, r) => s + r.stats.totalCollected, 0);
+    const totalPrev = rows.reduce((s, r) => s + r.stats.previousDuesAmount, 0);
+
+    const html = `
+      <div style="font-family: Inter, Arial, sans-serif; color: #0f172a; padding: 8px;">
+        <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 12px;">
+          <h1 style="margin: 0; font-size: 18px; text-transform: uppercase;">${schoolName}</h1>
+          <div style="font-size: 12px; font-weight: 700; color: #334155; margin-top: 3px;">
+            ROUTE-WISE FEE REMINDER / OUTSTANDING DEMAND REGISTER
+          </div>
+          <div style="font-size: 11px; color: #475569; margin-top: 4px;">
+            Route: <strong>${routeSummary.routeCode}</strong> &nbsp;|&nbsp;
+            Campus: <strong>${routeSummary.campus}</strong> &nbsp;|&nbsp;
+            Vehicle: <strong>${routeSummary.vehicleNumber}</strong> &nbsp;|&nbsp;
+            Date: <strong>${todayStr}</strong>
+          </div>
+        </div>
+
+        <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+          <thead>
+            <tr style="background: #f1f5f9; border-bottom: 2px solid #0f172a;">
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: center;">Sl</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Adm No</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Member Name</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Class</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Father / Guardian</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Village / Stop</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: left;">Phone</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">Prev. Dues (₹)</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">Collected (₹)</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">Outstanding (₹)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (r, idx) => `
+              <tr>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: center;">${idx + 1}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace; font-weight: 700;">${r.student.admissionNo}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; font-weight: 700;">${r.student.name}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.class}-${r.student.section}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.fatherName || r.student.parentName || '—'}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.villageName || r.student.stopName || '—'}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace;">${r.student.parentPhone || '—'}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">₹${r.stats.previousDuesAmount.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right; color: #047857;">₹${r.stats.totalCollected.toLocaleString('en-IN')}</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right; font-weight: 700; color: #be123c;">₹${r.stats.totalOutstanding.toLocaleString('en-IN')}</td>
+              </tr>
+            `
+              )
+              .join('')}
+          </tbody>
+          <tfoot>
+            <tr style="background: #f8fafc; font-weight: 700;">
+              <td colspan="7" style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">ROUTE TOTAL (${rows.length} Members):</td>
+              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${totalPrev.toLocaleString('en-IN')}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857;">₹${totalCol.toLocaleString('en-IN')}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    `;
+    openHtmlPrintPreview(`Route Reminder List — ${routeSummary.routeCode}`, html);
+  };
+
+  const printDemandSlipsBatchPdf = (
+    items: Array<{
+      student: Student;
+      stats: ReturnType<typeof getStudentFeeStats>;
+      routeCode?: string;
+      vehicleReg?: string;
+    }>,
+    titleLabel: string
+  ) => {
+    if (items.length === 0) return;
+    const slipsHtml = items
+      .map(({ student, stats, routeCode, vehicleReg }, index) => {
+        const rt = routes.find((r) => r.id === student.routeId || r.code === student.routeName);
+        const rCode = routeCode || rt?.code || student.routeName || '—';
+        const vReg = vehicleReg || student.vehicleNumber || rt?.assignedVehicleReg || '—';
+        const pendingMonthsLabel =
+          stats.pendingMonths.length > 0 ? stats.pendingMonths.join(', ') : 'Current Session Dues';
+
+        return `
+          <div style="border: 2px solid #0f172a; border-radius: 10px; padding: 14px; margin-bottom: 14px; page-break-inside: avoid; font-family: Inter, Arial, sans-serif;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 8px; margin-bottom: 10px;">
+              <div>
+                <div style="font-size: 15px; font-weight: 800; color: #0f172a; text-transform: uppercase;">${schoolName}</div>
+                <div style="font-size: 11px; font-weight: 700; color: #b45309;">TRANSPORT FEE DEMAND / REMINDER SLIP</div>
+              </div>
+              <div style="text-align: right; font-size: 11px; color: #334155;">
+                <div><strong>Slip #:</strong> DEM-${todayStr.replace(/-/g, '')}-${index + 1}</div>
+                <div><strong>Date:</strong> ${todayStr}</div>
+              </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 14px; font-size: 11.5px; margin-bottom: 10px;">
+              <div><strong>Student Name:</strong> ${student.name}</div>
+              <div><strong>Admission No:</strong> <span style="font-family: monospace;">${student.admissionNo}</span></div>
+              <div><strong>Class &amp; Sec:</strong> ${student.class}-${student.section}</div>
+              <div><strong>Father's Name:</strong> ${student.fatherName || student.parentName || '—'}</div>
+              <div><strong>Route / Vehicle:</strong> ${rCode} (${vReg})</div>
+              <div><strong>Stop / Village:</strong> ${student.villageName || student.stopName || '—'}</div>
+              <div><strong>Contact Phone:</strong> ${student.parentPhone || '—'}</div>
+              <div><strong>Monthly Rate:</strong> ₹${Number(student.netMonthlyFee ?? student.monthlyFee ?? 0).toLocaleString('en-IN')}/mo</div>
+              <div><strong>Pay By Date:</strong> <strong style="color: #be123c;">${demandDueDate}</strong></div>
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px;">
+              <thead>
+                <tr style="background: #f8fafc;">
+                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: left;">Fee Particulars / Months Due</th>
+                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Previous Dues (₹)</th>
+                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Session Billed (₹)</th>
+                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Paid So Far (₹)</th>
+                  <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Net Payable Due (₹)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="border: 1px solid #cbd5e1; padding: 6px;">${pendingMonthsLabel}</td>
+                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${stats.previousDuesAmount.toLocaleString('en-IN')}</td>
+                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">₹${stats.sessionBilled.toLocaleString('en-IN')}</td>
+                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #047857;">₹${stats.totalCollected.toLocaleString('en-IN')}</td>
+                  <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-weight: 800; font-size: 12.5px; color: #be123c;">₹${stats.totalOutstanding.toLocaleString('en-IN')}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: #475569; padding-top: 4px;">
+              <div>Dear Parent, kindly deposit the outstanding transport fee of <strong>₹${stats.totalOutstanding.toLocaleString('en-IN')}</strong> by <strong>${demandDueDate}</strong> to ensure uninterrupted bus facility.</div>
+              <div style="font-weight: 700; color: #0f172a;">Transport In-Charge Sign</div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    openHtmlPrintPreview(titleLabel, slipsHtml);
+  };
+
+  const handleOpenFollowUpModal = (student: Student) => {
+    setFollowUpModalStudent(student);
+    setFuCallDate(todayStr);
+    setFuContactedPerson(student.fatherName || student.parentName || 'Father / Guardian');
+    setFuOutcome('Promised to Pay');
+    setFuPromisedDate('');
+    setFuNextFollowUpDate('');
+    setFuRemarks('');
+  };
+
+  const handleSaveFollowUpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!followUpModalStudent || !onAddFollowUp || !fuRemarks.trim()) return;
+    try {
+      setIsSavingFollowUp(true);
+      await onAddFollowUp({
+        studentId: followUpModalStudent.id,
+        callDate: isAdmin ? fuCallDate : todayStr,
+        contactedPerson: fuContactedPerson.trim() || 'Parent',
+        callOutcome: fuOutcome,
+        promisedPayDate: fuPromisedDate || undefined,
+        nextFollowUpDate: fuNextFollowUpDate || undefined,
+        remarks: fuRemarks.trim(),
+        recordedBy: currentRole,
+      });
+      setFuRemarks('');
+      setFuPromisedDate('');
+      setFuNextFollowUpDate('');
+    } finally {
+      setIsSavingFollowUp(false);
+    }
+  };
+
+  // ============================================================================
   // NEW JOURNAL VOUCHER HANDLERS
   // ============================================================================
   const handleLineAccountChange = (index: number, accId: string) => {
@@ -494,6 +909,32 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
           <button
             type="button"
+            onClick={() => handleSelectTab('route_outstanding')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'route_outstanding'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Route-wise Outstanding Details</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSelectTab('demand_slip')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'demand_slip'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Demand Slip &amp; Follow-up</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => handleSelectTab('student_ledger')}
             className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
               activeTab === 'student_ledger'
@@ -563,15 +1004,20 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {lockedCampus && (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[11px] font-bold">
+              <span>Scoped Campus: {lockedCampus}</span>
+            </span>
+          )}
           {isAdmin ? (
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-300 text-[11px] font-bold">
               <CheckCircle className="w-3.5 h-3.5" />
-              <span>Admin: Full Rights (View, Print, Add &amp; Delete)</span>
+              <span>Admin: Full Authority</span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-200 text-[11px] font-bold">
               <Eye className="w-3.5 h-3.5" />
-              <span>{currentRole}: View &amp; Print Only Rights</span>
+              <span>{currentRole}: View, Print &amp; Follow-up</span>
             </span>
           )}
         </div>
@@ -582,6 +1028,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
             {activeTab === 'day_book' && 'Print / View Day Book (Income & Expense)'}
+            {activeTab === 'route_outstanding' && 'Route-wise Outstanding & Collected Fee Details'}
+            {activeTab === 'demand_slip' && 'Demand Slip / Fee Reminder Generator & Phone Follow-up'}
             {activeTab === 'income' && 'Other Income & Heads'}
             {activeTab === 'vouchers' && 'Vouchers & Chart of Accounts'}
             {activeTab === 'vehicle_ledger' && 'Vehicle Cost Ledger & Expenses'}
@@ -590,6 +1038,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeTab === 'day_book' && `${combinedDayBookExportRows.length} Entries`}
+            {activeTab === 'route_outstanding' && `Route Analytics & PDF Slips`}
+            {activeTab === 'demand_slip' && `Reminder Slips & Phone Follow-up`}
             {activeTab === 'income' && `${filteredOtherIncomes.length} Records`}
             {activeTab === 'vouchers' && `${filteredVouchers.length} Vouchers`}
             {activeTab === 'vehicle_ledger' && `${vehicleExpenses.length} Vouchers`}
@@ -1952,6 +2402,970 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   </tr>
                 </tfoot>
               </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          TAB: ROUTE-WISE OUTSTANDING DETAILS (Graph + Route List + PDF Slips)
+         ===================================================================== */}
+      {activeTab === 'route_outstanding' && (
+        <div className="space-y-5">
+          {/* Top Filter & Summary Strip */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-indigo-600" />
+                  <span>Route-wise Outstanding &amp; Collected Fee Overview</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Click any route to expand members or directly generate Route Reminder List PDF / Individual Student Demand Slips
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Campus Filter */}
+                <select
+                  value={lockedCampus || routeOutCampusFilter}
+                  disabled={Boolean(lockedCampus)}
+                  onChange={(e) => setRouteOutCampusFilter(e.target.value)}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800 disabled:opacity-75"
+                >
+                  {!lockedCampus && <option value="all">All Campuses (Whole School)</option>}
+                  <option value="Sr">Sr Campus (Senior)</option>
+                  <option value="Jr">Jr Campus (Junior)</option>
+                  {campuses
+                    .filter((c) => c.name !== 'Sr' && c.name !== 'Jr')
+                    .map((c) => (
+                      <option key={c.id} value={c.name}>
+                        {c.name}
+                      </option>
+                    ))}
+                </select>
+
+                {/* Vehicle Filter */}
+                <select
+                  value={routeOutVehicleFilter}
+                  onChange={(e) => setRouteOutVehicleFilter(e.target.value)}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800"
+                >
+                  <option value="all">All Vehicles</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.registrationNumber}>
+                      {v.registrationNumber} ({v.nickname})
+                    </option>
+                  ))}
+                </select>
+
+                {/* Search Route */}
+                <div className="relative w-48">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    placeholder="Search route / vehicle..."
+                    value={routeOutSearch}
+                    onChange={(e) => setRouteOutSearch(e.target.value)}
+                    className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-200 text-xs bg-slate-50"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* KPI Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase">Total Billed (Incl. Prev Dues)</div>
+                <div className="text-lg font-extrabold font-mono text-slate-900 mt-1">
+                  ₹{routeSummaries.reduce((s, r) => s + r.totalBilled, 0).toLocaleString('en-IN')}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  Prev Dues: ₹{routeSummaries.reduce((s, r) => s + r.previousDuesTotal, 0).toLocaleString('en-IN')}
+                </div>
+              </div>
+              <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                <div className="text-[11px] font-semibold text-emerald-800 uppercase">Total Collected Fee</div>
+                <div className="text-lg font-extrabold font-mono text-emerald-700 mt-1">
+                  ₹{routeSummaries.reduce((s, r) => s + r.totalCollected, 0).toLocaleString('en-IN')}
+                </div>
+                <div className="text-[10px] text-emerald-700 mt-0.5">
+                  Across {routeSummaries.length} active routes
+                </div>
+              </div>
+              <div className="p-3.5 rounded-xl bg-rose-50/70 border border-rose-200">
+                <div className="text-[11px] font-semibold text-rose-800 uppercase">Total Outstanding Dues</div>
+                <div className="text-lg font-extrabold font-mono text-rose-700 mt-1">
+                  ₹{routeSummaries.reduce((s, r) => s + r.totalOutstanding, 0).toLocaleString('en-IN')}
+                </div>
+                <div className="text-[10px] text-rose-700 mt-0.5">
+                  {routeSummaries.reduce((s, r) => s + r.overdueMembersCount, 0)} overdue members
+                </div>
+              </div>
+              <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200">
+                <div className="text-[11px] font-semibold text-amber-900 uppercase">Pay By Date on Slips</div>
+                <input
+                  type="date"
+                  value={demandDueDate}
+                  onChange={(e) => setDemandDueDate(e.target.value)}
+                  className="mt-1 w-full px-2.5 py-1 rounded-lg border border-amber-300 bg-white font-mono text-xs font-bold text-slate-900"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Visual Bar Graph: Route-wise Collected vs Outstanding */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Route-wise Collected vs Outstanding Fee Graph
+                </h4>
+                <p className="text-[11px] text-slate-500">
+                  Visual comparison of collected fees (green) and pending outstanding dues (red) across each route
+                </p>
+              </div>
+              <div className="flex items-center gap-4 text-xs font-bold">
+                <span className="flex items-center gap-1.5 text-emerald-700">
+                  <span className="w-3 h-3 rounded-xs bg-emerald-500 inline-block" />
+                  Collected Fee (₹)
+                </span>
+                <span className="flex items-center gap-1.5 text-rose-700">
+                  <span className="w-3 h-3 rounded-xs bg-rose-500 inline-block" />
+                  Outstanding Fee (₹)
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {routeSummaries.map((rt) => {
+                const colWidth = Math.max(2, Math.round((rt.totalCollected / maxRouteGraphAmount) * 100));
+                const outWidth = Math.max(2, Math.round((rt.totalOutstanding / maxRouteGraphAmount) * 100));
+                return (
+                  <div
+                    key={rt.routeId}
+                    onClick={() => setExpandedRouteId(expandedRouteId === rt.routeId ? null : rt.routeId)}
+                    className="p-3 rounded-xl border border-slate-200/80 hover:border-indigo-300 hover:bg-slate-50/70 transition-all cursor-pointer"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded-md bg-slate-900 text-amber-400 font-mono font-bold text-[11px]">
+                          {rt.routeCode}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-bold text-[10px]">
+                          {rt.campus}
+                        </span>
+                        <span className="text-slate-600 font-medium">
+                          Vehicle: <strong className="font-mono text-slate-800">{rt.vehicleNumber}</strong>
+                        </span>
+                        <span className="text-slate-400">•</span>
+                        <span className="text-slate-600">
+                          {rt.overdueMembersCount}/{rt.activeMembersCount} members with dues
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-4 font-mono text-xs">
+                        <span className="text-emerald-700 font-bold">
+                          Collected: ₹{rt.totalCollected.toLocaleString('en-IN')}
+                        </span>
+                        <span className="text-rose-600 font-extrabold">
+                          Outstanding: ₹{rt.totalOutstanding.toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div className="bg-slate-100 rounded-full h-3 overflow-hidden flex items-center">
+                        <div
+                          className="bg-emerald-500 h-full rounded-full transition-all"
+                          style={{ width: `${Math.min(100, colWidth)}%` }}
+                        />
+                      </div>
+                      <div className="bg-slate-100 rounded-full h-3 overflow-hidden flex items-center">
+                        <div
+                          className="bg-rose-500 h-full rounded-full transition-all"
+                          style={{ width: `${Math.min(100, outWidth)}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Route-wise Table with Direct PDF List & Group / Individual Slip Print */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                  Route-wise Outstanding Register &amp; Direct Reminder Slip Generator
+                </h4>
+                <p className="text-[11px] text-slate-300">
+                  Click &quot;Print Route List PDF&quot; for route summary sheet or &quot;Print Group Slips&quot; for individual slips of all overdue students on that route
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                  <tr>
+                    <th className="py-3 px-4">Route</th>
+                    <th className="py-3 px-3">Campus</th>
+                    <th className="py-3 px-3">Vehicle</th>
+                    <th className="py-3 px-3 text-center">Members (Due/Total)</th>
+                    <th className="py-3 px-3 text-right font-mono">Prev. Dues (₹)</th>
+                    <th className="py-3 px-3 text-right font-mono">Collected (₹)</th>
+                    <th className="py-3 px-3 text-right font-mono">Outstanding (₹)</th>
+                    <th className="py-3 px-4 text-right">Generate Reminder / Demand Slip</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {routeSummaries.map((rt) => {
+                    const isExpanded = expandedRouteId === rt.routeId;
+                    const overdueMembers = rt.members.filter((m) => m.stats.totalOutstanding > 0);
+                    return (
+                      <React.Fragment key={rt.routeId}>
+                        <tr className="hover:bg-slate-50/90 transition-colors">
+                          <td className="py-3 px-4">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedRouteId(isExpanded ? null : rt.routeId)}
+                              className="flex items-center gap-2 font-bold text-slate-900 hover:text-indigo-600 cursor-pointer"
+                            >
+                              {isExpanded ? (
+                                <ChevronDown className="w-4 h-4 text-indigo-600" />
+                              ) : (
+                                <ChevronRight className="w-4 h-4 text-slate-400" />
+                              )}
+                              <span className="font-mono px-2 py-0.5 rounded bg-slate-900 text-amber-400 text-xs">
+                                {rt.routeCode}
+                              </span>
+                            </button>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 font-bold text-[11px]">
+                              {rt.campus}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-slate-700">{rt.vehicleNumber}</td>
+                          <td className="py-3 px-3 text-center">
+                            <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 font-bold text-[11px]">
+                              {rt.overdueMembersCount} Due
+                            </span>{' '}
+                            <span className="text-slate-400">/ {rt.activeMembersCount}</span>
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono text-slate-700">
+                            ₹{rt.previousDuesTotal.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
+                            ₹{rt.totalCollected.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
+                            ₹{rt.totalOutstanding.toLocaleString('en-IN')}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex flex-wrap items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => printRouteReminderListPdf(rt, true)}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                                title="Generate PDF List of Route Members with Outstanding Amount"
+                              >
+                                <FileText className="w-3.5 h-3.5" />
+                                <span>Route PDF List</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  printDemandSlipsBatchPdf(
+                                    overdueMembers.map((m) => ({
+                                      student: m.student,
+                                      stats: m.stats,
+                                      routeCode: rt.routeCode,
+                                      vehicleReg: rt.vehicleNumber,
+                                    })),
+                                    `Route ${rt.routeCode} — Group Reminder Slips (${overdueMembers.length} Members)`
+                                  )
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                                title="Print Individual Student Reminder Slips for Whole Route Group"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                                <span>Print Group Slips ({overdueMembers.length})</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedRouteId(isExpanded ? null : rt.routeId)}
+                                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-[11px] cursor-pointer"
+                              >
+                                {isExpanded ? 'Hide Members' : 'Individual Slips'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+
+                        {isExpanded && (
+                          <tr>
+                            <td colSpan={8} className="bg-slate-50/90 p-4 border-b border-slate-200">
+                              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
+                                <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs font-bold text-slate-800">
+                                    Members on Route {rt.routeCode} ({rt.members.length} Total • {overdueMembers.length} Overdue)
+                                  </span>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => printRouteReminderListPdf(rt, false)}
+                                      className="px-2.5 py-1 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-[11px] cursor-pointer"
+                                    >
+                                      Print Full Route Register (Incl. Zero Due)
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-left text-[11px]">
+                                    <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase font-bold">
+                                      <tr>
+                                        <th className="py-2 px-3">Adm No</th>
+                                        <th className="py-2 px-3">Member Name</th>
+                                        <th className="py-2 px-2.5">Class</th>
+                                        <th className="py-2 px-3">Father&apos;s Name</th>
+                                        <th className="py-2 px-3">Stop / Village</th>
+                                        <th className="py-2 px-2.5">Phone</th>
+                                        <th className="py-2 px-2.5 text-right">Prev. Dues</th>
+                                        <th className="py-2 px-2.5 text-right">Collected</th>
+                                        <th className="py-2 px-3 text-right">Outstanding</th>
+                                        <th className="py-2 px-3 text-right">Individual Slip / Follow-up</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                      {rt.members.map(({ student, stats }) => (
+                                        <tr key={student.id} className="hover:bg-slate-50">
+                                          <td className="py-2 px-3 font-mono font-bold text-slate-700">
+                                            {student.admissionNo}
+                                          </td>
+                                          <td className="py-2 px-3 font-bold text-slate-900">{student.name}</td>
+                                          <td className="py-2 px-2.5">
+                                            {student.class}-{student.section}
+                                          </td>
+                                          <td className="py-2 px-3 text-slate-700">
+                                            {student.fatherName || student.parentName || '—'}
+                                          </td>
+                                          <td className="py-2 px-3 text-slate-600">
+                                            {student.villageName || student.stopName || '—'}
+                                          </td>
+                                          <td className="py-2 px-2.5 font-mono text-slate-700">
+                                            {student.parentPhone || '—'}
+                                          </td>
+                                          <td className="py-2 px-2.5 text-right font-mono">
+                                            ₹{stats.previousDuesAmount.toLocaleString('en-IN')}
+                                          </td>
+                                          <td className="py-2 px-2.5 text-right font-mono text-emerald-700 font-bold">
+                                            ₹{stats.totalCollected.toLocaleString('en-IN')}
+                                          </td>
+                                          <td className="py-2 px-3 text-right font-mono font-extrabold text-rose-600">
+                                            ₹{stats.totalOutstanding.toLocaleString('en-IN')}
+                                          </td>
+                                          <td className="py-2 px-3 text-right">
+                                            <div className="flex items-center justify-end gap-1.5">
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  printDemandSlipsBatchPdf(
+                                                    [
+                                                      {
+                                                        student,
+                                                        stats,
+                                                        routeCode: rt.routeCode,
+                                                        vehicleReg: rt.vehicleNumber,
+                                                      },
+                                                    ],
+                                                    `Reminder Slip — ${student.name} (${student.admissionNo})`
+                                                  )
+                                                }
+                                                className="px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
+                                              >
+                                                <Printer className="w-3 h-3" />
+                                                <span>Print Slip</span>
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => handleOpenFollowUpModal(student)}
+                                                className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
+                                              >
+                                                <PhoneCall className="w-3 h-3" />
+                                                <span>Follow-up ({stats.followUps.length})</span>
+                                              </button>
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          TAB: DEMAND SLIP & PHONE FOLLOW-UP SUB-MODULE
+         ===================================================================== */}
+      {activeTab === 'demand_slip' && (
+        <div className="space-y-5">
+          {/* Multi-Filter Bar: Campus, Class, Section, Route, Vehicle */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Printer className="w-4 h-4 text-amber-600" />
+                  <span>Demand Slip / Reminder Slip &amp; Phone Fee Follow-up Desk</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Filter members by Campus, Class, Section, Route, or Vehicle to print Individual / Group Demand Slips and log phone call follow-ups
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    printDemandSlipsBatchPdf(
+                      demandFilteredMembers,
+                      `Demand Slips — ${demandFilteredMembers.length} Members`
+                    )
+                  }
+                  className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print All Filtered Slips ({demandFilteredMembers.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const totalOut = demandFilteredMembers.reduce(
+                      (s, r) => s + r.stats.totalOutstanding,
+                      0
+                    );
+                    const listHtml = `
+                      <div style="font-family: Inter, Arial, sans-serif; color: #0f172a;">
+                        <h2 style="margin: 0 0 4px 0; text-align: center;">${schoolName} — DEMAND SLIP / OUTSTANDING LIST</h2>
+                        <p style="margin: 0 0 12px 0; text-align: center; font-size: 11px; color: #475569;">
+                          Campus: ${lockedCampus || demandCampusFilter} | Class: ${demandClassFilter} | Section: ${demandSectionFilter} | Route: ${demandRouteFilter} | Vehicle: ${demandVehicleFilter}
+                        </p>
+                        <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+                          <thead>
+                            <tr style="background: #f1f5f9;">
+                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Sl</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Adm No</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Member Name</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Class</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Route / Vehicle</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px;">Phone</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Prev. Dues</th>
+                              <th style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">Outstanding (₹)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            ${demandFilteredMembers
+                              .map(
+                                (r, idx) => `
+                              <tr>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: center;">${idx + 1}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace;">${r.student.admissionNo}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px; font-weight: 700;">${r.student.name}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.student.class}-${r.student.section}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px;">${r.routeCode} (${r.vehicleReg})</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px; font-family: monospace;">${r.student.parentPhone || '—'}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right;">₹${r.stats.previousDuesAmount.toLocaleString('en-IN')}</td>
+                                <td style="border: 1px solid #cbd5e1; padding: 5px; text-align: right; font-weight: 700; color: #be123c;">₹${r.stats.totalOutstanding.toLocaleString('en-IN')}</td>
+                              </tr>
+                            `
+                              )
+                              .join('')}
+                          </tbody>
+                          <tfoot>
+                            <tr style="background: #f8fafc; font-weight: 700;">
+                              <td colspan="7" style="border: 1px solid #cbd5e1; padding: 6px; text-align: right;">TOTAL OUTSTANDING:</td>
+                              <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; color: #be123c;">₹${totalOut.toLocaleString('en-IN')}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </div>
+                    `;
+                    openHtmlPrintPreview('Demand Slip Summary Register', listHtml);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <FileText className="w-4 h-4" />
+                  <span>Print Consolidated List (PDF)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Filter Controls Row */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Campus</label>
+                <select
+                  value={lockedCampus || demandCampusFilter}
+                  disabled={Boolean(lockedCampus)}
+                  onChange={(e) => setDemandCampusFilter(e.target.value)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                >
+                  {!lockedCampus && <option value="all">All Campuses</option>}
+                  <option value="Sr">Sr Campus</option>
+                  <option value="Jr">Jr Campus</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Class</label>
+                <select
+                  value={demandClassFilter}
+                  onChange={(e) => setDemandClassFilter(e.target.value)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                >
+                  <option value="all">All Classes</option>
+                  {classes.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Section</label>
+                <select
+                  value={demandSectionFilter}
+                  onChange={(e) => setDemandSectionFilter(e.target.value)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                >
+                  <option value="all">All Sections</option>
+                  {sections.map((sec) => (
+                    <option key={sec} value={sec}>
+                      Section {sec}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Route</label>
+                <select
+                  value={demandRouteFilter}
+                  onChange={(e) => setDemandRouteFilter(e.target.value)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                >
+                  <option value="all">All Routes</option>
+                  {routes
+                    .filter((r) => !lockedCampus || (r.campus || 'Sr') === lockedCampus)
+                    .map((r) => (
+                      <option key={r.id} value={r.code}>
+                        {r.code} ({r.campus || 'Sr'})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Vehicle</label>
+                <select
+                  value={demandVehicleFilter}
+                  onChange={(e) => setDemandVehicleFilter(e.target.value)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                >
+                  <option value="all">All Vehicles</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.registrationNumber}>
+                      {v.registrationNumber}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Dues Filter</label>
+                <select
+                  value={demandDuesMode}
+                  onChange={(e) => setDemandDuesMode(e.target.value as any)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                >
+                  <option value="overdue_only">With Pending Dues (&gt; ₹0)</option>
+                  <option value="all">All Members</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Search Member</label>
+                <input
+                  type="text"
+                  placeholder="Name, Adm No, Phone..."
+                  value={demandSearch}
+                  onChange={(e) => setDemandSearch(e.target.value)}
+                  className="w-full p-2 rounded-xl border border-slate-200 text-xs bg-slate-50"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Demand Slip & Follow-Up Table */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                  <tr>
+                    <th className="py-3 px-4">Adm No &amp; Member</th>
+                    <th className="py-3 px-2.5">Campus / Class</th>
+                    <th className="py-3 px-3">Route &amp; Vehicle</th>
+                    <th className="py-3 px-3">Father &amp; Phone</th>
+                    <th className="py-3 px-2.5 text-right font-mono">Prev. Dues</th>
+                    <th className="py-3 px-2.5 text-right font-mono">Collected</th>
+                    <th className="py-3 px-3 text-right font-mono">Outstanding</th>
+                    <th className="py-3 px-3">Latest Follow-up Communication</th>
+                    <th className="py-3 px-4 text-right">Demand Slip &amp; Follow-up</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {demandFilteredMembers.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="py-10 text-center text-slate-400">
+                        No members match the selected Demand Slip filters.
+                      </td>
+                    </tr>
+                  ) : (
+                    demandFilteredMembers.map(({ student, campus, routeCode, vehicleReg, stats }) => (
+                      <tr key={student.id} className="hover:bg-slate-50/80">
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-900">{student.name}</div>
+                          <div className="text-[11px] font-mono text-slate-500">
+                            {student.admissionNo} • {student.villageName || student.stopName || '—'}
+                          </div>
+                        </td>
+                        <td className="py-3 px-2.5">
+                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px] mr-1">
+                            {campus}
+                          </span>
+                          <span className="font-semibold text-slate-700">
+                            {student.class}-{student.section}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="font-mono font-bold text-slate-800">{routeCode}</div>
+                          <div className="text-[10px] font-mono text-slate-500">{vehicleReg}</div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="font-medium text-slate-800">
+                            {student.fatherName || student.parentName || '—'}
+                          </div>
+                          {student.parentPhone ? (
+                            <a
+                              href={`tel:${student.parentPhone}`}
+                              className="text-[11px] font-mono font-bold text-indigo-600 hover:underline inline-flex items-center gap-1"
+                            >
+                              <PhoneCall className="w-3 h-3" />
+                              <span>{student.parentPhone}</span>
+                            </a>
+                          ) : (
+                            <span className="text-[11px] text-slate-400">No Phone</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-2.5 text-right font-mono text-slate-700">
+                          ₹{stats.previousDuesAmount.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-2.5 text-right font-mono font-bold text-emerald-700">
+                          ₹{stats.totalCollected.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-extrabold text-rose-600 text-sm">
+                          ₹{stats.totalOutstanding.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-3 max-w-xs">
+                          {stats.latestFollowUp ? (
+                            <div className="p-2 rounded-lg bg-amber-50/70 border border-amber-200/80 text-[11px]">
+                              <div className="flex items-center justify-between gap-1 font-bold text-amber-950">
+                                <span>{stats.latestFollowUp.callOutcome}</span>
+                                <span className="font-mono text-[10px] text-slate-500">
+                                  {stats.latestFollowUp.callDate}
+                                </span>
+                              </div>
+                              <div className="text-slate-700 truncate mt-0.5">
+                                {stats.latestFollowUp.remarks}
+                              </div>
+                              {stats.latestFollowUp.promisedPayDate && (
+                                <div className="text-[10px] font-bold text-indigo-700 mt-0.5">
+                                  Promised Date: {stats.latestFollowUp.promisedPayDate}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-slate-400 italic">No phone follow-up yet</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                printDemandSlipsBatchPdf(
+                                  [{ student, stats, routeCode, vehicleReg }],
+                                  `Demand Slip — ${student.name} (${student.admissionNo})`
+                                )
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Print Slip</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenFollowUpModal(student)}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <PhoneCall className="w-3.5 h-3.5" />
+                              <span>Follow-up ({stats.followUps.length})</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Phone Fee Follow-up & Past Communications Modal */}
+      {followUpModalStudent && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <PhoneCall className="w-4 h-4 text-amber-400" />
+                  <span>Phone Fee Follow-up &amp; Past Communications</span>
+                </h3>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  {followUpModalStudent.name} ({followUpModalStudent.admissionNo}) • Class{' '}
+                  {followUpModalStudent.class}-{followUpModalStudent.section} • Phone:{' '}
+                  <strong className="text-amber-300 font-mono">
+                    {followUpModalStudent.parentPhone || 'N/A'}
+                  </strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFollowUpModalStudent(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs">
+              {(() => {
+                const modalStats = getStudentFeeStats(followUpModalStudent);
+                return (
+                  <>
+                    {/* Member Dues & Phone Strip */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                      <div>
+                        <div className="text-[10px] font-bold text-slate-500 uppercase">Father / Guardian</div>
+                        <div className="font-bold text-slate-900 mt-0.5">
+                          {followUpModalStudent.fatherName || followUpModalStudent.parentName || '—'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold text-slate-500 uppercase">Call Parent Phone</div>
+                        {followUpModalStudent.parentPhone ? (
+                          <a
+                            href={`tel:${followUpModalStudent.parentPhone}`}
+                            className="font-mono font-bold text-indigo-600 hover:underline flex items-center gap-1 mt-0.5"
+                          >
+                            <PhoneCall className="w-3.5 h-3.5" />
+                            <span>{followUpModalStudent.parentPhone}</span>
+                          </a>
+                        ) : (
+                          <div className="text-slate-400 mt-0.5">Not Available</div>
+                        )}
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold text-slate-500 uppercase">Previous Dues</div>
+                        <div className="font-mono font-bold text-slate-800 mt-0.5">
+                          ₹{modalStats.previousDuesAmount.toLocaleString('en-IN')}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold text-rose-700 uppercase">Total Outstanding</div>
+                        <div className="font-mono font-extrabold text-rose-600 text-sm mt-0.5">
+                          ₹{modalStats.totalOutstanding.toLocaleString('en-IN')}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Log New Phone Follow-up Form */}
+                    {onAddFollowUp && (
+                      <form
+                        onSubmit={handleSaveFollowUpSubmit}
+                        className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-3"
+                      >
+                        <div className="font-bold text-indigo-950 flex items-center justify-between">
+                          <span>Log New Phone Call Follow-up</span>
+                          <span className="text-[11px] font-mono text-indigo-700">
+                            Recorded by: {currentRole}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Spoke With (Parent/Guardian)
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={fuContactedPerson}
+                              onChange={(e) => setFuContactedPerson(e.target.value)}
+                              className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Call Outcome *
+                            </label>
+                            <select
+                              value={fuOutcome}
+                              onChange={(e) => setFuOutcome(e.target.value as any)}
+                              className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-bold"
+                            >
+                              <option value="Promised to Pay">Promised to Pay</option>
+                              <option value="Partial Payment Promised">Partial Payment Promised</option>
+                              <option value="Requested Time Extension">Requested Time Extension</option>
+                              <option value="Phone Switched Off / Not Reachable">
+                                Phone Switched Off / Not Reachable
+                              </option>
+                              <option value="Disputed / Requested Concession">
+                                Disputed / Requested Concession
+                              </option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Promised Payment Date
+                            </label>
+                            <input
+                              type="date"
+                              value={fuPromisedDate}
+                              onChange={(e) => setFuPromisedDate(e.target.value)}
+                              className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div className="sm:col-span-2">
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Conversation Summary / Parent Remarks *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              placeholder="Enter parent's response regarding fee payment..."
+                              value={fuRemarks}
+                              onChange={(e) => setFuRemarks(e.target.value)}
+                              className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Next Follow-up Date
+                            </label>
+                            <input
+                              type="date"
+                              value={fuNextFollowUpDate}
+                              onChange={(e) => setFuNextFollowUpDate(e.target.value)}
+                              className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end">
+                          <button
+                            type="submit"
+                            disabled={isSavingFollowUp}
+                            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer"
+                          >
+                            {isSavingFollowUp ? 'Saving...' : 'Save Phone Follow-up'}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+
+                    {/* Past Communications History */}
+                    <div className="space-y-2.5">
+                      <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                        <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>
+                          Past Communications &amp; Follow-up History ({modalStats.followUps.length})
+                        </span>
+                      </h4>
+
+                      {modalStats.followUps.length === 0 ? (
+                        <div className="p-6 text-center rounded-xl border border-slate-200 bg-slate-50 text-slate-400">
+                          No past fee follow-up communications recorded for this member yet.
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {modalStats.followUps.map((fu) => (
+                            <div
+                              key={fu.id}
+                              className="p-3 rounded-xl border border-slate-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]">
+                                    {fu.callOutcome}
+                                  </span>
+                                  <span className="font-mono font-bold text-slate-700">{fu.callDate}</span>
+                                  <span className="text-slate-500">
+                                    • Spoke with: <strong>{fu.contactedPerson}</strong>
+                                  </span>
+                                  <span className="text-slate-400">({fu.recordedBy})</span>
+                                </div>
+                                <p className="text-slate-800 font-medium">{fu.remarks}</p>
+                              </div>
+                              <div className="text-right font-mono text-[11px] shrink-0">
+                                {fu.promisedPayDate && (
+                                  <div className="text-indigo-700 font-bold">
+                                    Promised: {fu.promisedPayDate}
+                                  </div>
+                                )}
+                                {fu.nextFollowUpDate && (
+                                  <div className="text-slate-500">Next Call: {fu.nextFollowUpDate}</div>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>

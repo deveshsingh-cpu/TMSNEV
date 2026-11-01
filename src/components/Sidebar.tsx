@@ -167,6 +167,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'as-mem-all', label: '1- Member Directory & Add/Drop', navKey: 'members', subTab: 'all' },
         { id: 'as-mem-req', label: '2- Add / Drop Approval Status', navKey: 'members', subTab: 'requests' },
         { id: 'as-mem-disc', label: '3- Behaviour & Discipline', navKey: 'members', subTab: 'discipline' },
+        { id: 'as-mem-comp', label: '4- Feedback & Complaints', navKey: 'members', subTab: 'complaints' },
       ],
     },
     {
@@ -199,9 +200,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'op-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
         { id: 'op-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
-        { id: 'op-calendar', label: '3- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
-        { id: 'op-summary', label: '4- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
-        { id: 'op-pack', label: '5- Print Route List', navKey: 'operations', subTab: 'pack' },
+        { id: 'op-absentees', label: '3- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
+        { id: 'op-calendar', label: '4- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
+        { id: 'op-summary', label: '5- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
+        { id: 'op-pack', label: '6- Print Route List', navKey: 'operations', subTab: 'pack' },
       ],
     },
     {
@@ -213,7 +215,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'as-fe-collect', label: '1- Collect Fees & Receipts', navKey: 'fees', subTab: 'collect' },
         { id: 'as-fe-invoices', label: '2- Monthly Invoices', navKey: 'fees', subTab: 'invoices' },
-        { id: 'as-fe-recovery', label: '3- Follow-Up Dues & Recovery', navKey: 'fees', subTab: 'recovery' },
+        { id: 'as-fe-demand', label: '3- Demand Slip & Phone Follow-up', navKey: 'fees', subTab: 'demand_slip' },
+        { id: 'as-fe-matrix', label: '4- Month-wise Fee & Previous Dues', navKey: 'fees', subTab: 'monthly_matrix' },
+        { id: 'as-fe-recovery', label: '5- Follow-Up Dues & Recovery', navKey: 'fees', subTab: 'recovery' },
       ],
     },
     {
@@ -237,8 +241,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       defaultSubTab: 'day_book',
       subItems: [
         { id: 'as-led-daybook', label: '1- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
-        { id: 'as-led-stu', label: '2- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
-        { id: 'as-led-veh', label: '3- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
+        { id: 'as-led-route-out', label: '2- Route-wise Outstanding Details', navKey: 'accounts', subTab: 'route_outstanding' },
+        { id: 'as-led-demand', label: '3- Demand Slip & Follow-up', navKey: 'accounts', subTab: 'demand_slip' },
+        { id: 'as-led-stu', label: '4- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
+        { id: 'as-led-veh', label: '5- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
       ],
     },
     {
@@ -296,6 +302,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '4- Behaviour & Discipline',
           navKey: 'members',
           subTab: 'discipline',
+        },
+        {
+          id: 'mem-complaints',
+          label: '5- Feedback & Complaints',
+          navKey: 'members',
+          subTab: 'complaints',
         },
       ],
     },
@@ -357,9 +369,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'op-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
         { id: 'op-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
-        { id: 'op-calendar', label: '3- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
-        { id: 'op-summary', label: '4- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
-        { id: 'op-pack', label: '5- Print Route List', navKey: 'operations', subTab: 'pack' },
+        { id: 'op-absentees', label: '3- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
+        { id: 'op-calendar', label: '4- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
+        { id: 'op-summary', label: '5- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
+        { id: 'op-pack', label: '6- Print Route List', navKey: 'operations', subTab: 'pack' },
       ],
     },
     {
@@ -372,7 +385,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'fe-collect', label: '1- Collect Fees & Receipts', navKey: 'fees', subTab: 'collect' },
         { id: 'fe-invoices', label: '2- Monthly Invoices', navKey: 'fees', subTab: 'invoices' },
-        { id: 'fe-recovery', label: '3- Overdue & Recovery', navKey: 'fees', subTab: 'recovery' },
+        { id: 'fe-demand', label: '3- Demand Slip & Phone Follow-up', navKey: 'fees', subTab: 'demand_slip' },
+        { id: 'fe-matrix', label: '4- Month-wise Fee & Previous Dues', navKey: 'fees', subTab: 'monthly_matrix' },
+        { id: 'fe-recovery', label: '5- Overdue & Recovery', navKey: 'fees', subTab: 'recovery' },
       ],
     },
     {
@@ -421,28 +436,40 @@ export const Sidebar: React.FC<SidebarProps> = ({
           subTab: 'day_book',
         },
         {
+          id: 'ac-route-out',
+          label: '2- Route-wise Outstanding Details',
+          navKey: 'accounts',
+          subTab: 'route_outstanding',
+        },
+        {
+          id: 'ac-demand',
+          label: '3- Demand Slip & Follow-up',
+          navKey: 'accounts',
+          subTab: 'demand_slip',
+        },
+        {
           id: 'ac-stu',
-          label: '2- Member Fee Ledger',
+          label: '4- Member Fee Ledger',
           navKey: 'accounts',
           subTab: 'student_ledger',
         },
         {
           id: 'ac-veh',
-          label: '3- Vehicle Cost Ledger',
+          label: '5- Vehicle Cost Ledger',
           navKey: 'accounts',
           subTab: 'vehicle_ledger',
         },
-        { id: 'ac-odo', label: '4- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
-        { id: 'ac-fuel', label: '5- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
+        { id: 'ac-odo', label: '6- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
+        { id: 'ac-fuel', label: '7- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
         {
           id: 'ac-vch',
-          label: '6- Vouchers & Chart of A/C',
+          label: '8- Vouchers & Chart of A/C',
           navKey: 'accounts',
           subTab: 'vouchers',
         },
         {
           id: 'ac-tb',
-          label: '7- Trial Balance',
+          label: '9- Trial Balance',
           navKey: 'accounts',
           subTab: 'trial_balance',
         },

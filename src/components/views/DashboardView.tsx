@@ -20,6 +20,8 @@ import {
   Ban,
   Plus,
   ShieldCheck,
+  MessageSquareWarning,
+  Phone,
 } from 'lucide-react';
 import {
   DashboardSummary,
@@ -35,6 +37,9 @@ import {
   NavigationTab,
   FeeFollowUpRecord,
   DisciplineRecord,
+  AbsenteeCallRecord,
+  MemberComplaintRecord,
+  ComplaintSeriousness,
 } from '../../types/index.js';
 
 interface DashboardViewProps {
@@ -50,10 +55,17 @@ interface DashboardViewProps {
   maintenance: MaintenanceRequest[];
   feeFollowUps?: FeeFollowUpRecord[];
   disciplineRecords?: DisciplineRecord[];
+  absenteeCalls?: AbsenteeCallRecord[];
+  complaints?: MemberComplaintRecord[];
   isAdmin?: boolean;
   currentRoleName?: string;
+  userCampus?: string;
   onNavigate: (tab: NavigationTab, subTab?: string) => void;
   onOpenMemberProfile?: (memberId: string) => void;
+  onResolveComplaint?: (
+    id: string,
+    payload: { status?: 'Pending' | 'Resolved'; actionTaken?: string; resolvedBy?: string }
+  ) => Promise<any>;
   onUpdateExpenseApproval?: (
     id: string,
     payload: { approvalStatus: 'Approved' | 'Rejected'; approvedBy?: string; rejectionReason?: string }
@@ -93,10 +105,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   maintenance = [],
   feeFollowUps = [],
   disciplineRecords = [],
+  absenteeCalls = [],
+  complaints = [],
   isAdmin = true,
   currentRoleName = 'Transport Admin',
+  userCampus,
   onNavigate,
   onOpenMemberProfile,
+  onResolveComplaint,
   onUpdateExpenseApproval,
   onUpdateMaintenanceStatus,
   onAddMaintenance,
@@ -108,6 +124,143 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [transitGraphMode, setTransitGraphMode] = useState<'routes' | 'vehicles'>('routes');
   const [transitCampusFilter, setTransitCampusFilter] = useState<string>('all');
   const [transitVehicleFilter, setTransitVehicleFilter] = useState<string>('all');
+
+  // Dashboard Feedback & Complaints Filter State (Pending vs Resolved)
+  const [dashComplaintStatusTab, setDashComplaintStatusTab] = useState<'Pending' | 'Resolved'>('Pending');
+  const [dashComplaintSeriousness, setDashComplaintSeriousness] = useState<'all' | ComplaintSeriousness>('all');
+  const [dashResolvingId, setDashResolvingId] = useState<string | null>(null);
+  const [dashResolveNote, setDashResolveNote] = useState<string>('');
+
+  // Compute Daily Absentee Calling Status & >3 Consecutive Days Absent Summary for Dashboard
+  const absenteeCallingDashboardStats = React.useMemo(() => {
+    const activeMembers = students.filter((s) => s.transportStatus === 'Active');
+    let totalToCallToday = 0;
+    let totalCalledToday = 0;
+    let srToCall = 0;
+    let srCalled = 0;
+    let jrToCall = 0;
+    let jrCalled = 0;
+    let scheduledReturnCount = 0;
+    const over3DaysList: Array<{
+      student: StudentMember;
+      campus: string;
+      consecutiveDays: number;
+      isCalledToday: boolean;
+      assistantRemarks: string;
+      coordinatorRemarks: string;
+      expectedReturnDate?: string;
+    }> = [];
+
+    for (const s of activeMembers) {
+      const stuCampus = s.campus || (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+      const dayAtt = attendanceRecords.filter((a) => a.studentId === s.id && a.date === today);
+      const isPresentToday = dayAtt.some(
+        (a) => a.driverStatus === 'Present' || a.assistantStatus === 'Present'
+      );
+      const isAbsentToday = dayAtt.some(
+        (a) =>
+          a.driverStatus === 'Absent' ||
+          a.assistantStatus === 'Absent' ||
+          a.driverStatus === 'Leave' ||
+          a.assistantStatus === 'Leave'
+      );
+      const callToday = absenteeCalls.find((c) => c.studentId === s.id && c.date === today);
+      const latestCall = [...absenteeCalls]
+        .filter((c) => c.studentId === s.id)
+        .sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+
+      const expRet =
+        s.expectedReturnDate || callToday?.expectedReturnDate || latestCall?.expectedReturnDate || '';
+      const inScheduledReturn = Boolean(expRet && today < expRet && !isPresentToday);
+      const overdueReturn = Boolean(expRet && today >= expRet && !isPresentToday);
+
+      if (inScheduledReturn) {
+        scheduledReturnCount += 1;
+      }
+
+      // Compute consecutive streak
+      const stuAtt = attendanceRecords
+        .filter((a) => a.studentId === s.id && (a.date || '') <= today)
+        .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      const dates = Array.from(new Set(stuAtt.map((a) => a.date).filter(Boolean))) as string[];
+      let streak = 0;
+      for (const dt of dates) {
+        const recs = stuAtt.filter((a) => a.date === dt);
+        if (recs.some((a) => a.driverStatus === 'Present' || a.assistantStatus === 'Present')) break;
+        if (
+          recs.some(
+            (a) =>
+              a.driverStatus === 'Absent' ||
+              a.assistantStatus === 'Absent' ||
+              a.driverStatus === 'Leave' ||
+              a.assistantStatus === 'Leave'
+          )
+        ) {
+          streak += 1;
+        }
+      }
+      const consecutiveDays = Math.max(
+        streak,
+        callToday?.consecutiveDaysAbsent || 0,
+        !isPresentToday && (isAbsentToday || Boolean(expRet) || (s.absentDaysCount || 0) >= 3)
+          ? s.absentDaysCount || 1
+          : 0
+      );
+
+      const needsCallToday =
+        !isPresentToday &&
+        !inScheduledReturn &&
+        (isAbsentToday || overdueReturn || Boolean(callToday) || consecutiveDays > 3);
+
+      const isCalled = Boolean(callToday && callToday.callStatus !== 'Pending');
+
+      if (needsCallToday) {
+        totalToCallToday += 1;
+        if (isCalled) totalCalledToday += 1;
+        if (stuCampus.toLowerCase() === 'jr') {
+          jrToCall += 1;
+          if (isCalled) jrCalled += 1;
+        } else {
+          srToCall += 1;
+          if (isCalled) srCalled += 1;
+        }
+      }
+
+      if (consecutiveDays > 3 && !isPresentToday) {
+        over3DaysList.push({
+          student: s,
+          campus: stuCampus,
+          consecutiveDays,
+          isCalledToday: isCalled,
+          assistantRemarks:
+            callToday?.assistantRemarks ||
+            s.lastAbsentAssistantRemark ||
+            latestCall?.assistantRemarks ||
+            '',
+          coordinatorRemarks:
+            callToday?.coordinatorRemarks ||
+            s.lastAbsentCoordinatorRemark ||
+            latestCall?.coordinatorRemarks ||
+            '',
+          expectedReturnDate: expRet || undefined,
+        });
+      }
+    }
+
+    over3DaysList.sort((a, b) => b.consecutiveDays - a.consecutiveDays);
+
+    return {
+      totalToCallToday,
+      totalCalledToday,
+      pendingCallsToday: Math.max(0, totalToCallToday - totalCalledToday),
+      srToCall,
+      srCalled,
+      jrToCall,
+      jrCalled,
+      scheduledReturnCount,
+      over3DaysList,
+    };
+  }, [students, attendanceRecords, absenteeCalls, today]);
 
   // Overdue / Today Promise Date Follow-Up Recall Popup
   const overdueFollowUps = feeFollowUps.filter(
@@ -532,6 +685,205 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Assistant Quick Navigation Bar for Campus-Scoped Modules */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          <button
+            type="button"
+            onClick={() => onNavigate('operations', 'call_absentees')}
+            className="bg-white hover:bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left shadow-2xs transition-all cursor-pointer flex items-center justify-between"
+          >
+            <div>
+              <div className="text-[11px] font-bold uppercase text-indigo-700">
+                Call Absentees ({userCampus || 'Sr'} Campus)
+              </div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                {(userCampus || 'Sr').toLowerCase() === 'jr'
+                  ? `${absenteeCallingDashboardStats.jrCalled} / ${absenteeCallingDashboardStats.jrToCall} Called Today`
+                  : `${absenteeCallingDashboardStats.srCalled} / ${absenteeCallingDashboardStats.srToCall} Called Today`}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Log parent call &amp; tentative arrival date
+              </div>
+            </div>
+            <Phone className="w-5 h-5 text-indigo-600 shrink-0" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onNavigate('accounts', 'route_outstanding')}
+            className="bg-white hover:bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left shadow-2xs transition-all cursor-pointer flex items-center justify-between"
+          >
+            <div>
+              <div className="text-[11px] font-bold uppercase text-amber-800">
+                Route-wise Outstanding
+              </div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                {userCampus || 'Sr'} Campus Routes
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                View graph &amp; print route reminder slips
+              </div>
+            </div>
+            <IndianRupee className="w-5 h-5 text-amber-600 shrink-0" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onNavigate('fees', 'demand_slip')}
+            className="bg-white hover:bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left shadow-2xs transition-all cursor-pointer flex items-center justify-between"
+          >
+            <div>
+              <div className="text-[11px] font-bold uppercase text-emerald-700">
+                Demand Slip &amp; Follow-up
+              </div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                Print Slips &amp; Call Parents
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                View past phone communications
+              </div>
+            </div>
+            <PhoneCall className="w-5 h-5 text-emerald-600 shrink-0" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onNavigate('fees', 'monthly_matrix')}
+            className="bg-white hover:bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left shadow-2xs transition-all cursor-pointer flex items-center justify-between"
+          >
+            <div>
+              <div className="text-[11px] font-bold uppercase text-slate-600">
+                Month-wise Fee &amp; Prev. Dues
+              </div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                Separate Dues Matrix
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Previous dues vs monthly fees
+              </div>
+            </div>
+            <TrendingUp className="w-5 h-5 text-slate-700 shrink-0" />
+          </button>
+        </div>
+
+        {/* Campus-Scoped Feedback & Complaints Widget on Assistant Dashboard */}
+        {(() => {
+          const assistantCampus = userCampus && userCampus !== 'All' ? userCampus : 'Sr';
+          const campusComplaints = complaints.filter((c) => {
+            const cCamp = c.campus || (c.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+            return cCamp.toLowerCase() === assistantCampus.toLowerCase();
+          });
+          const filteredAssistantComplaints = campusComplaints.filter(
+            (c) =>
+              c.status === dashComplaintStatusTab &&
+              (dashComplaintSeriousness === 'all' || c.seriousness === dashComplaintSeriousness)
+          );
+
+          return (
+            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <MessageSquareWarning className="w-4 h-4 text-amber-500" />
+                  <h3 className="font-bold text-slate-900 text-sm">
+                    Member Feedback &amp; Complaints ({assistantCampus} Campus)
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800">
+                    {campusComplaints.filter((c) => c.status === 'Pending').length} Pending
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                    {(['Pending', 'Resolved'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        type="button"
+                        onClick={() => setDashComplaintStatusTab(tab)}
+                        className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
+                          dashComplaintStatusTab === tab
+                            ? 'bg-slate-900 text-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {tab} ({campusComplaints.filter((c) => c.status === tab).length})
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('members', 'complaints')}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    + Log / Open Register
+                  </button>
+                </div>
+              </div>
+
+              <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto">
+                {filteredAssistantComplaints.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-slate-400">
+                    No {dashComplaintStatusTab.toLowerCase()} complaints or feedback for {assistantCampus} Campus.
+                  </div>
+                ) : (
+                  filteredAssistantComplaints.map((c) => (
+                    <div
+                      key={c.id}
+                      className="px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs hover:bg-slate-50"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                              c.seriousness === 'Urgent'
+                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                : c.seriousness === 'General'
+                                ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                : 'bg-sky-100 text-sky-900 border border-sky-300'
+                            }`}
+                          >
+                            {c.seriousness}
+                          </span>
+                          <span className="font-bold text-slate-900">
+                            {c.memberName} ({c.admissionNo})
+                          </span>
+                          <span className="text-slate-500 font-mono text-[11px]">
+                            Route: {c.routeCode} • Veh: {c.vehicleNumber} • Driver: {c.driverName}
+                          </span>
+                          <span className="text-slate-400 font-mono text-[11px]">{c.date}</span>
+                        </div>
+                        <p className="italic text-slate-800">&ldquo;{c.wordsOfMember}&rdquo;</p>
+                        {c.actionTaken && (
+                          <p className="text-[11px] text-emerald-700 font-semibold">
+                            Action: {c.actionTaken}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {c.status === 'Pending' && onResolveComplaint && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onResolveComplaint(c.id, {
+                                status: 'Resolved',
+                                actionTaken: 'Resolved by Transport Assistant after parent/driver follow-up.',
+                                resolvedBy: `Transport Assistant (${assistantCampus})`,
+                              })
+                            }
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-[11px] cursor-pointer"
+                          >
+                            Mark Resolved
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -1975,6 +2327,424 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* =====================================================================
+          ABSENTEE PARENT CALLING STATUS & > 3 CONSECUTIVE DAYS ABSENCE MONITOR
+         ===================================================================== */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-2xs">
+              <Phone className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-slate-900 text-sm">
+                  Daily Absentee Parent Calling Status &amp; &gt;3 Consecutive Days Absence Escalation
+                </h3>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                    absenteeCallingDashboardStats.pendingCallsToday === 0
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                      : 'bg-amber-100 text-amber-900 border border-amber-300'
+                  }`}
+                >
+                  {absenteeCallingDashboardStats.pendingCallsToday === 0
+                    ? 'All Calls Completed Today'
+                    : `${absenteeCallingDashboardStats.pendingCallsToday} Calls Pending Today`}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Monitors whether daily absentee parent calling has been completed across Sr &amp; Jr Campuses, plus students absent &gt;3 consecutive days for Coordinator follow-up.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onNavigate('operations', 'call_absentees')}
+            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-2xs"
+          >
+            <Phone className="w-3.5 h-3.5 text-amber-400" />
+            <span>Open Call Absentees Module</span>
+            <ArrowRight className="w-3.5 h-3.5 text-amber-400" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* Campus-wise Calling Completion Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div className="text-[11px] font-bold uppercase text-slate-500">
+                Overall Calling Status Today
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-xl font-black text-slate-900">
+                  {absenteeCallingDashboardStats.totalCalledToday} /{' '}
+                  {absenteeCallingDashboardStats.totalToCallToday}
+                </span>
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                    absenteeCallingDashboardStats.pendingCallsToday === 0
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-amber-100 text-amber-800'
+                  }`}
+                >
+                  {absenteeCallingDashboardStats.pendingCallsToday === 0
+                    ? 'Calling Done'
+                    : `${absenteeCallingDashboardStats.pendingCallsToday} Pending`}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200">
+              <div className="text-[11px] font-bold uppercase text-indigo-800">
+                Senior (Sr) Campus Calling
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-xl font-black text-indigo-950">
+                  {absenteeCallingDashboardStats.srCalled} / {absenteeCallingDashboardStats.srToCall}
+                </span>
+                <span className="text-[10px] font-bold text-indigo-800 bg-white px-2 py-0.5 rounded border border-indigo-200">
+                  {absenteeCallingDashboardStats.srToCall - absenteeCallingDashboardStats.srCalled === 0
+                    ? 'Completed'
+                    : `${absenteeCallingDashboardStats.srToCall - absenteeCallingDashboardStats.srCalled} Pending`}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200">
+              <div className="text-[11px] font-bold uppercase text-amber-900">
+                Junior (Jr) Campus Calling
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-xl font-black text-amber-950">
+                  {absenteeCallingDashboardStats.jrCalled} / {absenteeCallingDashboardStats.jrToCall}
+                </span>
+                <span className="text-[10px] font-bold text-amber-900 bg-white px-2 py-0.5 rounded border border-amber-200">
+                  {absenteeCallingDashboardStats.jrToCall - absenteeCallingDashboardStats.jrCalled === 0
+                    ? 'Completed'
+                    : `${absenteeCallingDashboardStats.jrToCall - absenteeCallingDashboardStats.jrCalled} Pending`}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-rose-50/70 border border-rose-200">
+              <div className="text-[11px] font-bold uppercase text-rose-800">
+                &gt;3 Days Consecutive / Scheduled Return
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="text-xl font-black text-rose-950">
+                  {absenteeCallingDashboardStats.over3DaysList.length} &gt;3d
+                </span>
+                <span className="text-[10px] font-bold text-indigo-800 bg-white px-2 py-0.5 rounded border border-indigo-200">
+                  {absenteeCallingDashboardStats.scheduledReturnCount} Scheduled Return
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* > 3 Consecutive Days Absent Table (Both Campuses) */}
+          {absenteeCallingDashboardStats.over3DaysList.length > 0 && (
+            <div className="border border-rose-200 rounded-xl overflow-hidden">
+              <div className="bg-rose-50 px-4 py-2.5 border-b border-rose-200 flex items-center justify-between">
+                <div className="text-xs font-black text-rose-950 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-rose-600" />
+                  <span>
+                    Students Absent &gt; 3 Consecutive Days (Both Campuses — Transport Coordinator Follow-up &amp; Remarks)
+                  </span>
+                </div>
+                <span className="text-[11px] font-bold text-rose-800">
+                  {absenteeCallingDashboardStats.over3DaysList.length} Student(s)
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-white border-b border-slate-200 text-slate-600 font-bold text-[11px] uppercase">
+                      <th className="py-2.5 px-3">Student &amp; Campus</th>
+                      <th className="py-2.5 px-3">Route &amp; Phone</th>
+                      <th className="py-2.5 px-3 text-center">Consecutive Days</th>
+                      <th className="py-2.5 px-3">Assistant Remark</th>
+                      <th className="py-2.5 px-3">Coordinator Remark</th>
+                      <th className="py-2.5 px-3 text-center">Today&apos;s Call</th>
+                      <th className="py-2.5 px-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {absenteeCallingDashboardStats.over3DaysList.slice(0, 6).map((item) => (
+                      <tr key={item.student.id} className="hover:bg-slate-50">
+                        <td className="py-2.5 px-3">
+                          <div className="font-bold text-slate-900">
+                            {item.student.name}{' '}
+                            <span className="text-[10px] font-mono text-slate-500">
+                              ({item.student.admissionNo})
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Campus: <strong>{item.campus}</strong> • Class {item.student.class}-
+                            {item.student.section}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <div className="font-bold text-slate-800">{item.student.routeCode}</div>
+                          <div className="font-mono text-[11px] text-indigo-600">
+                            {item.student.mobile}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-3 text-center">
+                          <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-300 font-black text-[11px]">
+                            {item.consecutiveDays} Days
+                          </span>
+                          {item.expectedReturnDate && (
+                            <div className="text-[10px] font-mono text-indigo-700 mt-0.5">
+                              Tentative: {item.expectedReturnDate}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-700">
+                          {item.assistantRemarks || (
+                            <span className="text-slate-400 italic">No assistant remark</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          {item.coordinatorRemarks ? (
+                            <span className="font-semibold text-indigo-900">
+                              {item.coordinatorRemarks}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold">
+                              Coordinator Remark Pending
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-center">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              item.isCalledToday
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {item.isCalledToday ? 'Called Today' : 'Pending Call'}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => onNavigate('operations', 'call_absentees')}
+                            className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                          >
+                            Call / Enter Remarks
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* =====================================================================
+          FEEDBACK & COMPLAINTS ACTION CENTER (PENDING & RESOLVED FILTERS)
+         ===================================================================== */}
+      {(() => {
+        const filteredDashComplaints = complaints.filter(
+          (c) =>
+            c.status === dashComplaintStatusTab &&
+            (dashComplaintSeriousness === 'all' || c.seriousness === dashComplaintSeriousness)
+        );
+        return (
+          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center shadow-2xs">
+                  <MessageSquareWarning className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-slate-900 text-sm">
+                      Member &amp; Parent Feedback &amp; Complaints Action Center
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-100 text-rose-800 border border-rose-300">
+                      {complaints.filter((c) => c.status === 'Pending').length} Pending Action
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Linked to Member Profile, Route, Vehicle &amp; Driver. Filter by Pending or Resolved status.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex rounded-xl bg-slate-200/70 p-1 border border-slate-200">
+                  {(['Pending', 'Resolved'] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setDashComplaintStatusTab(st)}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                        dashComplaintStatusTab === st
+                          ? 'bg-slate-900 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {st} ({complaints.filter((c) => c.status === st).length})
+                    </button>
+                  ))}
+                </div>
+
+                <select
+                  value={dashComplaintSeriousness}
+                  onChange={(e) => setDashComplaintSeriousness(e.target.value as any)}
+                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800"
+                >
+                  <option value="all">Seriousness: All</option>
+                  <option value="Urgent">Urgent</option>
+                  <option value="General">General</option>
+                  <option value="Feedback">Feedback</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => onNavigate('members', 'complaints')}
+                  className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl flex items-center gap-1 cursor-pointer"
+                >
+                  <span>+ Log / Open Register</span>
+                  <ArrowRight className="w-3.5 h-3.5 text-amber-400" />
+                </button>
+              </div>
+            </div>
+
+            <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+              {filteredDashComplaints.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-400">
+                  No {dashComplaintStatusTab.toLowerCase()} complaints or feedback matching current filters.
+                </div>
+              ) : (
+                filteredDashComplaints.map((c) => (
+                  <div
+                    key={c.id}
+                    className={`px-5 py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs hover:bg-slate-50 ${
+                      c.seriousness === 'Urgent' && c.status === 'Pending' ? 'bg-rose-50/35' : ''
+                    }`}
+                  >
+                    <div className="space-y-1 max-w-3xl">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                            c.seriousness === 'Urgent'
+                              ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                              : c.seriousness === 'General'
+                              ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                              : 'bg-sky-100 text-sky-900 border border-sky-300'
+                          }`}
+                        >
+                          {c.seriousness}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onOpenMemberProfile) onOpenMemberProfile(c.memberId);
+                          }}
+                          className="font-bold text-slate-900 hover:text-indigo-600 underline cursor-pointer"
+                        >
+                          {c.memberName} ({c.admissionNo})
+                        </button>
+                        <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold text-[10px]">
+                          Campus: {c.campus || 'Sr'} • {c.className}-{c.section}
+                        </span>
+                        <span className="text-slate-600 font-mono text-[11px]">
+                          Route: <strong>{c.routeCode}</strong> • Vehicle:{' '}
+                          <strong>{c.vehicleNumber}</strong> • Driver:{' '}
+                          <strong>{c.driverName}</strong>
+                        </span>
+                        <span className="text-slate-400 font-mono text-[11px]">{c.date}</span>
+                      </div>
+                      <p className="italic text-slate-900 font-medium">
+                        &ldquo;{c.wordsOfMember}&rdquo;
+                      </p>
+                      {c.actionTaken && (
+                        <p className="text-[11px] text-emerald-800 font-semibold">
+                          Resolution: {c.actionTaken}{' '}
+                          {c.resolvedBy ? `(${c.resolvedBy} on ${c.resolvedAt || c.date})` : ''}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {dashResolvingId === c.id ? (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={dashResolveNote}
+                            onChange={(e) => setDashResolveNote(e.target.value)}
+                            placeholder="Enter action taken..."
+                            className="px-2.5 py-1 border border-slate-300 rounded-lg text-xs w-48"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (onResolveComplaint) {
+                                await onResolveComplaint(c.id, {
+                                  status: 'Resolved',
+                                  actionTaken:
+                                    dashResolveNote.trim() ||
+                                    `Resolved by ${currentRoleName} after verification.`,
+                                  resolvedBy: currentRoleName,
+                                });
+                              }
+                              setDashResolvingId(null);
+                              setDashResolveNote('');
+                            }}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-[11px] cursor-pointer"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDashResolvingId(null)}
+                            className="px-2 py-1 border border-slate-300 rounded-lg text-[11px] cursor-pointer"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (onOpenMemberProfile) onOpenMemberProfile(c.memberId);
+                            }}
+                            className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-lg text-[11px] cursor-pointer"
+                          >
+                            Member Profile
+                          </button>
+                          {c.status === 'Pending' && onResolveComplaint && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDashResolvingId(c.id);
+                                setDashResolveNote('');
+                              }}
+                              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-[11px] cursor-pointer"
+                            >
+                              Resolve Action
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Quick Raise Work Order Modal */}
       {isRaiseWoOpen && (
