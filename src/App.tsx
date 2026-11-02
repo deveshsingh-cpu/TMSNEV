@@ -690,6 +690,8 @@ export function App() {
   const handleSaveAbsenteeCall = async (payload: Partial<AbsenteeCallRecord> & { clearExpectedReturn?: boolean }) => {
     const res = await api.saveAbsenteeCall({
       ...payload,
+      studentId: payload.studentId || '',
+      date: payload.date || new Date().toISOString().split('T')[0],
       calledBy: payload.calledBy || currentUser?.fullName || activeRole,
       calledByRole: payload.calledByRole || activeRole,
     });
@@ -731,9 +733,9 @@ export function App() {
     }
   ) => {
     const res = await api.resolveComplaint(id, {
-      ...payload,
+      status: payload.status || 'Resolved',
+      actionTaken: payload.actionTakenRemarks || (payload as { actionTaken?: string }).actionTaken || 'Resolved',
       resolvedBy: payload.resolvedBy || currentUser?.fullName || activeRole,
-      resolvedByRole: payload.resolvedByRole || activeRole,
     });
     await loadAllData();
     return res;
@@ -1719,7 +1721,7 @@ export function App() {
                   onSaveIncomeHead={handleSaveIncomeHead}
                   onDeleteIncomeHead={handleDeleteIncomeHead}
                   onAddIncome={handleAddOtherIncome}
-                  onDeleteIncome={handleAddOtherIncome ? handleDeleteOtherIncome : undefined}
+                  onDeleteIncome={handleDeleteOtherIncome}
                   onDeleteExpense={handleDeleteExpense}
                   onCreateVoucher={handleCreateVoucher}
                 />

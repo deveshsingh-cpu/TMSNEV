@@ -1,7 +1,19 @@
-import { Student, Route, Vehicle, FeeInvoice, FeeReceipt, ExpenseRecord, IncomeRecord, JournalVoucher, FollowUpRecord, WarningLetter } from '../types';
+import {
+  Student,
+  Route,
+  Vehicle,
+  FeeInvoice,
+  FeeReceipt,
+  ExpenseRecord,
+  IncomeRecord,
+  JournalVoucher,
+  FollowUpRecord,
+  WarningLetter,
+} from '../types/index.js';
 
 export type ResolvedCampus = 'Sr' | 'Jr';
 export type CampusFilter = 'all' | 'Sr' | 'Jr';
+export type CampusFilterValue = CampusFilter;
 
 /**
  * Normalizes any campus label ('Sr', 'Senior', 'Senior Campus', 'Jr', 'Junior', etc.)
@@ -34,9 +46,9 @@ export function getStudentCampus(student?: Partial<Student> | null, routes?: Rou
   const direct = normalizeCampus(student.campus);
   if (direct) return direct;
 
-  if (student.routeId && routes && routes.length > 0) {
-    const r = routes.find(rt => rt.id === student.routeId || rt.code === student.routeCode);
-    const rCamp = normalizeCampus(r?.campus);
+  if (student.routeId && Array.isArray(routes) && routes.length > 0) {
+    const r = routes.find((rt) => rt && (rt.id === student.routeId || rt.code === student.routeCode));
+    const rCamp = normalizeCampus(r?.campus || r?.campusCode);
     if (rCamp) return rCamp;
   }
 
@@ -44,12 +56,13 @@ export function getStudentCampus(student?: Partial<Student> | null, routes?: Rou
   if (fromRouteCode) return fromRouteCode;
 
   // Check class level fallback (Nursery/LKG/UKG/Class I-V -> Jr, VI-XII -> Sr)
-  const cls = (student.className || '').toUpperCase();
+  const rawClass = student.class || (student as { className?: string }).className || '';
+  const cls = String(rawClass).toUpperCase();
   if (
     cls.includes('NUR') ||
     cls.includes('LKG') ||
     cls.includes('UKG') ||
-    /\b(I|II|III|IV|V|1|2|3|4|5)\b/.test(cls) && !/\b(VI|VII|VIII|IX|X|XI|XII)\b/.test(cls)
+    (/\b(I|II|III|IV|V|1|2|3|4|5)\b/.test(cls) && !/\b(VI|VII|VIII|IX|X|XI|XII)\b/.test(cls))
   ) {
     return 'Jr';
   }
@@ -62,7 +75,7 @@ export function getStudentCampus(student?: Partial<Student> | null, routes?: Rou
  */
 export function getRouteCampus(route?: Partial<Route> | null): ResolvedCampus {
   if (!route) return 'Sr';
-  const direct = normalizeCampus(route.campus);
+  const direct = normalizeCampus(route.campus || route.campusCode);
   if (direct) return direct;
   const fromCode = normalizeCampus(route.code || route.name);
   if (fromCode) return fromCode;
@@ -73,18 +86,22 @@ export function getRouteCampus(route?: Partial<Route> | null): ResolvedCampus {
  * Resolves a FeeInvoice's campus ('Sr' or 'Jr')
  */
 export function getInvoiceCampus(
-  invoice: Partial<FeeInvoice>,
-  students: Student[],
+  invoice: Partial<FeeInvoice> | null | undefined,
+  students: Student[] = [],
   routes?: Route[]
 ): ResolvedCampus {
+  if (!invoice) return 'Sr';
   const direct = normalizeCampus(invoice.campus);
   if (direct) return direct;
 
-  const st = students.find(
-    s =>
-      s.id === invoice.studentId ||
-      (invoice.admissionNo && s.admissionNo === invoice.admissionNo) ||
-      (invoice.studentName && s.name.toLowerCase() === invoice.studentName.toLowerCase())
+  const safeStudents = Array.isArray(students) ? students : [];
+  const invStudentName = (invoice.studentName || '').trim().toLowerCase();
+  const st = safeStudents.find(
+    (s) =>
+      s &&
+      (s.id === invoice.studentId ||
+        (invoice.admissionNo && s.admissionNo === invoice.admissionNo) ||
+        (invStudentName && (s.name || '').trim().toLowerCase() === invStudentName))
   );
   if (st) return getStudentCampus(st, routes);
 
@@ -98,26 +115,30 @@ export function getInvoiceCampus(
  * Resolves a FeeReceipt's campus ('Sr' or 'Jr')
  */
 export function getReceiptCampus(
-  receipt: Partial<FeeReceipt>,
-  students: Student[],
+  receipt: Partial<FeeReceipt> | null | undefined,
+  students: Student[] = [],
   routes?: Route[],
   invoices?: FeeInvoice[]
 ): ResolvedCampus {
+  if (!receipt) return 'Sr';
   const direct = normalizeCampus(receipt.campus);
   if (direct) return direct;
 
-  const st = students.find(
-    s =>
-      s.id === receipt.studentId ||
-      (receipt.admissionNo && s.admissionNo === receipt.admissionNo) ||
-      (receipt.studentName && s.name.toLowerCase() === receipt.studentName.toLowerCase())
+  const safeStudents = Array.isArray(students) ? students : [];
+  const recStudentName = (receipt.studentName || '').trim().toLowerCase();
+  const st = safeStudents.find(
+    (s) =>
+      s &&
+      (s.id === receipt.studentId ||
+        (receipt.admissionNo && s.admissionNo === receipt.admissionNo) ||
+        (recStudentName && (s.name || '').trim().toLowerCase() === recStudentName))
   );
   if (st) return getStudentCampus(st, routes);
 
   const invId = receipt.invoiceId || receipt.allocatedToInvoiceId;
-  if (invId && invoices) {
-    const inv = invoices.find(i => i.id === invId);
-    if (inv) return getInvoiceCampus(inv, students, routes);
+  if (invId && Array.isArray(invoices)) {
+    const inv = invoices.find((i) => i && i.id === invId);
+    if (inv) return getInvoiceCampus(inv, safeStudents, routes);
   }
 
   const fromReceivedBy = normalizeCampus(receipt.receivedBy);
@@ -127,11 +148,19 @@ export function getReceiptCampus(
 }
 
 /**
- * Checks whether a Vehicle serves a given campus ('Sr' or 'Jr').
- * Notice: Some vehicles serve routes in both campuses or a single campus.
- * For strict separation of financial ledgers when a single campus is needed,
- * getPrimaryVehicleCampus returns the primary campus, while vehicleServesCampus
- * checks if the vehicle operates in that campus.
+ * Helper to get vehicle registration number safely across data shapes
+ */
+function getVehicleRegNumber(vehicle?: Partial<Vehicle> | null): string {
+  if (!vehicle) return '';
+  return (
+    vehicle.registrationNumber ||
+    (vehicle as { vehicleNumber?: string }).vehicleNumber ||
+    ''
+  );
+}
+
+/**
+ * Returns the primary campus ('Sr' or 'Jr') for a Vehicle.
  */
 export function getPrimaryVehicleCampus(
   vehicle?: Partial<Vehicle> | null,
@@ -139,27 +168,33 @@ export function getPrimaryVehicleCampus(
   students?: Student[]
 ): ResolvedCampus {
   if (!vehicle) return 'Sr';
+  const vehReg = getVehicleRegNumber(vehicle);
 
-  if (routes && routes.length > 0) {
+  if (Array.isArray(routes) && routes.length > 0) {
     const matchedRoutes = routes.filter(
-      r =>
-        r.vehicleId === vehicle.id ||
-        r.assignedVehicleNumber === vehicle.vehicleNumber ||
-        (vehicle.assignedRouteId && r.id === vehicle.assignedRouteId)
+      (r) =>
+        r &&
+        ((vehicle.id && r.vehicleId === vehicle.id) ||
+          (vehReg && r.vehicleNumber === vehReg))
     );
     if (matchedRoutes.length > 0) {
-      const jrCount = matchedRoutes.filter(r => getRouteCampus(r) === 'Jr').length;
-      const srCount = matchedRoutes.filter(r => getRouteCampus(r) === 'Sr').length;
+      const jrCount = matchedRoutes.filter((r) => getRouteCampus(r) === 'Jr').length;
+      const srCount = matchedRoutes.filter((r) => getRouteCampus(r) === 'Sr').length;
       if (jrCount > srCount) return 'Jr';
       if (srCount > 0) return 'Sr';
     }
   }
 
-  if (students && students.length > 0 && vehicle.id) {
-    const matchedStudents = students.filter(s => s.vehicleId === vehicle.id);
+  if (Array.isArray(students) && students.length > 0 && Array.isArray(routes) && routes.length > 0) {
+    const vehRouteIds = new Set(
+      routes
+        .filter((r) => r && ((vehicle.id && r.vehicleId === vehicle.id) || (vehReg && r.vehicleNumber === vehReg)))
+        .map((r) => r.id)
+    );
+    const matchedStudents = students.filter((s) => s && vehRouteIds.has(s.routeId));
     if (matchedStudents.length > 0) {
-      const jrCount = matchedStudents.filter(s => getStudentCampus(s, routes) === 'Jr').length;
-      const srCount = matchedStudents.filter(s => getStudentCampus(s, routes) === 'Sr').length;
+      const jrCount = matchedStudents.filter((s) => getStudentCampus(s, routes) === 'Jr').length;
+      const srCount = matchedStudents.filter((s) => getStudentCampus(s, routes) === 'Sr').length;
       if (jrCount > srCount) return 'Jr';
     }
   }
@@ -168,27 +203,38 @@ export function getPrimaryVehicleCampus(
 }
 
 export function vehicleServesCampus(
-  vehicle: Partial<Vehicle>,
+  vehicle: Partial<Vehicle> | null | undefined,
   campus: CampusFilter,
   routes?: Route[],
   students?: Student[]
 ): boolean {
+  if (!vehicle) return false;
   const norm = normalizeCampus(campus);
   if (!norm) return true;
 
-  if (routes && routes.length > 0) {
+  const vehReg = getVehicleRegNumber(vehicle);
+  if (Array.isArray(routes) && routes.length > 0) {
     const matchedRoutes = routes.filter(
-      r =>
-        r.vehicleId === vehicle.id ||
-        r.assignedVehicleNumber === vehicle.vehicleNumber ||
-        (vehicle.assignedRouteId && r.id === vehicle.assignedRouteId)
+      (r) =>
+        r &&
+        ((vehicle.id && r.vehicleId === vehicle.id) ||
+          (vehReg && r.vehicleNumber === vehReg))
     );
-    if (matchedRoutes.some(r => getRouteCampus(r) === norm)) return true;
-  }
+    if (matchedRoutes.some((r) => getRouteCampus(r) === norm)) return true;
 
-  if (students && students.length > 0 && vehicle.id) {
-    if (students.some(s => s.vehicleId === vehicle.id && getStudentCampus(s, routes) === norm)) {
-      return true;
+    if (Array.isArray(students) && students.length > 0) {
+      const routeIds = new Set(matchedRoutes.map((r) => r.id));
+      const routeCodes = new Set(matchedRoutes.map((r) => r.code));
+      if (
+        students.some(
+          (s) =>
+            s &&
+            (routeIds.has(s.routeId) || routeCodes.has(s.routeCode)) &&
+            getStudentCampus(s, routes) === norm
+        )
+      ) {
+        return true;
+      }
     }
   }
 
@@ -199,31 +245,34 @@ export function vehicleServesCampus(
  * Resolves an ExpenseRecord's campus ('Sr' or 'Jr')
  */
 export function getExpenseCampus(
-  expense: Partial<ExpenseRecord>,
+  expense: Partial<ExpenseRecord> | null | undefined,
   vehicles?: Vehicle[],
   routes?: Route[],
   students?: Student[]
 ): ResolvedCampus {
+  if (!expense) return 'Sr';
   const direct = normalizeCampus(expense.campus);
   if (direct) return direct;
 
   const fromRecordedBy = normalizeCampus(expense.recordedBy);
   if (fromRecordedBy) return fromRecordedBy;
 
-  if ((expense.vehicleId || expense.vehicleNumber) && vehicles && vehicles.length > 0) {
+  if ((expense.vehicleId || expense.vehicleNumber) && Array.isArray(vehicles) && vehicles.length > 0) {
     const v = vehicles.find(
-      veh =>
-        (expense.vehicleId && veh.id === expense.vehicleId) ||
-        (expense.vehicleNumber && veh.vehicleNumber === expense.vehicleNumber)
+      (veh) =>
+        veh &&
+        ((expense.vehicleId && veh.id === expense.vehicleId) ||
+          (expense.vehicleNumber && getVehicleRegNumber(veh) === expense.vehicleNumber))
     );
     if (v) return getPrimaryVehicleCampus(v, routes, students);
   }
 
-  if (expense.vehicleNumber && routes && routes.length > 0) {
+  if (expense.vehicleNumber && Array.isArray(routes) && routes.length > 0) {
     const r = routes.find(
-      rt =>
-        rt.assignedVehicleNumber === expense.vehicleNumber ||
-        rt.code.includes(expense.vehicleNumber || '')
+      (rt) =>
+        rt &&
+        (rt.vehicleNumber === expense.vehicleNumber ||
+          (rt.code || '').includes(expense.vehicleNumber || ''))
     );
     if (r) return getRouteCampus(r);
   }
@@ -234,7 +283,8 @@ export function getExpenseCampus(
 /**
  * Resolves an IncomeRecord's campus ('Sr' or 'Jr')
  */
-export function getIncomeCampus(income: Partial<IncomeRecord>): ResolvedCampus {
+export function getIncomeCampus(income?: Partial<IncomeRecord> | null): ResolvedCampus {
+  if (!income) return 'Sr';
   const direct = normalizeCampus(income.campus);
   if (direct) return direct;
 
@@ -251,26 +301,28 @@ export function getIncomeCampus(income: Partial<IncomeRecord>): ResolvedCampus {
  * Resolves a JournalVoucher's campus ('Sr' or 'Jr')
  */
 export function getVoucherCampus(
-  voucher: Partial<JournalVoucher>,
+  voucher: Partial<JournalVoucher> | null | undefined,
   students?: Student[],
   vehicles?: Vehicle[],
   routes?: Route[]
 ): ResolvedCampus {
+  if (!voucher) return 'Sr';
   const direct = normalizeCampus(voucher.campus);
   if (direct) return direct;
 
   const partyCandidates: string[] = [];
   if (voucher.partyName) partyCandidates.push(voucher.partyName);
-  if (voucher.lines) {
-    voucher.lines.forEach(l => {
-      if (l.partyName) partyCandidates.push(l.partyName);
+  if (Array.isArray(voucher.lines)) {
+    voucher.lines.forEach((l) => {
+      if (l?.partyName) partyCandidates.push(l.partyName);
     });
   }
 
-  if (partyCandidates.length > 0 && students && students.length > 0) {
+  if (partyCandidates.length > 0 && Array.isArray(students) && students.length > 0) {
     for (const p of partyCandidates) {
+      const pLower = String(p || '').trim().toLowerCase();
       const st = students.find(
-        s => s.name.toLowerCase() === p.toLowerCase() || s.admissionNo === p
+        (s) => s && ((s.name || '').trim().toLowerCase() === pLower || s.admissionNo === p)
       );
       if (st) return getStudentCampus(st, routes);
     }
@@ -278,26 +330,27 @@ export function getVoucherCampus(
 
   const costCenters: string[] = [];
   if (voucher.costCenter) costCenters.push(voucher.costCenter);
-  if (voucher.lines) {
-    voucher.lines.forEach(l => {
-      if (l.costCenter) costCenters.push(l.costCenter);
+  if (Array.isArray(voucher.lines)) {
+    voucher.lines.forEach((l) => {
+      if (l?.costCenter) costCenters.push(l.costCenter);
     });
   }
 
-  if (costCenters.length > 0 && vehicles && vehicles.length > 0) {
+  if (costCenters.length > 0 && Array.isArray(vehicles) && vehicles.length > 0) {
     for (const cc of costCenters) {
-      const v = vehicles.find(veh => veh.vehicleNumber === cc || veh.id === cc);
+      const v = vehicles.find((veh) => veh && (getVehicleRegNumber(veh) === cc || veh.id === cc));
       if (v) return getPrimaryVehicleCampus(v, routes, students);
     }
   }
 
   // Also check narration for student admissionNo or name
-  if (voucher.narration && students && students.length > 0) {
-    const narrLower = voucher.narration.toLowerCase();
+  if (voucher.narration && Array.isArray(students) && students.length > 0) {
+    const narrLower = String(voucher.narration).toLowerCase();
     const matchedStudent = students.find(
-      s =>
-        (s.admissionNo && voucher.narration?.includes(s.admissionNo)) ||
-        (s.name && s.name.length > 3 && narrLower.includes(s.name.toLowerCase()))
+      (s) =>
+        s &&
+        ((s.admissionNo && voucher.narration?.includes(s.admissionNo)) ||
+          (s.name && s.name.length > 3 && narrLower.includes(s.name.toLowerCase())))
     );
     if (matchedStudent) return getStudentCampus(matchedStudent, routes);
   }
@@ -312,22 +365,36 @@ export function getVoucherCampus(
  * Resolves a FollowUpRecord or WarningLetter campus ('Sr' or 'Jr')
  */
 export function getStudentLinkedCampus(
-  record: Partial<FollowUpRecord | WarningLetter>,
-  students: Student[],
+  record: Partial<FollowUpRecord | WarningLetter> | null | undefined,
+  students: Student[] = [],
   routes?: Route[]
 ): ResolvedCampus {
-  const direct = normalizeCampus((record as any).campus);
+  if (!record) return 'Sr';
+  const direct = normalizeCampus((record as { campus?: string }).campus);
   if (direct) return direct;
 
-  const st = students.find(
-    s =>
-      s.id === record.studentId ||
-      (record.admissionNo && s.admissionNo === record.admissionNo) ||
-      (record.studentName && s.name.toLowerCase() === record.studentName.toLowerCase())
+  const safeStudents = Array.isArray(students) ? students : [];
+  const recStudentId =
+    (record as { studentId?: string; memberId?: string }).studentId ||
+    (record as { memberId?: string }).memberId;
+  const recStudentName = (
+    (record as { studentName?: string; memberName?: string }).studentName ||
+    (record as { memberName?: string }).memberName ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
+
+  const st = safeStudents.find(
+    (s) =>
+      s &&
+      ((recStudentId && s.id === recStudentId) ||
+        (record.admissionNo && s.admissionNo === record.admissionNo) ||
+        (recStudentName && (s.name || '').trim().toLowerCase() === recStudentName))
   );
   if (st) return getStudentCampus(st, routes);
 
-  const fromRoute = normalizeCampus((record as any).routeName);
+  const fromRoute = normalizeCampus((record as { routeName?: string }).routeName);
   if (fromRoute) return fromRoute;
 
   return 'Sr';
@@ -336,7 +403,10 @@ export function getStudentLinkedCampus(
 /**
  * Helper to check if a resolved campus matches the active campus filter ('all' | 'Sr' | 'Jr')
  */
-export function matchesCampusFilter(recordCampus: ResolvedCampus, filter: CampusFilter | string | null | undefined): boolean {
+export function matchesCampusFilter(
+  recordCampus: ResolvedCampus,
+  filter: CampusFilter | string | null | undefined
+): boolean {
   const normFilter = normalizeCampus(filter);
   if (!normFilter) return true; // 'all' matches both Sr and Jr
   return recordCampus === normFilter;
@@ -352,6 +422,7 @@ export interface CampusFinancialSummary {
   feeCash: number;
   feeOnline: number; // UPI + Bank Transfer + Cheque
   feeTotal: number;
+  receiptCount: number;
   otherIncomeCash: number;
   otherIncomeOnline: number;
   otherIncomeTotal: number;
@@ -368,58 +439,77 @@ export interface CampusFinancialSummary {
   studentCount: number;
 }
 
+export interface CampusFinancialParams {
+  campusFilter?: CampusFilter;
+  filter?: CampusFilter;
+  students?: Student[];
+  routes?: Route[];
+  vehicles?: Vehicle[];
+  invoices?: FeeInvoice[];
+  receipts?: FeeReceipt[];
+  incomes?: IncomeRecord[];
+  expenses?: ExpenseRecord[];
+}
+
 export function calculateCampusFinancials(
-  filter: CampusFilter,
-  params: {
-    students: Student[];
-    routes?: Route[];
-    vehicles?: Vehicle[];
-    invoices?: FeeInvoice[];
-    receipts: FeeReceipt[];
-    incomes?: IncomeRecord[];
-    expenses?: ExpenseRecord[];
-  }
+  filterOrParams: CampusFilter | CampusFinancialParams,
+  maybeParams?: CampusFinancialParams
 ): CampusFinancialSummary {
-  const { students, routes, vehicles, invoices = [], receipts, incomes = [], expenses = [] } = params;
+  const isFirstArgObject = typeof filterOrParams === 'object' && filterOrParams !== null;
+  const resolvedFilter: CampusFilter = isFirstArgObject
+    ? filterOrParams.campusFilter || filterOrParams.filter || 'all'
+    : filterOrParams || 'all';
+  const rawParams: CampusFinancialParams = isFirstArgObject
+    ? filterOrParams
+    : maybeParams || {};
 
-  const scopedStudents = students.filter(s =>
-    matchesCampusFilter(getStudentCampus(s, routes), filter)
+  const students = Array.isArray(rawParams.students) ? rawParams.students : [];
+  const routes = Array.isArray(rawParams.routes) ? rawParams.routes : [];
+  const vehicles = Array.isArray(rawParams.vehicles) ? rawParams.vehicles : [];
+  const invoices = Array.isArray(rawParams.invoices) ? rawParams.invoices : [];
+  const receipts = Array.isArray(rawParams.receipts) ? rawParams.receipts : [];
+  const incomes = Array.isArray(rawParams.incomes) ? rawParams.incomes : [];
+  const expenses = Array.isArray(rawParams.expenses) ? rawParams.expenses : [];
+
+  const scopedStudents = students.filter(
+    (s) => s && matchesCampusFilter(getStudentCampus(s, routes), resolvedFilter)
   );
 
-  const scopedReceipts = receipts.filter(r =>
-    matchesCampusFilter(getReceiptCampus(r, students, routes, invoices), filter)
+  const scopedReceipts = receipts.filter(
+    (r) => r && matchesCampusFilter(getReceiptCampus(r, students, routes, invoices), resolvedFilter)
   );
 
-  const scopedIncomes = incomes.filter(inc =>
-    matchesCampusFilter(getIncomeCampus(inc), filter)
+  const scopedIncomes = incomes.filter(
+    (inc) => inc && matchesCampusFilter(getIncomeCampus(inc), resolvedFilter)
   );
 
   const approvedExpenses = expenses.filter(
-    exp =>
+    (exp) =>
+      exp &&
       exp.approvalStatus !== 'Rejected' &&
       exp.approvalStatus !== 'Pending Approval' &&
-      matchesCampusFilter(getExpenseCampus(exp, vehicles, routes, students), filter)
+      matchesCampusFilter(getExpenseCampus(exp, vehicles, routes, students), resolvedFilter)
   );
 
   const isCashMode = (mode?: string) => (mode || '').toLowerCase() === 'cash';
-  const getReceiptAmt = (r: FeeReceipt) => Number(r.amountPaid ?? r.amount ?? 0);
+  const getReceiptAmt = (r: FeeReceipt) => Number(r?.amountPaid ?? r?.amount ?? 0) || 0;
 
   const feeCash = scopedReceipts
-    .filter(r => isCashMode(r.paymentMode))
+    .filter((r) => isCashMode(r.paymentMode))
     .reduce((sum, r) => sum + getReceiptAmt(r), 0);
 
   const feeOnline = scopedReceipts
-    .filter(r => !isCashMode(r.paymentMode))
+    .filter((r) => !isCashMode(r.paymentMode))
     .reduce((sum, r) => sum + getReceiptAmt(r), 0);
 
   const feeTotal = feeCash + feeOnline;
 
   const otherIncomeCash = scopedIncomes
-    .filter(i => isCashMode(i.receivedTo || i.paymentMode))
+    .filter((i) => isCashMode(i.receivedTo || i.paymentMode))
     .reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
 
   const otherIncomeOnline = scopedIncomes
-    .filter(i => !isCashMode(i.receivedTo || i.paymentMode))
+    .filter((i) => !isCashMode(i.receivedTo || i.paymentMode))
     .reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
 
   const otherIncomeTotal = otherIncomeCash + otherIncomeOnline;
@@ -429,11 +519,11 @@ export function calculateCampusFinancials(
   const totalInflow = totalInflowCash + totalInflowOnline;
 
   const expenseCash = approvedExpenses
-    .filter(e => isCashMode(e.paymentMode))
+    .filter((e) => isCashMode(e.paymentMode))
     .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
 
   const expenseOnline = approvedExpenses
-    .filter(e => !isCashMode(e.paymentMode))
+    .filter((e) => !isCashMode(e.paymentMode))
     .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
 
   const expenseTotal = expenseCash + expenseOnline;
@@ -443,8 +533,8 @@ export function calculateCampusFinancials(
   const netTotalBalance = totalInflow - expenseTotal;
 
   // Calculate total outstanding dues for scoped students
-  const scopedInvoices = invoices.filter(inv =>
-    matchesCampusFilter(getInvoiceCampus(inv, students, routes), filter)
+  const scopedInvoices = invoices.filter(
+    (inv) => inv && matchesCampusFilter(getInvoiceCampus(inv, students, routes), resolvedFilter)
   );
   const invoicePending = scopedInvoices.reduce(
     (sum, inv) => sum + (Number(inv.balanceDue ?? inv.balanceAmount ?? 0) || 0),
@@ -452,17 +542,23 @@ export function calculateCampusFinancials(
   );
   const prevDuesPending = scopedStudents.reduce((sum, s) => sum + (Number(s.previousDues) || 0), 0);
   const studentOutstandingSum = scopedStudents.reduce(
-    (sum, s) => sum + Math.max(Number(s.outstandingAmount) || 0, Number(s.previousDues) || 0),
+    (sum, s) =>
+      sum +
+      Math.max(
+        Number(s.balanceDue ?? (s as { outstandingAmount?: number }).outstandingAmount ?? 0) || 0,
+        Number(s.previousDues) || 0
+      ),
     0
   );
   const outstandingDues = Math.max(invoicePending + prevDuesPending, studentOutstandingSum);
 
   return {
-    campus: filter,
-    label: formatCampusLabel(filter),
+    campus: resolvedFilter,
+    label: formatCampusLabel(resolvedFilter),
     feeCash,
     feeOnline,
     feeTotal,
+    receiptCount: scopedReceipts.length,
     otherIncomeCash,
     otherIncomeOnline,
     otherIncomeTotal,

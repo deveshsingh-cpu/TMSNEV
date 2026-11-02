@@ -1973,7 +1973,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                               {inc.sourceType === 'Other Income' ? (
                                 <button
                                   type="button"
-                                  onClick={() => onDeleteIncome(inc.id)}
+                                  onClick={() => onDeleteIncome?.(inc.id)}
                                   className="p-1 text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
                                   title="Delete Other Income Record (Admin)"
                                 >
@@ -2477,7 +2477,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                               {isAdmin && (
                                 <td className="py-3 px-3 text-right">
                                   <button
-                                    onClick={() => onDeleteIncome(inc.id)}
+                                    onClick={() => onDeleteIncome?.(inc.id)}
                                     className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
                                     title="Delete Income Record"
                                   >

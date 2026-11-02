@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nev-transport-erp-v3';
+const CACHE_NAME = 'nev-transport-erp-v4';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

@@ -212,11 +212,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           streak += 1;
         }
       }
+      const sAny = s as { absentDaysCount?: number };
+      const callTodayAny = callToday as { consecutiveDaysAbsent?: number; callStatus?: string } | undefined;
       const consecutiveDays = Math.max(
         streak,
-        callToday?.consecutiveDaysAbsent || 0,
-        !isPresentToday && (isAbsentToday || Boolean(expRet) || (s.absentDaysCount || 0) >= 3)
-          ? s.absentDaysCount || 1
+        callToday?.consecutiveAbsentDays || callTodayAny?.consecutiveDaysAbsent || 0,
+        !isPresentToday && (isAbsentToday || Boolean(expRet) || (sAny.absentDaysCount || 0) >= 3)
+          ? sAny.absentDaysCount || 1
           : 0
       );
 
@@ -225,7 +227,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         !inScheduledReturn &&
         (isAbsentToday || overdueReturn || Boolean(callToday) || consecutiveDays > 3);
 
-      const isCalled = Boolean(callToday && callToday.callStatus !== 'Pending');
+      const isCalled = Boolean(
+        callToday &&
+          callToday.status !== 'Pending Call' &&
+          callTodayAny?.callStatus !== 'Pending'
+      );
 
       if (needsCallToday) {
         totalToCallToday += 1;
@@ -313,8 +319,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const campusFinActive = React.useMemo(
     () =>
-      calculateCampusFinancials({
-        campusFilter: activeFinancialCampus,
+      calculateCampusFinancials(activeFinancialCampus, {
         students,
         routes,
         vehicles,
@@ -328,8 +333,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const campusFinSr = React.useMemo(
     () =>
-      calculateCampusFinancials({
-        campusFilter: 'Sr',
+      calculateCampusFinancials('Sr', {
         students,
         routes,
         vehicles,
@@ -343,8 +347,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const campusFinJr = React.useMemo(
     () =>
-      calculateCampusFinancials({
-        campusFilter: 'Jr',
+      calculateCampusFinancials('Jr', {
         students,
         routes,
         vehicles,
@@ -2913,7 +2916,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           {c.memberName} ({c.admissionNo})
                         </button>
                         <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold text-[10px]">
-                          Campus: {c.campus || 'Sr'} • {c.className}-{c.section}
+                          Campus: {c.campus || 'Sr'} • {c.classSection || `${(c as { className?: string }).className || ''}-${(c as { section?: string }).section || ''}`}
                         </span>
                         <span className="text-slate-600 font-mono text-[11px]">
                           Route: <strong>{c.routeCode}</strong> • Vehicle:{' '}

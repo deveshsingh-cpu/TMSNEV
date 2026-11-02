@@ -30,7 +30,7 @@ export interface MemberTypeMaster {
   name: string; // e.g. "Student", "Staff", "Teacher"
 }
 
-export type TransportStatus = 'Active' | 'Suspended' | 'Needs Setup' | 'Left' | 'Terminated';
+export type TransportStatus = 'Active' | 'Suspended' | 'Needs Setup' | 'Left' | 'Left School' | 'Terminated';
 
 export type TripStatus = 'Planned' | 'Ready' | 'Departed' | 'Arrived' | 'Completed' | 'Cancelled' | 'Verified';
 
@@ -301,6 +301,10 @@ export interface Vehicle {
   ownerAadhaarFileName?: string;
   ownerPanAttachment?: string;
   ownerPanFileName?: string;
+  vehicleNumber?: string;
+  assignedRouteId?: string;
+  last4Digits?: string;
+  busCode?: string;
 }
 
 export interface VehicleAssignmentRecord {
@@ -346,6 +350,7 @@ export interface Route {
   arrivalTime?: string;
   driverName?: string;
   assistantName?: string;
+  assignedVehicleNumber?: string;
 }
 
 export type RouteMaster = Route;
@@ -451,6 +456,17 @@ export interface StudentMember {
   expectedReturnSetBy?: string;
   lastAbsentAssistantRemark?: string;
   lastAbsentCoordinatorRemark?: string;
+  className?: string;
+  vehicleId?: string;
+  vehicleNumber?: string;
+  vehicleLast4?: string;
+  stopName?: string;
+  parentName?: string;
+  parentPhone?: string;
+  guardianName?: string;
+  whatsappNo?: string;
+  absentDaysCount?: number;
+  outstandingAmount?: number;
   version: number;
 }
 
@@ -615,6 +631,7 @@ export interface TripAttendanceRecord {
   assistantStatus: ObservationValue;
   reconciliationStatus: ReconciliationStatus;
   resolvedStatus?: ObservationValue;
+  finalStatus?: ObservationValue;
   resolutionReason?: string;
   resolvedBy?: string;
   notes?: string;
@@ -721,6 +738,15 @@ export interface MemberComplaintRecord {
   recordedBy: string;
   recordedByRole: UserRole;
   createdAt: string;
+  memberType?: string;
+  className?: string;
+  section?: string;
+  phone?: string;
+  receivedByName?: string;
+  receivedByRole?: string;
+  loggedBy?: string;
+  loggedByRole?: UserRole;
+  routeName?: string;
 }
 
 export interface AbsenteeCallRecord {
@@ -730,15 +756,23 @@ export interface AbsenteeCallRecord {
   admissionNo: string;
   studentName: string;
   classSection: string;
+  className?: string;
+  section?: string;
   campus: CampusId;
   routeId: string;
   routeCode: string;
   stopName: string;
   fatherName?: string;
+  parentName?: string;
   phone: string;
   consecutiveAbsentDays: number;
+  consecutiveDaysAbsent?: number;
   absentSinceDate?: string;
   attendanceRemarks?: string;
+  calledBy?: string;
+  calledByName?: string;
+  calledByRole?: UserRole;
+  calledAt?: string;
   calledByAssistant?: boolean;
   assistantName?: string;
   assistantCalledAt?: string;
@@ -752,6 +786,7 @@ export interface AbsenteeCallRecord {
   earlyArrivalConfirmedAt?: string;
   earlyArrivalConfirmedBy?: string;
   earlyArrivalRemarks?: string;
+  callStatus?: string;
   status: 'Pending Call' | 'Called' | 'Scheduled Return' | 'Returned Early' | 'Overdue Return';
 }
 
@@ -765,17 +800,23 @@ export interface FollowUpRecord {
   studentName?: string;
   memberName?: string;
   contactPerson?: string;
+  contactedPerson?: string;
   personTalkedTo?: string;
   phone?: string;
   overdueAmount?: number;
   promiseDate?: string;
   promisedDate?: string;
+  promisedPayDate?: string;
+  nextFollowUpDate?: string;
   outcome?: 'Promise to Pay' | 'Disputed' | 'Exemption Requested' | 'Unreachable';
+  callOutcome?: string;
   notes?: string;
+  remarks?: string;
   responseReceived?: string;
   officerName?: string;
   recordedBy?: string;
   campus?: CampusId;
+  routeName?: string;
   status?: 'Pending' | 'Cleared';
 }
 
