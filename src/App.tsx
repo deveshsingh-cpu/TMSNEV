@@ -111,8 +111,13 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   // Android PWA / APK Installer State
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [isAndroidModalOpen, setIsAndroidModalOpen] = useState<boolean>(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(() =>
+    typeof window !== 'undefined' ? (window as any).__deferredPwaPrompt || null : null
+  );
+  const [isAndroidModalOpen, setIsAndroidModalOpen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('install') === 'apk';
+  });
   const [isAppInstalled, setIsAppInstalled] = useState<boolean>(false);
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
 
@@ -122,31 +127,56 @@ export function App() {
       (window.navigator as any).standalone === true;
     setIsAppInstalled(isStandalone);
 
+    if ((window as any).__deferredPwaPrompt) {
+      setDeferredPrompt((window as any).__deferredPwaPrompt);
+    }
+
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
+      (window as any).__deferredPwaPrompt = e;
       setDeferredPrompt(e);
     };
+    const handleGlobalPromptReady = () => {
+      if ((window as any).__deferredPwaPrompt) {
+        setDeferredPrompt((window as any).__deferredPwaPrompt);
+      }
+    };
     const handleAppInstalled = () => {
+      (window as any).__deferredPwaPrompt = null;
       setIsAppInstalled(true);
       setDeferredPrompt(null);
+      setIsAndroidModalOpen(false);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('pwa-prompt-ready', handleGlobalPromptReady);
     window.addEventListener('appinstalled', handleAppInstalled);
+    window.addEventListener('pwa-app-installed', handleAppInstalled);
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('pwa-prompt-ready', handleGlobalPromptReady);
       window.removeEventListener('appinstalled', handleAppInstalled);
+      window.removeEventListener('pwa-app-installed', handleAppInstalled);
     };
   }, []);
 
   const handleInstallAndroidApp = async () => {
-    if (deferredPrompt) {
-      deferredPrompt.prompt();
-      const choiceResult = await deferredPrompt.userChoice;
-      if (choiceResult?.outcome === 'accepted') {
-        setDeferredPrompt(null);
+    const promptEvent = deferredPrompt || (window as any).__deferredPwaPrompt;
+    if (promptEvent) {
+      try {
+        await promptEvent.prompt();
+        const choiceResult = await promptEvent.userChoice;
+        if (choiceResult?.outcome === 'accepted') {
+          (window as any).__deferredPwaPrompt = null;
+          setDeferredPrompt(null);
+          setIsAndroidModalOpen(false);
+        }
+        return;
+      } catch {
+        // Fall through to modal if prompt failed
       }
     }
+    setIsAndroidModalOpen(true);
   };
 
   const activeRole: UserRole = currentUser?.role || 'Admin';
@@ -1245,26 +1275,207 @@ export function App() {
       }
     : null;
 
+  const androidInstallerModal = isAndroidModalOpen ? (
+    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-xl w-full overflow-hidden">
+        <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
+              <Smartphone className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold">Install Android App Directly to Phone</h3>
+              <p className="text-xs text-slate-300">
+                Narendra Edu Valley Transit ERP • Standalone Android Package (WebAPK)
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setIsAndroidModalOpen(false)}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs text-slate-700">
+          {/* Option 1: Direct 1-Tap Android WebAPK Install (Recommended) */}
+          <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="inline-block px-2 py-0.5 rounded-md bg-emerald-700 text-white text-[10px] font-bold uppercase tracking-wider mb-1">
+                  Direct Phone Installation • Full-Screen Android App
+                </span>
+                <h4 className="text-sm font-bold text-slate-900">
+                  1-Tap Direct Install to Android Phone (Not a Browser Shortcut)
+                </h4>
+                <p className="text-slate-600 mt-0.5">
+                  Installs Narendra Edu Valley Transit ERP directly onto your Android phone&apos;s app drawer as a standalone native WebAPK application with automatic live updates.
+                </p>
+              </div>
+            </div>
+
+            {deferredPrompt ? (
+              <button
+                onClick={handleInstallAndroidApp}
+                className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>Install Android App to Phone Now (1-Tap)</span>
+              </button>
+            ) : (
+              <div className="space-y-2.5">
+                <button
+                  onClick={() => {
+                    const promptEvent = (window as any).__deferredPwaPrompt;
+                    if (promptEvent) {
+                      setDeferredPrompt(promptEvent);
+                      promptEvent.prompt();
+                      return;
+                    }
+                    const targetUrl = `${window.location.origin}/?install=apk`;
+                    if (window.self !== window.top) {
+                      window.open(targetUrl, '_blank', 'noopener,noreferrer');
+                    } else {
+                      window.location.href = targetUrl;
+                    }
+                  }}
+                  className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Activate Direct Android Phone Installer</span>
+                </button>
+
+                <div className="bg-white/90 rounded-lg p-3 border border-emerald-200 text-slate-700 space-y-1.5">
+                  <p className="font-bold text-slate-900">
+                    Direct Install from Chrome on Android:
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1 text-slate-700">
+                    <li>
+                      Tap <strong>&quot;Activate Direct Android Phone Installer&quot;</strong> above, or tap the <strong>⋮ (Three Dots Menu)</strong> at the top-right of Chrome.
+                    </li>
+                    <li>
+                      Select <strong>&quot;Install app&quot;</strong> (or if prompted between options, choose <strong>Install app</strong> instead of Create shortcut) to install the full app directly into your phone.
+                    </li>
+                  </ol>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Shareable App URL + QR Code for Android Phones */}
+          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
+            <div className="bg-white p-2 rounded-xl border border-slate-200 shrink-0">
+              <img
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
+                  `${window.location.origin}/?install=apk`
+                )}`}
+                alt="Scan QR to install on Android"
+                className="w-28 h-28 rounded-lg"
+              />
+            </div>
+            <div className="flex-1 space-y-2 w-full">
+              <div className="flex items-center gap-1.5 font-bold text-slate-900 text-xs">
+                <QrCode className="w-4 h-4 text-slate-700" />
+                <span>Scan QR Code or Copy Direct Install Link</span>
+              </div>
+              <p className="text-slate-600">
+                Scan with your Android camera or share this direct installer link on WhatsApp:
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={`${window.location.origin}/?install=apk`}
+                  className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white font-mono text-[11px] text-slate-800"
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}/?install=apk`);
+                    setCopiedUrl(true);
+                    setTimeout(() => setCopiedUrl(false), 2500);
+                  }}
+                  className="px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  {copiedUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedUrl ? 'Copied' : 'Copy Link'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Option 2: Download Standalone .APK File via PWABuilder */}
+          <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2.5">
+            <div>
+              <span className="inline-block px-2 py-0.5 rounded-md bg-amber-500 text-slate-950 text-[10px] font-bold uppercase tracking-wider mb-1">
+                Option 2 • Standalone .APK File Download
+              </span>
+              <h4 className="text-sm font-bold text-slate-900">
+                Generate &amp; Download Signed `.apk` File for WhatsApp / Offline Sharing
+              </h4>
+              <p className="text-slate-600 mt-0.5">
+                Need a raw `.apk` file to send directly on WhatsApp? Click below to package and download the standalone `.apk` file:
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5 pt-1">
+              <a
+                href={`https://www.pwabuilder.com/reportcard?site=${encodeURIComponent(
+                  window.location.origin
+                )}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-2 shadow-2xs"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download Standalone .APK File ({window.location.hostname})</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end">
+          <button
+            onClick={() => setIsAndroidModalOpen(false)}
+            className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   // Render Public School Website or Transport Login View if not authenticated
   if (!currentUser) {
     if (unauthScreen === 'public_website') {
       return (
-        <PublicWebsiteView
-          config={config}
-          campuses={campuses}
-          routesCount={routes.length}
-          vehiclesCount={vehicles.length}
-          villagesCount={villages.length}
-          onOpenTransportLogin={() => setUnauthScreen('transport_login')}
-        />
+        <>
+          <PublicWebsiteView
+            config={config}
+            campuses={campuses}
+            routesCount={routes.length}
+            vehiclesCount={vehicles.length}
+            villagesCount={villages.length}
+            onOpenTransportLogin={() => setUnauthScreen('transport_login')}
+            onInstallAndroidApk={handleInstallAndroidApp}
+            isAppInstalled={isAppInstalled}
+          />
+          {androidInstallerModal}
+        </>
       );
     }
     return (
-      <LoginView
-        config={config}
-        onLogin={handleLogin}
-        onBackToWebsite={() => setUnauthScreen('public_website')}
-      />
+      <>
+        <LoginView
+          config={config}
+          onLogin={handleLogin}
+          onBackToWebsite={() => setUnauthScreen('public_website')}
+          onInstallAndroidApk={handleInstallAndroidApp}
+          isAppInstalled={isAppInstalled}
+        />
+        {androidInstallerModal}
+      </>
     );
   }
 
@@ -1334,12 +1545,12 @@ export function App() {
 
             {/* Android App / APK Installer Button */}
             <button
-              onClick={() => setIsAndroidModalOpen(true)}
+              onClick={handleInstallAndroidApp}
               className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer shadow-2xs"
-              title="Install Android App (WebAPK) or Download Android APK Package"
+              title="Install Android App Directly to Phone (WebAPK)"
             >
-              <Smartphone className="w-3.5 h-3.5" />
-              <span>{isAppInstalled ? 'Android App Active' : 'Android App / APK'}</span>
+              <Download className="w-3.5 h-3.5" />
+              <span>{isAppInstalled ? 'Android App Active' : 'Download Android APK'}</span>
             </button>
 
             {/* Admin Quick Button: Manage Users & Passwords */}
@@ -1765,151 +1976,7 @@ export function App() {
       </div>
 
       {/* Android App (WebAPK) & Standalone APK Installer Modal */}
-      {isAndroidModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-xl w-full overflow-hidden">
-            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
-                  <Smartphone className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold">Install Android App &amp; APK Package</h3>
-                  <p className="text-xs text-slate-300">
-                    Install Narendra Edu Valley Transit ERP on any Android smartphone or tablet
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsAndroidModalOpen(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs text-slate-700">
-              {/* Option 1: Direct 1-Tap Android WebAPK Install (Recommended) */}
-              <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <span className="inline-block px-2 py-0.5 rounded-md bg-emerald-700 text-white text-[10px] font-bold uppercase tracking-wider mb-1">
-                      Option 1 • Direct Android WebAPK (No Unknown-Sources Warning)
-                    </span>
-                    <h4 className="text-sm font-bold text-slate-900">
-                      1-Tap Native Android App Installation
-                    </h4>
-                    <p className="text-slate-600 mt-0.5">
-                      Android Chrome automatically compiles and installs this app as a signed Android WebAPK in your phone&apos;s app drawer with full-screen standalone mode and automatic live updates.
-                    </p>
-                  </div>
-                </div>
-
-                {deferredPrompt ? (
-                  <button
-                    onClick={handleInstallAndroidApp}
-                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Install Android App Now (1-Tap)</span>
-                  </button>
-                ) : (
-                  <div className="bg-white/90 rounded-lg p-3 border border-emerald-200 text-slate-700 space-y-1.5">
-                    <p className="font-bold text-slate-900">How to install directly on any Android device:</p>
-                    <ol className="list-decimal list-inside space-y-1 text-slate-700">
-                      <li>Open the app link below in <strong>Google Chrome</strong> on your Android phone.</li>
-                      <li>Tap the <strong>⋮ (Three Dots Menu)</strong> at the top-right corner of Chrome.</li>
-                      <li>Tap <strong>&quot;Install app&quot;</strong> (or <strong>&quot;Add to Home screen&quot;</strong>) and confirm.</li>
-                    </ol>
-                  </div>
-                )}
-              </div>
-
-              {/* Shareable App URL + QR Code for Android Phones */}
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
-                <div className="bg-white p-2 rounded-xl border border-slate-200 shrink-0">
-                  <img
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
-                      window.location.origin
-                    )}`}
-                    alt="Scan QR to open on Android"
-                    className="w-28 h-28 rounded-lg"
-                  />
-                </div>
-                <div className="flex-1 space-y-2 w-full">
-                  <div className="flex items-center gap-1.5 font-bold text-slate-900 text-xs">
-                    <QrCode className="w-4 h-4 text-slate-700" />
-                    <span>Scan QR Code or Copy Link for Android Device</span>
-                  </div>
-                  <p className="text-slate-600">
-                    Scan with your Android camera or share this URL on WhatsApp to open and install immediately:
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      readOnly
-                      value={window.location.origin}
-                      className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white font-mono text-[11px] text-slate-800"
-                    />
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(window.location.origin);
-                        setCopiedUrl(true);
-                        setTimeout(() => setCopiedUrl(false), 2500);
-                      }}
-                      className="px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
-                    >
-                      {copiedUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedUrl ? 'Copied' : 'Copy Link'}</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Option 2: Download Standalone .APK File via PWABuilder */}
-              <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2.5">
-                <div>
-                  <span className="inline-block px-2 py-0.5 rounded-md bg-amber-500 text-slate-950 text-[10px] font-bold uppercase tracking-wider mb-1">
-                    Option 2 • Standalone .APK File Download
-                  </span>
-                  <h4 className="text-sm font-bold text-slate-900">
-                    Generate &amp; Download Signed Android `.apk` File
-                  </h4>
-                  <p className="text-slate-600 mt-0.5">
-                    This app is configured with a verified Web App Manifest (`/manifest.webmanifest`), 512×512 maskable icons, and Service Worker (`/sw.js`). Click below to package and download the standalone `.apk` file via Microsoft PWABuilder for offline distribution on WhatsApp or USB:
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2.5 pt-1">
-                  <a
-                    href={`https://www.pwabuilder.com/reportcard?site=${encodeURIComponent(
-                      window.location.origin
-                    )}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-2 shadow-2xs"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Open APK Packager (Download .APK for {window.location.hostname})</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-                <p className="text-[11px] text-slate-500">
-                  On PWABuilder, click <strong>&quot;Package for stores&quot; → &quot;Android&quot; → &quot;Download Package&quot;</strong> to get the ready-to-install `.apk` file.
-                </p>
-              </div>
-            </div>
-
-            <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end">
-              <button
-                onClick={() => setIsAndroidModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {androidInstallerModal}
     </div>
   );
 }

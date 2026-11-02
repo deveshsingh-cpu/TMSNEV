@@ -16,6 +16,8 @@ import {
   Clock,
   CheckCircle2,
   X,
+  Smartphone,
+  Download,
 } from 'lucide-react';
 import { SchoolConfig, CampusMaster } from '../../types/index.js';
 
@@ -26,6 +28,8 @@ interface PublicWebsiteViewProps {
   vehiclesCount: number;
   villagesCount: number;
   onOpenTransportLogin: () => void;
+  onInstallAndroidApk?: () => void;
+  isAppInstalled?: boolean;
 }
 
 export const PublicWebsiteView: React.FC<PublicWebsiteViewProps> = ({
@@ -35,6 +39,8 @@ export const PublicWebsiteView: React.FC<PublicWebsiteViewProps> = ({
   vehiclesCount,
   villagesCount,
   onOpenTransportLogin,
+  onInstallAndroidApk,
+  isAppInstalled = false,
 }) => {
   const [loginDropdownOpen, setLoginDropdownOpen] = useState(false);
   const [academicsModalOpen, setAcademicsModalOpen] = useState(false);
@@ -120,73 +126,111 @@ export const PublicWebsiteView: React.FC<PublicWebsiteViewProps> = ({
             </a>
           </nav>
 
-          {/* Top-Right Login Dropdown Button (1- Academics | 2- Transport) */}
-          <div className="relative" ref={dropdownRef}>
-            <button
-              type="button"
-              onClick={() => setLoginDropdownOpen((prev) => !prev)}
-              className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs uppercase tracking-wider flex items-center gap-2 shadow-sm transition-all cursor-pointer border border-slate-800"
-            >
-              <Lock className="w-3.5 h-3.5" />
-              <span>Login</span>
-              <ChevronDown
-                className={`w-4 h-4 transition-transform ${loginDropdownOpen ? 'rotate-180' : ''}`}
-              />
-            </button>
-
-            {loginDropdownOpen && (
-              <div className="absolute right-0 mt-2.5 w-64 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50">
-                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                  Select ERP Portal Login
-                </div>
-
-                <div className="p-1.5 space-y-1">
-                  {/* Option 1: Academics */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setLoginDropdownOpen(false);
-                      setAcademicsModalOpen(true);
-                    }}
-                    className="w-full px-3.5 py-3 rounded-xl hover:bg-slate-50 flex items-center justify-between text-left transition-colors cursor-pointer group"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                        <BookOpen className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold text-slate-900">1- Academics</div>
-                        <div className="text-[10px] text-slate-500">Faculty, Exams &amp; Admissions</div>
-                      </div>
-                    </div>
-                    <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
-                      Soon
-                    </span>
-                  </button>
-
-                  {/* Option 2: Transport */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setLoginDropdownOpen(false);
-                      onOpenTransportLogin();
-                    }}
-                    className="w-full px-3.5 py-3 rounded-xl bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200/80 flex items-center justify-between text-left transition-colors cursor-pointer group"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-slate-900 text-amber-400 flex items-center justify-center shrink-0">
-                        <Bus className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold text-slate-900">2- Transport</div>
-                        <div className="text-[10px] text-slate-600">Fleet, Routes &amp; Fee ERP</div>
-                      </div>
-                    </div>
-                    <ArrowRight className="w-4 h-4 text-amber-700 group-hover:translate-x-0.5 transition-transform" />
-                  </button>
-                </div>
-              </div>
+          {/* Top-Right Actions: Download Android APK + Login Dropdown */}
+          <div className="flex items-center gap-2.5">
+            {onInstallAndroidApk && !isAppInstalled && (
+              <button
+                type="button"
+                onClick={onInstallAndroidApk}
+                className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs uppercase tracking-wider flex items-center gap-2 shadow-sm transition-all cursor-pointer"
+                title="Install Narendra Edu Valley App directly on your Android phone"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Download Android APK</span>
+                <span className="sm:hidden">Install App</span>
+              </button>
             )}
+
+            <div className="relative" ref={dropdownRef}>
+              <button
+                type="button"
+                onClick={() => setLoginDropdownOpen((prev) => !prev)}
+                className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs uppercase tracking-wider flex items-center gap-2 shadow-sm transition-all cursor-pointer border border-slate-800"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>Login</span>
+                <ChevronDown
+                  className={`w-4 h-4 transition-transform ${loginDropdownOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {loginDropdownOpen && (
+                <div className="absolute right-0 mt-2.5 w-64 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50">
+                  <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    Select ERP Portal Login
+                  </div>
+
+                  <div className="p-1.5 space-y-1">
+                    {/* Option 1: Academics */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLoginDropdownOpen(false);
+                        setAcademicsModalOpen(true);
+                      }}
+                      className="w-full px-3.5 py-3 rounded-xl hover:bg-slate-50 flex items-center justify-between text-left transition-colors cursor-pointer group"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                          <BookOpen className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-slate-900">1- Academics</div>
+                          <div className="text-[10px] text-slate-500">Faculty, Exams &amp; Admissions</div>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                        Soon
+                      </span>
+                    </button>
+
+                    {/* Option 2: Transport */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLoginDropdownOpen(false);
+                        onOpenTransportLogin();
+                      }}
+                      className="w-full px-3.5 py-3 rounded-xl bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200/80 flex items-center justify-between text-left transition-colors cursor-pointer group"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-slate-900 text-amber-400 flex items-center justify-center shrink-0">
+                          <Bus className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-slate-900">2- Transport</div>
+                          <div className="text-[10px] text-slate-600">Fleet, Routes &amp; Fee ERP</div>
+                        </div>
+                      </div>
+                      <ArrowRight className="w-4 h-4 text-amber-700 group-hover:translate-x-0.5 transition-transform" />
+                    </button>
+
+                    {/* Option 3: Download Android APK */}
+                    {onInstallAndroidApk && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLoginDropdownOpen(false);
+                          onInstallAndroidApk();
+                        }}
+                        className="w-full px-3.5 py-3 rounded-xl bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200 flex items-center justify-between text-left transition-colors cursor-pointer group"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                            <Smartphone className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-slate-900">Download Android APK</div>
+                            <div className="text-[10px] text-emerald-700 font-semibold">Direct Install to Phone</div>
+                          </div>
+                        </div>
+                        <Download className="w-4 h-4 text-emerald-700" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -223,6 +267,16 @@ export const PublicWebsiteView: React.FC<PublicWebsiteViewProps> = ({
                 <Bus className="w-4 h-4 text-amber-400" />
                 <span>Transport ERP Portal</span>
               </button>
+              {onInstallAndroidApk && !isAppInstalled && (
+                <button
+                  type="button"
+                  onClick={onInstallAndroidApk}
+                  className="px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider transition-colors flex items-center gap-2 shadow-md cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download Android APK</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -281,6 +335,31 @@ export const PublicWebsiteView: React.FC<PublicWebsiteViewProps> = ({
                   <ArrowRight className="w-3.5 h-3.5" />
                 </span>
               </div>
+
+              {onInstallAndroidApk && (
+                <div
+                  onClick={onInstallAndroidApk}
+                  className="p-4 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 hover:border-emerald-400 transition-all cursor-pointer flex items-center justify-between gap-4"
+                >
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500 text-slate-950 flex items-center justify-center shrink-0">
+                      <Smartphone className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-bold text-white">
+                        {isAppInstalled ? 'Android App Installed' : 'Download Android APK'}
+                      </div>
+                      <p className="text-xs text-emerald-200">
+                        Install directly on Android phone (Full-Screen App)
+                      </p>
+                    </div>
+                  </div>
+                  <span className="px-3 py-1.5 rounded-lg bg-emerald-500 text-slate-950 text-xs font-bold shrink-0 flex items-center gap-1">
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{isAppInstalled ? 'Installed' : 'Install'}</span>
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>

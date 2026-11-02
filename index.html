@@ -10,6 +10,8 @@
     <meta name="apple-mobile-web-app-title" content="NEV Transit" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>Narendra Edu Valley - Transport Management System</title>
     <meta name="description" content="Comprehensive School Transport Management System managing student &amp; staff transport memberships, routes, multi-trip vehicles, dual-observation attendance, driver paper registers, vehicle logbooks, fuel advances, automated fee billing, recovery cycles, staff payroll, and double-entry transport accounting with Google Sheets backend." />
@@ -17,16 +19,26 @@
     <meta property="og:description" content="Comprehensive School Transport Management System managing student &amp; staff transport memberships, routes, multi-trip vehicles, dual-observation attendance, driver paper registers, vehicle logbooks, fuel advances, automated fee billing, recovery cycles, staff payroll, and double-entry transport accounting with Google Sheets backend." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      window.__deferredPwaPrompt = null;
+      window.addEventListener('beforeinstallprompt', function (e) {
+        e.preventDefault();
+        window.__deferredPwaPrompt = e;
+        window.dispatchEvent(new Event('pwa-prompt-ready'));
+      });
+      window.addEventListener('appinstalled', function () {
+        window.__deferredPwaPrompt = null;
+        window.dispatchEvent(new Event('pwa-app-installed'));
+      });
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker
+          .register('/sw.js', { scope: '/', updateViaCache: 'none' })
+          .catch(function () {});
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script>
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js').catch(() => {});
-        });
-      }
-    </script>
   </body>
 </html>

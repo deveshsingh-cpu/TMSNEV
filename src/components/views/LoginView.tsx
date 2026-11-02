@@ -12,6 +12,8 @@ import {
   ArrowLeft,
   CheckCircle2,
   Globe,
+  Smartphone,
+  Download,
 } from 'lucide-react';
 import { SchoolConfig } from '../../types/index.js';
 
@@ -19,9 +21,17 @@ interface LoginViewProps {
   config: SchoolConfig;
   onLogin: (username: string, password: string) => Promise<void>;
   onBackToWebsite?: () => void;
+  onInstallAndroidApk?: () => void;
+  isAppInstalled?: boolean;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ config, onLogin, onBackToWebsite }) => {
+export const LoginView: React.FC<LoginViewProps> = ({
+  config,
+  onLogin,
+  onBackToWebsite,
+  onInstallAndroidApk,
+  isAppInstalled = false,
+}) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -47,8 +57,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ config, onLogin, onBackToW
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between py-8 px-4 sm:px-6 lg:px-8">
-      {/* Top Bar: Return to Main School Website */}
-      <div className="max-w-5xl w-full mx-auto flex items-center justify-between">
+      {/* Top Bar: Return to Main School Website + Install Android APK */}
+      <div className="max-w-5xl w-full mx-auto flex flex-wrap items-center justify-between gap-3">
         <button
           type="button"
           onClick={onBackToWebsite}
@@ -57,9 +67,21 @@ export const LoginView: React.FC<LoginViewProps> = ({ config, onLogin, onBackToW
           <ArrowLeft className="w-4 h-4" />
           <span>Back to {config.schoolName || 'Narendra Edu Valley'} Website</span>
         </button>
-        <div className="inline-flex items-center gap-1.5 text-xs text-slate-400 font-mono">
-          <Globe className="w-3.5 h-3.5 text-amber-400" />
-          <span>ERP Portal: 2- Transport Division</span>
+        <div className="flex items-center gap-3">
+          {onInstallAndroidApk && !isAppInstalled && (
+            <button
+              type="button"
+              onClick={onInstallAndroidApk}
+              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download Android APK</span>
+            </button>
+          )}
+          <div className="inline-flex items-center gap-1.5 text-xs text-slate-400 font-mono">
+            <Globe className="w-3.5 h-3.5 text-amber-400" />
+            <span>ERP Portal: 2- Transport Division</span>
+          </div>
         </div>
       </div>
 
@@ -155,6 +177,17 @@ export const LoginView: React.FC<LoginViewProps> = ({ config, onLogin, onBackToW
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
+
+          {onInstallAndroidApk && !isAppInstalled && (
+            <button
+              type="button"
+              onClick={onInstallAndroidApk}
+              className="w-full py-2.5 px-4 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Smartphone className="w-4 h-4 text-emerald-700" />
+              <span>Install Android App Directly to Phone</span>
+            </button>
+          )}
 
           {/* Authorized Roles Info Footer */}
           <div className="pt-5 border-t border-slate-100 space-y-2.5">
