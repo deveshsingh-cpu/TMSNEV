@@ -129,8 +129,8 @@ export type VehicleAvailability = 'Available' | 'In-Service' | 'Maintenance' | '
 
 export type AccountClass = 'Asset' | 'Liability' | 'Equity' | 'Income' | 'Expense';
 
-// 3 Final Multi-Login Designations / Roles
-export type UserRole = 'Admin' | 'Transport Coordinator' | 'Transport Assistant';
+// 4 Multi-Login Designations / Roles
+export type UserRole = 'Admin' | 'Transport Coordinator' | 'Transport Assistant' | 'Attendance Incharge';
 
 export interface RolePermissions {
   manageMasters: boolean;
@@ -626,6 +626,8 @@ export interface FeeInvoice {
   studentId: string;
   admissionNo: string;
   studentName: string;
+  campus?: CampusId;
+  routeName?: string;
   month: string;
   baseFee: number;
   concession: number;
@@ -635,6 +637,7 @@ export interface FeeInvoice {
   routeStop?: string;
   paidAmount: number;
   balanceDue: number;
+  balanceAmount?: number;
   status: 'Unpaid' | 'Partially Paid' | 'Paid' | 'Suspended_Exempt';
   dueDate: string;
   idempotencyKey: string;
@@ -647,6 +650,8 @@ export interface FeeReceipt {
   studentId: string;
   admissionNo: string;
   studentName: string;
+  campus?: CampusId;
+  invoiceId?: string;
   amount: number;
   amountPaid?: number;
   monthsCovered?: string[];
@@ -770,6 +775,7 @@ export interface FollowUpRecord {
   responseReceived?: string;
   officerName?: string;
   recordedBy?: string;
+  campus?: CampusId;
   status?: 'Pending' | 'Cleared';
 }
 
@@ -782,6 +788,7 @@ export interface WarningLetter {
   studentId: string;
   studentName: string;
   admissionNo: string;
+  campus?: CampusId;
   parentName: string;
   overdueAmount: number;
   deadlineDate: string;
@@ -807,6 +814,7 @@ export interface JournalVoucher {
   id: string;
   voucherNo: string;
   date: string;
+  campus?: CampusId;
   voucherType: 'Fee Accrual' | 'Receipt' | 'Advance' | 'Settlement' | 'Expense' | 'Payroll' | 'Payment' | 'Journal';
   narration: string;
   status: 'Draft' | 'Posted' | 'Reversed';
@@ -814,6 +822,8 @@ export interface JournalVoucher {
   totalCredit: number;
   createdBy?: string;
   approvedBy?: string;
+  partyName?: string;
+  costCenter?: string;
   lines: {
     accountId: string;
     accountCode: string;
@@ -840,6 +850,7 @@ export interface ExpenseRecord {
   id: string;
   expenseNo: string;
   date: string;
+  campus?: CampusId;
   categoryId?: string;
   category: string;
   expenseHeadName?: string;
@@ -877,6 +888,7 @@ export interface IncomeRecord {
   id: string;
   incomeNo: string;
   date: string;
+  campus?: CampusId;
   incomeHeadId?: string;
   incomeHeadName?: string;
   headName?: string;

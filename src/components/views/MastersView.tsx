@@ -2238,7 +2238,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   Role-Based Access Control (RBAC) &amp; Login Credentials
                 </span>
                 <h3 className="text-base font-bold text-white mt-0.5">
-                  Manage Usernames, Full Names &amp; Passwords for All 3 System Roles
+                  Manage Usernames, Full Names &amp; Passwords for All 4 System Roles
                 </h3>
               </div>
               <span className="px-3 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
@@ -2246,7 +2246,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-amber-500/30 space-y-1">
                 <div className="font-bold text-amber-300">1. Admin Role</div>
                 <p className="text-slate-300 text-[11px]">
@@ -2263,6 +2263,12 @@ export const MastersView: React.FC<MastersViewProps> = ({
                 <div className="font-bold text-emerald-300">3. Transport Assistant Role</div>
                 <p className="text-slate-300 text-[11px]">
                   Authorized for Fee Receipts, Dues Follow-ups, Work Order Requests, Route &amp; Staff Attendance, 24-Hr Vehicle Log Book, Expense Entries, Adding New Members, and Receiving Candidate Resumes (no Masters access).
+                </p>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-800/80 border border-violet-500/30 space-y-1">
+                <div className="font-bold text-violet-300">4. Attendance Incharge Role</div>
+                <p className="text-slate-300 text-[11px]">
+                  Strictly restricted to marking campus Arrival &amp; Departure Attendance (including cross-campus routes carrying their campus members) and printing their campus Attendance Summary Sheet.
                 </p>
               </div>
             </div>
@@ -2326,6 +2332,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     <option value="Admin">Admin (Full Control &amp; Approvals)</option>
                     <option value="Transport Coordinator">Transport Coordinator (Operations &amp; Fees)</option>
                     <option value="Transport Assistant">Transport Assistant (Gate &amp; Log Book Only)</option>
+                    <option value="Attendance Incharge">Attendance Incharge (Arrival/Departure Attendance &amp; Summary Only)</option>
                   </select>
                 </div>
 
@@ -2465,6 +2472,8 @@ export const MastersView: React.FC<MastersViewProps> = ({
                                   ? 'bg-amber-100 text-amber-900'
                                   : u.role === 'Transport Coordinator'
                                   ? 'bg-sky-100 text-sky-900'
+                                  : u.role === 'Attendance Incharge'
+                                  ? 'bg-violet-100 text-violet-900'
                                   : 'bg-emerald-100 text-emerald-900'
                               }`}
                             >

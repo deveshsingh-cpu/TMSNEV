@@ -100,8 +100,12 @@ export function App() {
     return null;
   });
 
-  const [activeNav, setActiveNav] = useState<NavItemKey>('dashboard');
-  const [activeSubTab, setActiveSubTab] = useState<string>('');
+  const [activeNav, setActiveNav] = useState<NavItemKey>(() =>
+    currentUser?.role === 'Attendance Incharge' ? 'operations' : 'dashboard'
+  );
+  const [activeSubTab, setActiveSubTab] = useState<string>(() =>
+    currentUser?.role === 'Attendance Incharge' ? 'arrival' : ''
+  );
   const [unauthScreen, setUnauthScreen] = useState<'public_website' | 'transport_login'>('public_website');
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -287,11 +291,10 @@ export function App() {
         setAttendanceRecords(boot.attendance);
       }
       if (tripsList && tripsList.length > 0) {
-        const tripIdToLoad = selectedTripId || tripsList[0].id;
-        setSelectedTripId(tripIdToLoad);
+        setSelectedTripId((prev) => prev || tripsList[0].id);
       }
     },
-    [selectedTripId]
+    []
   );
 
   useEffect(() => {
@@ -321,16 +324,8 @@ export function App() {
     loadAllData();
   }, [loadAllData]);
 
-  const handleSelectTrip = async (tripId: string) => {
+  const handleSelectTrip = (tripId: string) => {
     setSelectedTripId(tripId);
-    const att = await api.getTripAttendance(tripId);
-    if (Array.isArray(att) && att.length > 0) {
-      setAttendanceRecords((prev) => {
-        const byId = new Map(prev.map((r) => [r.id, r]));
-        att.forEach((r: TripAttendanceRecord) => byId.set(r.id, r));
-        return Array.from(byId.values());
-      });
-    }
   };
 
   const handleSelectRouteForDate = async (date: string, routeId: string) => {
@@ -355,8 +350,13 @@ export function App() {
     } catch {
       // ignore storage errors
     }
-    setActiveNav('dashboard');
-    setActiveSubTab('');
+    if (authenticatedUser.role === 'Attendance Incharge') {
+      setActiveNav('operations');
+      setActiveSubTab('arrival');
+    } else {
+      setActiveNav('dashboard');
+      setActiveSubTab('');
+    }
     await loadAllData();
   };
 
@@ -386,6 +386,17 @@ export function App() {
     let targetSubTab = subTab !== undefined ? subTab : '';
 
     // Enforce role-based access boundaries:
+    // 0. Attendance Incharge is strictly restricted to Arrival Attendance, Departure Attendance, and Attendance Summary Sheet
+    if (activeRole === 'Attendance Incharge') {
+      normalizedKey = 'operations';
+      if (targetSubTab !== 'arrival' && targetSubTab !== 'departure' && targetSubTab !== 'summary') {
+        targetSubTab = 'arrival';
+      }
+      setActiveNav(normalizedKey);
+      setActiveSubTab(targetSubTab);
+      return;
+    }
+
     // 1. Neither Transport Coordinator nor Transport Assistant has rights to change Masters or Setup
     if (activeRole !== 'Admin' && (normalizedKey === 'masters' || normalizedKey === 'setup')) {
       normalizedKey = 'dashboard';
@@ -414,6 +425,7 @@ export function App() {
           targetSubTab !== 'day_book' &&
           targetSubTab !== 'student_ledger' &&
           targetSubTab !== 'vehicle_ledger' &&
+          targetSubTab !== 'trial_balance' &&
           targetSubTab !== 'route_outstanding' &&
           targetSubTab !== 'demand_slip'
         ) {
@@ -890,7 +902,70 @@ export function App() {
       reason?: string;
     }>
   ) => {
-    await api.batchSaveAttendance(entries, activeRole);
+    // Optimistically update attendanceRecords in local React state for instant UI feedback
+    setAttendanceRecords((prev) => {
+      const byId = new Map<string, TripAttendanceRecord>(prev.map((r) => [r.id, { ...r }]));
+      for (const item of entries) {
+        let rec = byId.get(item.recordId);
+        if (!rec && item.recordId.startsWith('att-')) {
+          const matchedStu = students.find((s) => item.recordId.endsWith(`-${s.id}`));
+          if (matchedStu) {
+            const tripIdPart = item.recordId.slice(4, item.recordId.length - matchedStu.id.length - 1);
+            const datePart =
+              tripIdPart.length >= 10
+                ? tripIdPart.slice(-10)
+                : new Date().toISOString().split('T')[0];
+            rec = {
+              id: item.recordId,
+              tripId: tripIdPart,
+              date: datePart,
+              studentId: matchedStu.id,
+              admissionNo: matchedStu.admissionNo,
+              studentName: matchedStu.name,
+              classSection: `${matchedStu.class}-${matchedStu.section}`,
+              stopName: matchedStu.pickupDropStopName || matchedStu.villageName || '—',
+              transportStatus: matchedStu.transportStatus,
+              driverStatus: 'Pending',
+              assistantStatus: 'Pending',
+              reconciliationStatus: 'Assistant_Pending',
+            };
+          }
+        }
+        if (rec) {
+          if (item.source === 'driver') {
+            rec.driverStatus = item.value as any;
+          } else {
+            rec.assistantStatus = item.value as any;
+          }
+          if (item.reason !== undefined) {
+            rec.resolutionReason = item.reason;
+            rec.notes = item.reason;
+          }
+          const arr = rec.driverStatus || 'Pending';
+          const dep = rec.assistantStatus || 'Pending';
+          if (arr === 'Present' || dep === 'Present') {
+            rec.resolvedStatus = 'Present';
+          } else if (dep !== 'Pending') {
+            rec.resolvedStatus = dep;
+          } else if (arr !== 'Pending') {
+            rec.resolvedStatus = arr;
+          } else {
+            rec.resolvedStatus = 'Pending';
+          }
+          byId.set(rec.id, rec);
+        }
+      }
+      return Array.from(byId.values());
+    });
+
+    const updated = await api.batchSaveAttendance(entries, activeRole);
+    if (Array.isArray(updated) && updated.length > 0) {
+      setAttendanceRecords((prev) => {
+        const byId = new Map(prev.map((r) => [r.id, r]));
+        updated.forEach((r) => byId.set(r.id, r));
+        return Array.from(byId.values());
+      });
+    }
     await loadAllData();
   };
 
@@ -911,7 +986,94 @@ export function App() {
       strengthMismatchRemark?: string;
     }
   ) => {
-    await api.verifyTrip(tripId, activeRole, notes, statusOverride, timingPayload);
+    const nowHHMM = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    // Optimistically update dailyTrips immediately in 0ms so Arrival/Departure Time is marked right away
+    setDailyTrips((prev) => {
+      const next = [...prev];
+      const existingIdx = next.findIndex((t) => t.id === tripId);
+      if (existingIdx >= 0) {
+        const cur = { ...next[existingIdx] };
+        if (statusOverride) cur.status = statusOverride;
+        if (notes !== undefined) cur.notes = notes;
+        if (timingPayload?.inTime !== undefined) cur.inTime = timingPayload.inTime;
+        else if (statusOverride === 'Arrived' && !cur.inTime) cur.inTime = nowHHMM;
+        if (timingPayload?.outTime !== undefined) cur.outTime = timingPayload.outTime;
+        else if (statusOverride === 'Departed' && !cur.outTime) cur.outTime = nowHHMM;
+        if (timingPayload?.inStrength !== undefined) cur.inStrength = timingPayload.inStrength;
+        if (timingPayload?.outStrength !== undefined) cur.outStrength = timingPayload.outStrength;
+        if (timingPayload?.strengthMismatchRemark !== undefined) {
+          cur.strengthMismatchRemark = timingPayload.strengthMismatchRemark;
+        }
+        next[existingIdx] = cur;
+        return next;
+      }
+      if (tripId.startsWith('dt-') && tripId.length > 14) {
+        const datePart = tripId.slice(-10);
+        const routeIdPart = tripId.slice(3, -11);
+        const route = routes.find((r) => r.id === routeIdPart || r.code === routeIdPart);
+        if (route) {
+          const veh = vehicles.find(
+            (v) => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber
+          );
+          next.push({
+            id: `dt-${route.id}-${datePart}`,
+            date: datePart,
+            campus: route.campus,
+            routeId: route.id,
+            routeName: route.code,
+            vehicleId: route.vehicleId,
+            vehicleNumber: route.vehicleNumber,
+            driverName: veh?.assignedDriverName || 'Assigned Driver',
+            helperName: veh?.assignedHelperName,
+            tripNumber: route.tripNumber,
+            shiftName: `Trip ${route.tripNumber} — ${route.name || route.code}`,
+            status: statusOverride || 'Arrived',
+            rosterCount: 0,
+            presentCount: 0,
+            absentCount: 0,
+            mismatchCount: 0,
+            plannedStartTime: '06:40 AM',
+            plannedEndTime: '07:30 AM',
+            inTime:
+              timingPayload?.inTime !== undefined
+                ? timingPayload.inTime
+                : statusOverride === 'Arrived'
+                ? nowHHMM
+                : undefined,
+            outTime:
+              timingPayload?.outTime !== undefined
+                ? timingPayload.outTime
+                : statusOverride === 'Departed'
+                ? nowHHMM
+                : undefined,
+            inStrength: timingPayload?.inStrength,
+            outStrength: timingPayload?.outStrength,
+            strengthMismatchRemark: timingPayload?.strengthMismatchRemark,
+            notes,
+            verifiedBy: activeRole,
+            verifiedAt: new Date().toISOString(),
+          });
+        }
+      }
+      return next;
+    });
+
+    const verified = await api.verifyTrip(tripId, activeRole, notes, statusOverride, timingPayload);
+    if (verified && verified.id) {
+      setDailyTrips((prev) => {
+        const idx = prev.findIndex((t) => t.id === verified.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = verified;
+          return copy;
+        }
+        return [...prev, verified];
+      });
+    }
     await loadAllData();
   };
 
@@ -1154,6 +1316,8 @@ export function App() {
                     ? 'bg-amber-500 text-slate-950'
                     : activeRole === 'Transport Coordinator'
                     ? 'bg-sky-600 text-white'
+                    : activeRole === 'Attendance Incharge'
+                    ? 'bg-violet-600 text-white'
                     : 'bg-emerald-600 text-white'
                 }`}
               >
@@ -1501,6 +1665,9 @@ export function App() {
                   schoolName={config.schoolName}
                   isAdmin={isAdmin}
                   currentRole={activeRole}
+                  userCampus={currentUser?.campus}
+                  routes={routes}
+                  students={students}
                   initialTab={activeSubTab === 'expense_heads' ? 'expense_heads' : 'expenses'}
                   expenses={expenses}
                   expenseHeads={expenseHeads}

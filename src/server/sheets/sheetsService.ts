@@ -167,6 +167,10 @@ export class SheetsDatabaseManager {
   private hydratingPromise: Promise<void> | null = null;
   private lastStatusCheckedAt = 0;
   private lastConnectedState = false;
+  private lastMaintenanceRunAt = 0;
+  private pendingRemoteSync = false;
+  private isFlushingRemoteSync = false;
+  private remoteSyncTimer: any = null;
 
   constructor() {
     this.loadLocalSnapshot();
@@ -184,12 +188,16 @@ export class SheetsDatabaseManager {
       await this.initPromise;
       await this.writeQueue;
       if (this.isGoogleConfigured) {
-        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 2500;
+        const recentlyWroteLocally =
+          this.pendingRemoteSync ||
+          this.isFlushingRemoteSync ||
+          this.queueCount > 0 ||
+          (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 60000);
         if (!this.hasHydratedFromSheets) {
           await this.hydrateFromGoogleSheets(true);
-        } else if (forceFresh && !recentlyWroteLocally) {
+        } else if (forceFresh && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 30000) {
           await this.hydrateFromGoogleSheets(true);
-        } else if (process.env.VERCEL && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 1500) {
+        } else if (process.env.VERCEL && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 5000) {
           await this.hydrateFromGoogleSheets(true);
         } else if (this.lastHydratedAt === 0) {
           await this.hydrateFromGoogleSheets(false);
@@ -504,7 +512,10 @@ export class SheetsDatabaseManager {
       seenIds.add(id);
       const roleRaw = String(row[4] || base.role || 'Transport Assistant').trim();
       const role: UserRole =
-        roleRaw === 'Admin' || roleRaw === 'Transport Coordinator' || roleRaw === 'Transport Assistant'
+        roleRaw === 'Admin' ||
+        roleRaw === 'Transport Coordinator' ||
+        roleRaw === 'Transport Assistant' ||
+        roleRaw === 'Attendance Incharge'
           ? roleRaw
           : 'Transport Assistant';
       users.push({
@@ -768,14 +779,16 @@ export class SheetsDatabaseManager {
     const execution = this.writeQueue.then(async () => {
       try {
         await this.initPromise;
-        const recentlyWroteLocally = this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 1800;
-        if (this.isGoogleConfigured && (!this.hasHydratedFromSheets || (!recentlyWroteLocally && Date.now() - this.lastHydratedAt > 1500))) {
+        const recentlyWroteLocally =
+          this.pendingRemoteSync ||
+          this.isFlushingRemoteSync ||
+          (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 60000);
+        if (
+          this.isGoogleConfigured &&
+          (!this.hasHydratedFromSheets ||
+            (Boolean(process.env.VERCEL) && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 5000))
+        ) {
           await this.hydrateFromGoogleSheets(true);
-        }
-        if (this.isGoogleConfigured && !this.hasHydratedFromSheets) {
-          throw new Error(
-            'Could not read current data from Google Sheets before saving. Please retry in a few seconds so existing records are not overwritten.'
-          );
         }
         const res = await task();
         const now = Date.now();
@@ -856,10 +869,13 @@ export class SheetsDatabaseManager {
   }
 
   public getBootstrapSnapshot() {
-    if (this.purgeOctober2026AppliedFeesAndSyncBalances()) {
-      this.saveLocalSnapshot();
+    if (Date.now() - this.lastMaintenanceRunAt > 60000) {
+      this.lastMaintenanceRunAt = Date.now();
+      if (this.purgeOctober2026AppliedFeesAndSyncBalances()) {
+        this.saveLocalSnapshot();
+      }
+      this.runAutoFirstOfMonthBillingIfDue();
     }
-    this.runAutoFirstOfMonthBillingIfDue();
     const students = this.getStudents();
     const trips = this.getTrips();
     const vehicles = this.getVehicles();
@@ -1041,10 +1057,55 @@ export class SheetsDatabaseManager {
     });
   }
 
-  private async internalSyncToGoogleSheets(): Promise<{ success: boolean; message: string }> {
+  private async internalSyncToGoogleSheets(waitForRemote = false): Promise<{ success: boolean; message: string }> {
     this.rebuildScheduledServices();
     this.saveLocalSnapshot();
+    const now = Date.now();
+    this.lastLocalWriteAt = now;
+    this.lastHydratedAt = now;
 
+    if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) {
+      return { success: false, message: 'Google Sheets credentials are not configured.' };
+    }
+
+    if (!waitForRemote && !process.env.VERCEL) {
+      this.scheduleBackgroundGoogleSheetsFlush();
+      return {
+        success: true,
+        message: `Saved locally and queued background sync to Google Spreadsheet "${this.spreadsheetTitle}".`,
+      };
+    }
+
+    return this.flushToGoogleSheetsRemote();
+  }
+
+  private scheduleBackgroundGoogleSheetsFlush() {
+    this.pendingRemoteSync = true;
+    if (this.remoteSyncTimer) {
+      clearTimeout(this.remoteSyncTimer);
+    }
+    this.remoteSyncTimer = setTimeout(() => {
+      this.remoteSyncTimer = null;
+      this.runBackgroundGoogleSheetsFlush().catch((err) => {
+        console.error('Background Google Sheets Sync Error:', err?.message || err);
+      });
+    }, 350);
+  }
+
+  private async runBackgroundGoogleSheetsFlush() {
+    if (this.isFlushingRemoteSync) return;
+    this.isFlushingRemoteSync = true;
+    try {
+      while (this.pendingRemoteSync) {
+        this.pendingRemoteSync = false;
+        await this.flushToGoogleSheetsRemote();
+      }
+    } finally {
+      this.isFlushingRemoteSync = false;
+    }
+  }
+
+  private async flushToGoogleSheetsRemote(): Promise<{ success: boolean; message: string }> {
     if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) {
       return { success: false, message: 'Google Sheets credentials are not configured.' };
     }
@@ -1728,7 +1789,7 @@ export class SheetsDatabaseManager {
   }
 
   public async syncToGoogleSheets(): Promise<{ success: boolean; message: string }> {
-    return this.enqueueWrite(() => this.internalSyncToGoogleSheets());
+    return this.enqueueWrite(() => this.internalSyncToGoogleSheets(true));
   }
 
   // --- Masters: Config & Branding ---
@@ -2110,7 +2171,10 @@ export class SheetsDatabaseManager {
       const fullName = (data.fullName || '').trim();
       const password = (data.password || '').trim();
       const role: UserRole =
-        data.role === 'Admin' || data.role === 'Transport Coordinator' || data.role === 'Transport Assistant'
+        data.role === 'Admin' ||
+        data.role === 'Transport Coordinator' ||
+        data.role === 'Transport Assistant' ||
+        data.role === 'Attendance Incharge'
           ? data.role
           : 'Transport Assistant';
 
@@ -8249,6 +8313,19 @@ export class SheetsDatabaseManager {
     let changed = false;
     const todayStr = new Date().toISOString().split('T')[0];
 
+    // Ensure default System Users (including Senior & Junior Attendance Incharge and Assistants) exist
+    for (const defUser of initialSystemUsers) {
+      const exists = this.systemUsers.some(
+        u =>
+          u.id === defUser.id ||
+          u.username.trim().toLowerCase() === defUser.username.trim().toLowerCase()
+      );
+      if (!exists) {
+        this.systemUsers.push({ ...defUser });
+        changed = true;
+      }
+    }
+
     // Deduplicate any accidental duplicate route codes (e.g. duplicate Sr/3794/1)
     const seenRouteCodes = new Set<string>();
     const dedupedRoutes = this.routes.filter(r => {
@@ -10016,16 +10093,21 @@ export class SheetsDatabaseManager {
     if (!rec) throw new Error('Record not found');
 
     const tripForValidation = this.trips.find(t => t.id === rec!.tripId);
+    const nowTimeHHMM = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
     if (source === 'driver') {
-      if (
-        !tripForValidation ||
-        !tripForValidation.inTime ||
-        tripForValidation.status === 'Ready' ||
-        tripForValidation.status === 'Planned'
-      ) {
-        throw new Error(
-          'Arrival attendance cannot be marked without marking Arrival (In) Time first.'
-        );
+      if (tripForValidation) {
+        if (!tripForValidation.inTime) {
+          tripForValidation.inTime = nowTimeHHMM;
+        }
+        if (tripForValidation.status === 'Ready' || tripForValidation.status === 'Planned') {
+          tripForValidation.status = 'Arrived';
+          tripForValidation.verifiedBy = tripForValidation.verifiedBy || role || 'Transport Assistant';
+          tripForValidation.verifiedAt = tripForValidation.verifiedAt || new Date().toISOString();
+        }
       }
       if (
         rec.driverStatus &&
@@ -10044,16 +10126,19 @@ export class SheetsDatabaseManager {
         rec.notes = reason;
       }
     } else if (source === 'assistant') {
-      if (
-        !tripForValidation ||
-        !tripForValidation.outTime ||
-        (tripForValidation.status !== 'Departed' &&
+      if (tripForValidation) {
+        if (!tripForValidation.outTime) {
+          tripForValidation.outTime = nowTimeHHMM;
+        }
+        if (
+          tripForValidation.status !== 'Departed' &&
           tripForValidation.status !== 'Completed' &&
-          tripForValidation.status !== 'Verified')
-      ) {
-        throw new Error(
-          'Departure attendance cannot be marked without marking Departure (Out) Time first.'
-        );
+          tripForValidation.status !== 'Verified'
+        ) {
+          tripForValidation.status = 'Departed';
+          tripForValidation.verifiedBy = tripForValidation.verifiedBy || role || 'Transport Assistant';
+          tripForValidation.verifiedAt = tripForValidation.verifiedAt || new Date().toISOString();
+        }
       }
       if (
         rec.assistantStatus &&
@@ -10241,36 +10326,46 @@ export class SheetsDatabaseManager {
         }
       }
       if (!trip) throw new Error('Trip not found');
-      trip.verifiedBy = verifiedBy;
-      trip.verifiedAt = new Date().toISOString();
-      if (statusOverride) trip.status = statusOverride;
-      if (notes !== undefined) trip.notes = notes;
       const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      const matchingTrips = this.trips.filter(
+        t =>
+          t.id === trip!.id ||
+          (t.date === trip!.date &&
+            ((trip!.routeId && t.routeId === trip!.routeId) ||
+              (trip!.routeName && t.routeName === trip!.routeName)))
+      );
       const tripAtts = this.attendance.filter(a => a.tripId === trip!.id);
       const anyArrivalMarked = tripAtts.some(a => a.driverStatus && a.driverStatus !== 'Pending');
       const anyDepartureMarked = tripAtts.some(a => a.assistantStatus && a.assistantStatus !== 'Pending');
 
-      if (statusOverride === 'Arrived' && !trip.inTime && !timingPayload?.inTime) {
-        trip.inTime = nowTime;
-      }
-      if (statusOverride === 'Departed' && !trip.outTime && !timingPayload?.outTime) {
-        trip.outTime = nowTime;
-      }
-      if (timingPayload) {
-        if (timingPayload.inTime !== undefined) trip.inTime = timingPayload.inTime;
-        if (timingPayload.outTime !== undefined) trip.outTime = timingPayload.outTime;
-        if (timingPayload.inStrength !== undefined) {
-          trip.inStrength = Number(timingPayload.inStrength);
-        } else if (anyArrivalMarked) {
-          trip.inStrength = tripAtts.filter(a => a.driverStatus === 'Present').length;
+      for (const targetTrip of matchingTrips) {
+        targetTrip.verifiedBy = verifiedBy;
+        targetTrip.verifiedAt = new Date().toISOString();
+        if (statusOverride) targetTrip.status = statusOverride;
+        if (notes !== undefined) targetTrip.notes = notes;
+
+        if (statusOverride === 'Arrived' && !targetTrip.inTime && !timingPayload?.inTime) {
+          targetTrip.inTime = nowTime;
         }
-        if (timingPayload.outStrength !== undefined) {
-          trip.outStrength = Number(timingPayload.outStrength);
-        } else if (anyDepartureMarked) {
-          trip.outStrength = tripAtts.filter(a => a.assistantStatus === 'Present').length;
+        if (statusOverride === 'Departed' && !targetTrip.outTime && !timingPayload?.outTime) {
+          targetTrip.outTime = nowTime;
         }
-        if (timingPayload.strengthMismatchRemark !== undefined) {
-          trip.strengthMismatchRemark = timingPayload.strengthMismatchRemark.trim();
+        if (timingPayload) {
+          if (timingPayload.inTime !== undefined) targetTrip.inTime = timingPayload.inTime;
+          if (timingPayload.outTime !== undefined) targetTrip.outTime = timingPayload.outTime;
+          if (anyArrivalMarked) {
+            targetTrip.inStrength = tripAtts.filter(a => a.driverStatus === 'Present').length;
+          } else if (timingPayload.inStrength !== undefined) {
+            targetTrip.inStrength = Number(timingPayload.inStrength);
+          }
+          if (anyDepartureMarked) {
+            targetTrip.outStrength = tripAtts.filter(a => a.assistantStatus === 'Present').length;
+          } else if (timingPayload.outStrength !== undefined) {
+            targetTrip.outStrength = Number(timingPayload.outStrength);
+          }
+          if (timingPayload.strengthMismatchRemark !== undefined) {
+            targetTrip.strengthMismatchRemark = timingPayload.strengthMismatchRemark.trim();
+          }
         }
       }
       await this.internalSyncToGoogleSheets();

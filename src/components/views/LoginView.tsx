@@ -90,7 +90,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ config, onLogin, onBackToW
               <span>Transport ERP Sign In</span>
             </h2>
             <p className="text-xs text-slate-500 mt-1">
-              Sign in with your authorized staff credentials (Admin, Transport Coordinator, or Transport Assistant).
+              Sign in with your authorized staff credentials (Admin, Transport Coordinator, Transport Assistant, or Attendance Incharge).
             </p>
           </div>
 

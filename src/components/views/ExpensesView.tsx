@@ -2,14 +2,25 @@ import React, { useState, useEffect } from 'react';
 import { 
   IndianRupee, Plus, Search, Calendar, Tag, X, Upload, Eye, Trash2, Lock, Check, Ban, ShieldCheck
 } from 'lucide-react';
-import { ExpenseRecord, ExpenseHead, Vehicle } from '../../types/index.js';
+import { ExpenseRecord, ExpenseHead, Vehicle, Route, Student } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
+import {
+  normalizeCampus,
+  formatCampusLabel,
+  getExpenseCampus,
+  matchesCampusFilter,
+  CampusFilter,
+  ResolvedCampus,
+} from '../../utils/campus.js';
 
 interface ExpensesViewProps {
   schoolName?: string;
   isAdmin?: boolean;
   currentRole?: string;
+  userCampus?: string;
+  routes?: Route[];
+  students?: Student[];
   initialTab?: 'expenses' | 'expense_heads';
   expenses?: ExpenseRecord[];
   expenseHeads?: ExpenseHead[];
@@ -28,6 +39,9 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   schoolName,
   isAdmin = true,
   currentRole = 'Admin',
+  userCampus,
+  routes = [],
+  students = [],
   initialTab = 'expenses',
   expenses = [],
   expenseHeads = [],
@@ -39,6 +53,21 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   onDeleteExpenseHead,
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
+  const isAssistant = currentRole === 'Transport Assistant';
+  const lockedCampus: ResolvedCampus | null = isAssistant
+    ? normalizeCampus(userCampus) || 'Sr'
+    : null;
+  const [selectedCampus, setSelectedCampus] = useState<CampusFilter>(lockedCampus || 'all');
+  const [expenseCampus, setExpenseCampus] = useState<ResolvedCampus>(lockedCampus || 'Sr');
+
+  useEffect(() => {
+    if (lockedCampus) {
+      setSelectedCampus(lockedCampus);
+      setExpenseCampus(lockedCampus);
+    } else if (selectedCampus === 'Sr' || selectedCampus === 'Jr') {
+      setExpenseCampus(selectedCampus);
+    }
+  }, [lockedCampus, selectedCampus]);
   const [activeTab, setActiveTab] = useState<'expenses' | 'expense_heads'>(initialTab);
 
   useEffect(() => {
@@ -104,7 +133,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     }
   };
 
-  const filteredExpenses = expenses.filter((exp) => {
+  const scopedExpenses = expenses.filter((exp) =>
+    matchesCampusFilter(getExpenseCampus(exp, vehicles, routes, students), selectedCampus)
+  );
+
+  const filteredExpenses = scopedExpenses.filter((exp) => {
     const matchesSearch =
       exp.vendorName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       exp.narration.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -124,8 +157,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const approvedExpenses = filteredExpenses.filter(
     (e) => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected'
   );
-  const pendingExpensesCount = expenses.filter((e) => e.approvalStatus === 'Pending Approval').length;
+  const pendingExpensesCount = scopedExpenses.filter((e) => e.approvalStatus === 'Pending Approval').length;
   const totalFilteredSpend = approvedExpenses.reduce((sum, e) => sum + e.amount, 0);
+  const totalCashSpend = approvedExpenses.filter((e) => e.paymentMode === 'Cash').reduce((sum, e) => sum + e.amount, 0);
+  const totalOnlineSpend = totalFilteredSpend - totalCashSpend;
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -134,8 +169,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     try {
       setIsSubmitting(true);
       const selectedVehObj = vehicles.find((v) => v.registrationNumber === vehicleNumber);
+      const targetCamp = lockedCampus || expenseCampus;
       await onAddExpense({
         date: isAdmin ? expenseDate : todayStr,
+        campus: targetCamp,
         category: category || expenseHeads[0]?.name || 'General Operations',
         vehicleId: selectedVehObj?.id,
         vehicleNumber,
@@ -147,8 +184,8 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         vendorName: vendorName || 'Direct Vendor',
         billNumber,
         billPhoto: billPhoto || undefined,
-        narration: narration || `${category} expenditure`,
-        recordedBy: currentRole,
+        narration: narration || `${category} expenditure (${targetCamp} Campus)`,
+        recordedBy: `${currentRole} (${targetCamp} Campus)`,
         requiresApproval: categoryNeedsApproval,
       });
       setIsModalOpen(false);
@@ -212,13 +249,38 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     <div className="space-y-5">
       {/* Header & Unified Toolbar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
-            {activeTab === 'expense_heads' ? 'Expense Approval Categories' : 'Expenses Register'}
+            {activeTab === 'expense_heads'
+              ? 'Expense Approval Categories'
+              : `Expenses Register — ${formatCampusLabel(selectedCampus)}`}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeTab === 'expense_heads' ? `${expenseHeads.length} Categories` : `${filteredExpenses.length} Records`}
           </span>
+          {lockedCampus ? (
+            <span className="px-2.5 py-1 rounded-lg bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold flex items-center gap-1">
+              <Lock className="w-3 h-3" />
+              <span>Campus Locked: {formatCampusLabel(lockedCampus)}</span>
+            </span>
+          ) : (
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+              {(['all', 'Sr', 'Jr'] as CampusFilter[]).map((camp) => (
+                <button
+                  key={camp}
+                  type="button"
+                  onClick={() => setSelectedCampus(camp)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    selectedCampus === camp
+                      ? 'bg-slate-900 text-amber-400 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {camp === 'all' ? 'All Campuses' : camp === 'Sr' ? 'Senior (Sr)' : 'Junior (Jr)'}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -373,9 +435,14 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-white rounded-xl p-4 border border-slate-200 shadow-2xs flex items-center justify-between">
               <div>
-                <span className="text-[11px] font-bold text-slate-400 uppercase">Approved &amp; Paid Total</span>
+                <span className="text-[11px] font-bold text-slate-400 uppercase">
+                  Approved &amp; Paid Total ({selectedCampus === 'all' ? 'All' : selectedCampus})
+                </span>
                 <div className="text-xl font-bold text-slate-900 mt-0.5">
                   ₹{totalFilteredSpend.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                  Cash: ₹{totalCashSpend.toLocaleString('en-IN')} • Online: ₹{totalOnlineSpend.toLocaleString('en-IN')}
                 </div>
               </div>
               <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg">

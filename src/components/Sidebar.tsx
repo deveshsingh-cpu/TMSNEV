@@ -104,6 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     accounts_group: true,
     masters_group: false,
     assistant_vehicles_group: true,
+    incharge_operations_group: true,
   });
 
   useEffect(() => {
@@ -128,7 +129,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
         assistant_vehicles_group: true,
       }));
     } else if (activeKey === 'operations') {
-      setExpandedGroups((prev) => ({ ...prev, operations_group: true }));
+      setExpandedGroups((prev) => ({
+        ...prev,
+        operations_group: true,
+        incharge_operations_group: true,
+      }));
     } else if (activeKey === 'fees') {
       setExpandedGroups((prev) => ({ ...prev, fees_group: true }));
     } else if (
@@ -251,6 +256,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'as-ex-daybook', label: '2- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
         { id: 'as-ac-stu', label: '3- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
         { id: 'as-ac-veh', label: '4- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
+        { id: 'as-ac-tb', label: '5- Trial Balance', navKey: 'accounts', subTab: 'trial_balance' },
       ],
     },
     {
@@ -263,6 +269,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'as-led-daybook', label: '1- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
         { id: 'as-led-stu', label: '2- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
         { id: 'as-led-veh', label: '3- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
+        { id: 'as-led-tb', label: '4- Trial Balance', navKey: 'accounts', subTab: 'trial_balance' },
       ],
     },
     {
@@ -554,7 +561,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
   ];
 
-  const visibleGroups = (currentRole === 'Transport Assistant' ? assistantGroups : standardGroups)
+  // Dedicated strict sidebar for Attendance Incharge (Sr & Jr): ONLY Arrival Attendance, Departure Attendance & Attendance Summary Sheet
+  const attendanceInchargeGroups: SidebarGroupItem[] = [
+    {
+      key: 'incharge_operations_group',
+      label: 'Campus Attendance & Summary',
+      icon: <Clock className="w-5 h-5" />,
+      defaultNavKey: 'operations',
+      defaultSubTab: 'arrival',
+      subItems: [
+        { id: 'inc-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
+        { id: 'inc-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
+        { id: 'inc-summary', label: '3- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
+      ],
+    },
+  ];
+
+  const baseGroupsForRole =
+    currentRole === 'Attendance Incharge'
+      ? attendanceInchargeGroups
+      : currentRole === 'Transport Assistant'
+      ? assistantGroups
+      : standardGroups;
+
+  const visibleGroups = baseGroupsForRole
     .filter((g) => !g.allowedRoles || g.allowedRoles.includes(currentRole))
     .map((g) => ({
       ...g,
@@ -566,6 +596,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
       : currentRole === 'Transport Coordinator'
       ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+      : currentRole === 'Attendance Incharge'
+      ? 'bg-violet-500/20 text-violet-300 border-violet-500/40'
       : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
 
   const handleItemSelect = (navKey: NavItemKey, subTab?: string) => {

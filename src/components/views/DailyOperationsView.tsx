@@ -84,6 +84,24 @@ const summarizeRemarkForTable = (text?: string, maxLen = 28): string => {
   return `${clean.slice(0, maxLen - 1)}…`;
 };
 
+const getTodayLocalStr = (): string => {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
+
+const normalizeCampusCode = (raw?: string | null): string | null => {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  const lower = trimmed.toLowerCase();
+  if (!trimmed || lower === 'all' || lower === 'all campuses') return null;
+  if (lower === 'sr' || lower.startsWith('sr ') || lower.includes('senior')) return 'Sr';
+  if (lower === 'jr' || lower.startsWith('jr ') || lower.includes('junior')) return 'Jr';
+  return trimmed;
+};
+
 export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   schoolName,
   isAdmin = true,
@@ -98,7 +116,6 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   absenteeCalls = [],
   initialSubTab,
   onSelectTrip,
-  onSelectRouteForDate,
   onMarkAttendance,
   onBatchSaveAttendance,
   onVerifyTrip,
@@ -107,20 +124,27 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   onConfirmEarlyArrival,
 }) => {
   const isAssistant = currentRole === 'Transport Assistant';
+  const isAttendanceIncharge = currentRole === 'Attendance Incharge';
   const isCoordinator = currentRole === 'Transport Coordinator';
-  const lockedCampus = isAssistant && userCampus && userCampus !== 'All' ? userCampus : null;
+  const isCampusRestricted = isAssistant || isAttendanceIncharge;
+  const lockedCampus = isCampusRestricted ? normalizeCampusCode(userCampus) : null;
 
-  const [activeSubView, setActiveSubView] = useState<'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees'>(
-    initialSubTab === 'pack'
-      ? 'pack'
-      : initialSubTab === 'summary'
-      ? 'summary'
-      : initialSubTab === 'calendar'
-      ? 'calendar'
-      : initialSubTab === 'call_absentees'
-      ? 'call_absentees'
-      : 'board'
-  );
+  const resolveAllowedSubView = (
+    tab?: string
+  ): 'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees' => {
+    if (isAttendanceIncharge) {
+      return tab === 'summary' ? 'summary' : 'board';
+    }
+    if (tab === 'pack') return 'pack';
+    if (tab === 'summary') return 'summary';
+    if (tab === 'calendar') return 'calendar';
+    if (tab === 'call_absentees') return 'call_absentees';
+    return 'board';
+  };
+
+  const [activeSubView, setActiveSubView] = useState<
+    'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees'
+  >(() => resolveAllowedSubView(initialSubTab));
 
   // Separate mode for 1- Arrival Attendance vs 2- Departure Attendance
   const [boardMode, setBoardMode] = useState<'arrival' | 'departure'>(
@@ -148,6 +172,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const [isConfirmingEarlyArrival, setIsConfirmingEarlyArrival] = useState(false);
 
   useEffect(() => {
+    if (isAttendanceIncharge) {
+      if (initialSubTab === 'summary') {
+        setActiveSubView('summary');
+      } else if (initialSubTab === 'departure') {
+        setActiveSubView('board');
+        setBoardMode('departure');
+      } else {
+        setActiveSubView('board');
+        setBoardMode('arrival');
+      }
+      return;
+    }
     if (initialSubTab === 'pack') setActiveSubView('pack');
     else if (initialSubTab === 'summary') setActiveSubView('summary');
     else if (initialSubTab === 'calendar') setActiveSubView('calendar');
@@ -159,16 +195,26 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       setActiveSubView('board');
       setBoardMode('arrival');
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, isAttendanceIncharge]);
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getTodayLocalStr();
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
   const [selectedCampus, setSelectedCampus] = useState<string>(lockedCampus || 'all');
   const [selectedVehicleFilter, setSelectedVehicleFilter] = useState<string>('all');
-  const [selectedRouteId, setSelectedRouteId] = useState<string>(routes[0]?.id || '');
+  const [selectedRouteId, setSelectedRouteId] = useState<string>(() => {
+    const initialMatching = lockedCampus
+      ? routes.find((r) => normalizeCampusCode(r.campus) === lockedCampus)
+      : routes[0];
+    return initialMatching?.id || routes[0]?.id || '';
+  });
   const [selectedTripId, setSelectedTripId] = useState<string>(trips[0]?.id || '');
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
-  const [isLoadingRouteTrip, setIsLoadingRouteTrip] = useState(false);
+  const [isLoadingRouteTrip] = useState(false);
+
+  // Optimistic local state for marked Arrival (In) and Departure (Out) times per route+date so the UI updates in 0ms
+  const [localMarkedTripTimings, setLocalMarkedTripTimings] = useState<
+    Record<string, { inTime?: string; outTime?: string; status?: 'Arrived' | 'Departed' }>
+  >({});
 
   // In Time & Out Time quick inputs on Arrival & Departure bar (auto-selected as per current system timings)
   const [tripInTime, setTripInTime] = useState<string>(() => getCurrentSystemTimeHHMM());
@@ -244,28 +290,29 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   // Summary Sheet State (matching Narendra Edu Valley Transport Timings clipboard format)
   const [summaryDate, setSummaryDate] = useState<string>(todayStr);
-  const [summaryCampus, setSummaryCampus] = useState<string>('All Campuses');
+  const [summaryCampus, setSummaryCampus] = useState<string>(() => lockedCampus || 'All Campuses');
   const [campusInchargeName, setCampusInchargeName] = useState<string>('');
-  const [filledByName, setFilledByName] = useState<string>('Transport Assistant');
+  const [filledByName, setFilledByName] = useState<string>(() =>
+    isAttendanceIncharge ? 'Attendance Incharge' : 'Transport Assistant'
+  );
   const [summaryRemarks, setSummaryRemarks] = useState<string>('');
   const [timingOverrides, setTimingOverrides] = useState<Record<string, SummaryTimingOverride>>({});
 
-  // Filter routes by selected Vehicle and Campus
-  const availableRoutesForDropdown = routes.filter((r) => {
-    if (selectedCampus !== 'all' && r.campus !== selectedCampus) return false;
-    if (
-      selectedVehicleFilter !== 'all' &&
-      r.vehicleId !== selectedVehicleFilter &&
-      r.vehicleNumber !== selectedVehicleFilter
-    ) {
-      return false;
+  useEffect(() => {
+    if (lockedCampus) {
+      setSummaryCampus(lockedCampus);
     }
-    return true;
-  });
+  }, [lockedCampus]);
 
-  const [calendarMonth, setCalendarMonth] = useState<string>(todayStr.slice(0, 7));
+  const getStudentCampusCode = (s: StudentMember): string => {
+    return (
+      normalizeCampusCode(s.campus) ||
+      (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr')
+    );
+  };
 
-  const getMembersForRoute = (route: Route | undefined): StudentMember[] => {
+  // Raw route members helper (all non-Left members attached to a route across any campus)
+  const getAllMembersForRouteRaw = (route: Route | undefined): StudentMember[] => {
     if (!route) return [];
     return students
       .filter((s) => {
@@ -304,6 +351,49 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       );
   };
 
+  // Campus-scoped route members helper:
+  // For campus-restricted roles (Sr/Jr Transport Assistant & Sr/Jr Attendance Incharge) or when a campus filter is active,
+  // strictly return ONLY students belonging to that campus so other campus members cannot be viewed or marked.
+  const getMembersForRoute = (
+    route: Route | undefined,
+    campusFilterOverride?: string | null
+  ): StudentMember[] => {
+    const rawMembers = getAllMembersForRouteRaw(route);
+    const effectiveCampus =
+      lockedCampus ||
+      normalizeCampusCode(campusFilterOverride !== undefined ? campusFilterOverride : selectedCampus);
+    if (!effectiveCampus) return rawMembers;
+    return rawMembers.filter((s) => getStudentCampusCode(s) === effectiveCampus);
+  };
+
+  // Check if a route either belongs to targetCampus OR carries at least one active/suspended member of targetCampus
+  const routeHasMembersForCampus = (route: Route, targetCampusCode: string | null): boolean => {
+    if (!targetCampusCode) return true;
+    if (normalizeCampusCode(route.campus) === targetCampusCode) return true;
+    return getAllMembersForRouteRaw(route).some(
+      (s) => getStudentCampusCode(s) === targetCampusCode
+    );
+  };
+
+  const activeCampusFilterCode = lockedCampus || normalizeCampusCode(selectedCampus);
+
+  // Filter routes by selected Vehicle and Campus (including cross-campus routes that carry students of activeCampusFilterCode)
+  const availableRoutesForDropdown = routes.filter((r) => {
+    if (activeCampusFilterCode && !routeHasMembersForCampus(r, activeCampusFilterCode)) {
+      return false;
+    }
+    if (
+      selectedVehicleFilter !== 'all' &&
+      r.vehicleId !== selectedVehicleFilter &&
+      r.vehicleNumber !== selectedVehicleFilter
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  const [calendarMonth, setCalendarMonth] = useState<string>(todayStr.slice(0, 7));
+
   useEffect(() => {
     if (
       availableRoutesForDropdown.length > 0 &&
@@ -311,23 +401,33 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     ) {
       const nextRoute = availableRoutesForDropdown[0];
       setSelectedRouteId(nextRoute.id);
-      if (onSelectRouteForDate) {
-        onSelectRouteForDate(selectedDate, nextRoute.id);
-      }
     }
-  }, [selectedVehicleFilter, selectedCampus, routes]);
+  }, [selectedVehicleFilter, selectedCampus, routes, availableRoutesForDropdown, selectedRouteId]);
 
   const selectedRouteObj =
-    routes.find((r) => r.id === selectedRouteId) || availableRoutesForDropdown[0] || routes[0];
+    availableRoutesForDropdown.find((r) => r.id === selectedRouteId) ||
+    availableRoutesForDropdown[0] ||
+    routes.find((r) => r.id === selectedRouteId) ||
+    routes[0];
 
-  const matchedTripForRouteAndDate = trips.find(
+  const matchingTripsForRouteAndDate = trips.filter(
     (t) =>
       t.date === selectedDate &&
       selectedRouteObj &&
       (t.routeId === selectedRouteObj.id || t.routeName === selectedRouteObj.code)
   );
 
-  const currentTrip: DailyTrip | undefined =
+  const matchedTripForRouteAndDate =
+    matchingTripsForRouteAndDate.find(
+      (t) => (t.inTime || t.outTime) && t.status !== 'Ready' && t.status !== 'Planned'
+    ) ||
+    matchingTripsForRouteAndDate.find((t) => t.inTime || t.outTime) ||
+    matchingTripsForRouteAndDate[0];
+
+  const routeDateKey = `${selectedRouteObj?.id || ''}:${selectedDate}`;
+  const localTimingForCurrentRoute = localMarkedTripTimings[routeDateKey];
+
+  const baseCurrentTrip: DailyTrip | undefined =
     matchedTripForRouteAndDate ||
     (selectedRouteObj
       ? {
@@ -359,19 +459,29 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         }
       : undefined);
 
+  const currentTrip: DailyTrip | undefined = baseCurrentTrip
+    ? {
+        ...baseCurrentTrip,
+        status: localTimingForCurrentRoute?.status || baseCurrentTrip.status,
+        inTime: localTimingForCurrentRoute?.inTime || baseCurrentTrip.inTime,
+        outTime: localTimingForCurrentRoute?.outTime || baseCurrentTrip.outTime,
+      }
+    : undefined;
+
   useEffect(() => {
     const nowHHMM = getCurrentSystemTimeHHMM();
+    const localTiming = localMarkedTripTimings[`${selectedRouteObj?.id || ''}:${selectedDate}`];
     if (matchedTripForRouteAndDate) {
       if (matchedTripForRouteAndDate.id !== selectedTripId) {
         setSelectedTripId(matchedTripForRouteAndDate.id);
         onSelectTrip(matchedTripForRouteAndDate.id);
       }
-      setTripInTime(matchedTripForRouteAndDate.inTime || nowHHMM);
-      setTripOutTime(matchedTripForRouteAndDate.outTime || nowHHMM);
+      setTripInTime(localTiming?.inTime || matchedTripForRouteAndDate.inTime || nowHHMM);
+      setTripOutTime(localTiming?.outTime || matchedTripForRouteAndDate.outTime || nowHHMM);
       setTripMismatchRemarkInput(matchedTripForRouteAndDate.strengthMismatchRemark || '');
     } else {
-      setTripInTime(nowHHMM);
-      setTripOutTime(nowHHMM);
+      setTripInTime(localTiming?.inTime || nowHHMM);
+      setTripOutTime(localTiming?.outTime || nowHHMM);
       setTripMismatchRemarkInput('');
     }
   }, [
@@ -379,12 +489,12 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     matchedTripForRouteAndDate?.inTime,
     matchedTripForRouteAndDate?.outTime,
     matchedTripForRouteAndDate?.strengthMismatchRemark,
-    selectedRouteId,
+    selectedRouteObj?.id,
     selectedDate,
     boardMode,
   ]);
 
-  const handleRouteDropdownChange = async (newRouteId: string) => {
+  const handleRouteDropdownChange = (newRouteId: string) => {
     setSelectedRouteId(newRouteId);
     const existingTrip = trips.find(
       (t) => t.date === selectedDate && t.routeId === newRouteId
@@ -392,26 +502,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     if (existingTrip) {
       setSelectedTripId(existingTrip.id);
       onSelectTrip(existingTrip.id);
-    } else if (onSelectRouteForDate) {
-      setIsLoadingRouteTrip(true);
-      try {
-        await onSelectRouteForDate(selectedDate, newRouteId);
-      } finally {
-        setIsLoadingRouteTrip(false);
-      }
     }
   };
 
-  const handleDateChange = async (newDate: string) => {
+  const handleDateChange = (newDate: string) => {
     setSelectedDate(newDate);
-    if (selectedRouteObj?.id && onSelectRouteForDate) {
-      setIsLoadingRouteTrip(true);
-      try {
-        await onSelectRouteForDate(newDate, selectedRouteObj.id);
-      } finally {
-        setIsLoadingRouteTrip(false);
-      }
-    }
   };
 
   const boardRouteMembers = getMembersForRoute(selectedRouteObj);
@@ -510,17 +605,31 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       activeBoardStatus(a) !== 'Holiday'
   ).length;
 
-  const isArrivalTimeMarked = Boolean(
-    matchedTripForRouteAndDate?.inTime &&
-      matchedTripForRouteAndDate?.status !== 'Ready' &&
-      matchedTripForRouteAndDate?.status !== 'Planned'
-  );
-  const isDepartureTimeMarked = Boolean(
-    matchedTripForRouteAndDate?.outTime &&
-      (matchedTripForRouteAndDate?.status === 'Departed' ||
-        matchedTripForRouteAndDate?.status === 'Completed' ||
-        matchedTripForRouteAndDate?.status === 'Verified')
-  );
+  const effectiveInTime =
+    localTimingForCurrentRoute?.inTime ||
+    (matchedTripForRouteAndDate?.inTime &&
+    matchedTripForRouteAndDate?.status !== 'Ready' &&
+    matchedTripForRouteAndDate?.status !== 'Planned'
+      ? matchedTripForRouteAndDate.inTime
+      : undefined) ||
+    (tripAttendanceList.some((a) => a.driverStatus && a.driverStatus !== 'Pending')
+      ? matchedTripForRouteAndDate?.inTime || tripInTime || '07:30'
+      : undefined);
+
+  const effectiveOutTime =
+    localTimingForCurrentRoute?.outTime ||
+    (matchedTripForRouteAndDate?.outTime &&
+    (matchedTripForRouteAndDate?.status === 'Departed' ||
+      matchedTripForRouteAndDate?.status === 'Completed' ||
+      matchedTripForRouteAndDate?.status === 'Verified')
+      ? matchedTripForRouteAndDate.outTime
+      : undefined) ||
+    (tripAttendanceList.some((a) => a.assistantStatus && a.assistantStatus !== 'Pending')
+      ? matchedTripForRouteAndDate?.outTime || tripOutTime || '14:00'
+      : undefined);
+
+  const isArrivalTimeMarked = Boolean(effectiveInTime);
+  const isDepartureTimeMarked = Boolean(effectiveOutTime);
 
   // Separate Arrival vs Departure counts for current route/trip
   const arrivalMarkedRecordsCount = tripAttendanceList.filter(
@@ -1029,8 +1138,19 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const handleMarkTripArrivalOrDeparture = async (mode: 'Arrived' | 'Departed') => {
     if (!currentTrip) return;
     const nowTime = getCurrentSystemTimeHHMM();
-    const effectiveIn = mode === 'Arrived' ? (tripInTime || nowTime) : currentTrip.inTime;
-    const effectiveOut = mode === 'Departed' ? (tripOutTime || nowTime) : currentTrip.outTime;
+    const effectiveIn = mode === 'Arrived' ? (tripInTime || nowTime) : (effectiveInTime || currentTrip.inTime);
+    const effectiveOut = mode === 'Departed' ? (tripOutTime || nowTime) : (effectiveOutTime || currentTrip.outTime);
+
+    // Immediately record timing in optimistic local state (0ms) so the popup never re-triggers
+    const currentKey = `${selectedRouteObj?.id || currentTrip.routeId || ''}:${selectedDate}`;
+    setLocalMarkedTripTimings((prev) => ({
+      ...prev,
+      [currentKey]: {
+        inTime: mode === 'Arrived' ? effectiveIn : prev[currentKey]?.inTime || effectiveInTime,
+        outTime: mode === 'Departed' ? effectiveOut : prev[currentKey]?.outTime || effectiveOutTime,
+        status: mode,
+      },
+    }));
 
     const inStrPayload =
       mode === 'Arrived'
@@ -1050,19 +1170,23 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         ? `Arrived at ${effectiveIn}${inStrPayload !== undefined ? ` (In Strength: ${inStrPayload})` : ''}`
         : `Departed at ${effectiveOut}${outStrPayload !== undefined ? ` (Out Strength: ${outStrPayload})` : ''}`;
 
-    await onVerifyTrip(currentTrip.id, note, mode, {
-      inTime: mode === 'Arrived' ? effectiveIn : undefined,
-      outTime: mode === 'Departed' ? effectiveOut : undefined,
-      inStrength: inStrPayload,
-      outStrength: outStrPayload,
-    });
-
     setStatusFeedback(
       mode === 'Arrived'
-        ? `${currentTrip.vehicleNumber} (${currentTrip.routeName}) Arrival Time marked as ${effectiveIn}. Mark attendance and click "Save Attendance" to finalize.`
-        : `${currentTrip.vehicleNumber} (${currentTrip.routeName}) Departure Time marked as ${effectiveOut}. Mark attendance and click "Save Attendance" to finalize.`
+        ? `✓ ${currentTrip.vehicleNumber} (${currentTrip.routeName}) Arrival Time marked as ${effectiveIn}. Mark attendance and click "Save Attendance" to finalize.`
+        : `✓ ${currentTrip.vehicleNumber} (${currentTrip.routeName}) Departure Time marked as ${effectiveOut}. Mark attendance and click "Save Attendance" to finalize.`
     );
     setTimeout(() => setStatusFeedback(null), 3500);
+
+    try {
+      await onVerifyTrip(currentTrip.id, note, mode, {
+        inTime: mode === 'Arrived' ? effectiveIn : undefined,
+        outTime: mode === 'Departed' ? effectiveOut : undefined,
+        inStrength: inStrPayload,
+        outStrength: outStrPayload,
+      });
+    } catch (err: any) {
+      console.error('Trip timing verify error:', err);
+    }
   };
 
   const handleConfirmMarkTimeFromPrompt = async () => {
@@ -1070,13 +1194,25 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     const promptMode = timeRequiredPrompt.mode;
     const mode = promptMode === 'arrival' ? 'Arrived' : 'Departed';
     const pending = timeRequiredPrompt.pendingAction;
-    setTimeRequiredPrompt(null);
-    await handleMarkTripArrivalOrDeparture(mode);
+    const nowTime = getCurrentSystemTimeHHMM();
+    const effectiveIn = mode === 'Arrived' ? (tripInTime || nowTime) : (effectiveInTime || currentTrip.inTime);
+    const effectiveOut = mode === 'Departed' ? (tripOutTime || nowTime) : (effectiveOutTime || currentTrip.outTime);
 
-    if (pending) {
-      if (pending.type === 'save_batch') {
-        await executeSaveAttendanceBatch(promptMode);
-      } else if (pending.type === 'all_holiday') {
+    // 1. Close prompt & mark arrival/departure time in local state synchronously (0ms)
+    const currentKey = `${selectedRouteObj?.id || currentTrip.routeId || ''}:${selectedDate}`;
+    setLocalMarkedTripTimings((prev) => ({
+      ...prev,
+      [currentKey]: {
+        inTime: mode === 'Arrived' ? effectiveIn : prev[currentKey]?.inTime || effectiveInTime,
+        outTime: mode === 'Departed' ? effectiveOut : prev[currentKey]?.outTime || effectiveOutTime,
+        status: mode,
+      },
+    }));
+    setTimeRequiredPrompt(null);
+
+    // 2. Immediately apply any pending draft selection so user experiences zero lag
+    if (pending && pending.type !== 'save_batch') {
+      if (pending.type === 'all_holiday') {
         const alreadySavedNonHoliday = tripAttendanceList.filter((rec) => {
           const savedSt = getSavedStatusForMode(rec, promptMode);
           return savedSt !== 'Pending' && savedSt !== 'Holiday';
@@ -1113,19 +1249,28 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               savedStatus: savedSt,
               mode: promptMode,
             });
-            return;
+          } else {
+            setSavedRecordChangeModal({
+              mode: promptMode,
+              actionType: 'single',
+              rec: pending.rec,
+              savedStatus: savedSt,
+              newStatus: pending.statusVal,
+            });
           }
-          setSavedRecordChangeModal({
-            mode: promptMode,
-            actionType: 'single',
-            rec: pending.rec,
-            savedStatus: savedSt,
-            newStatus: pending.statusVal,
-          });
-          return;
+        } else {
+          proceedWithAttendanceSelectionAfterSavedCheck(pending.rec, promptMode, pending.statusVal);
         }
-        proceedWithAttendanceSelectionAfterSavedCheck(pending.rec, promptMode, pending.statusVal);
       }
+      // Persist trip timing in background without blocking student attendance taps
+      void handleMarkTripArrivalOrDeparture(mode);
+      return;
+    }
+
+    // If pending action was save_batch, verify trip timing and then save batch
+    await handleMarkTripArrivalOrDeparture(mode);
+    if (pending?.type === 'save_batch') {
+      await executeSaveAttendanceBatch(promptMode);
     }
   };
 
@@ -1467,7 +1612,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   });
 
   const filteredPackRoutes = routes.filter((r) => {
-    if (lockedCampus && r.campus && r.campus !== lockedCampus) return false;
+    if (lockedCampus && !routeHasMembersForCampus(r, lockedCampus)) return false;
     if (
       packVehicleFilter !== 'all' &&
       r.vehicleId !== packVehicleFilter &&
@@ -1788,41 +1933,107 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     );
   };
 
-  // --- Transport Timings & Attendance Summary Sheet Rows (per Vehicle, 1st & 2nd Trip) ---
-  const summaryRows = vehicles.map((veh, idx) => {
+  // --- Transport Timings & Attendance Summary Sheet Rows (per Vehicle, 1st & 2nd Trip, Campus-Aware) ---
+  const targetSummaryCampus = lockedCampus || normalizeCampusCode(summaryCampus);
+  const summaryCampusDisplayLabel = targetSummaryCampus
+    ? getCampusLabel(targetSummaryCampus)
+    : 'All Campuses';
+
+  const studentCampusByIdMap = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of students) {
+      map.set(s.id, getStudentCampusCode(s));
+    }
+    return map;
+  }, [students]);
+
+  const filteredSummaryVehicles = vehicles.filter((veh) => {
+    if (!targetSummaryCampus) return true;
+    const vehRoutes = routes.filter(
+      (r) => r.vehicleId === veh.id || r.vehicleNumber === veh.registrationNumber
+    );
+    const hasRouteForCampus = vehRoutes.some((r) =>
+      routeHasMembersForCampus(r, targetSummaryCampus)
+    );
+    if (hasRouteForCampus) return true;
+    const vehTripsForDate = trips.filter(
+      (t) =>
+        (t.vehicleId === veh.id || t.vehicleNumber === veh.registrationNumber) &&
+        (!summaryDate || t.date === summaryDate)
+    );
+    return vehTripsForDate.some(
+      (t) => normalizeCampusCode(t.campus) === targetSummaryCampus
+    );
+  });
+
+  const summaryRows = filteredSummaryVehicles.map((veh, idx) => {
     const vehTrips = trips.filter(
       (t) =>
         (t.vehicleId === veh.id || t.vehicleNumber === veh.registrationNumber) &&
         (!summaryDate || t.date === summaryDate)
     );
-    const trip1 = vehTrips.find((t) => t.tripNumber === 1) || (vehTrips.length === 1 && vehTrips[0].tripNumber !== 2 ? vehTrips[0] : undefined);
-    const trip2 = vehTrips.find((t) => t.tripNumber === 2);
+    const vehRoutes = routes.filter(
+      (r) => r.vehicleId === veh.id || r.vehicleNumber === veh.registrationNumber
+    );
+
+    const doesTripMatchSummaryCampus = (t: DailyTrip): boolean => {
+      if (!targetSummaryCampus) return true;
+      if (normalizeCampusCode(t.campus) === targetSummaryCampus) return true;
+      const matchedRoute = vehRoutes.find(
+        (r) => r.id === t.routeId || r.code === t.routeName
+      );
+      if (matchedRoute && routeHasMembersForCampus(matchedRoute, targetSummaryCampus)) {
+        return true;
+      }
+      return attendanceRecords.some(
+        (a) =>
+          a.tripId === t.id &&
+          studentCampusByIdMap.get(a.studentId) === targetSummaryCampus
+      );
+    };
+
+    const campusMatchingTrips = vehTrips.filter(doesTripMatchSummaryCampus);
+    const trip1 =
+      campusMatchingTrips.find((t) => t.tripNumber === 1) ||
+      (campusMatchingTrips.length === 1 && campusMatchingTrips[0].tripNumber !== 2
+        ? campusMatchingTrips[0]
+        : undefined);
+    const trip2 = campusMatchingTrips.find((t) => t.tripNumber === 2);
 
     const getTripSummaryStats = (t: DailyTrip | undefined) => {
       if (!t) {
         return { inTime: '', inStr: '', outTime: '', outStr: '', remark: '' };
       }
-      const tAtts = attendanceRecords.filter(
+      const rawTripAtts = attendanceRecords.filter(
         (a) => a.tripId === t.id && (!summaryDate || a.date === summaryDate)
       );
+      const tAtts = targetSummaryCampus
+        ? rawTripAtts.filter(
+            (a) => studentCampusByIdMap.get(a.studentId) === targetSummaryCampus
+          )
+        : rawTripAtts;
+
       const hasArrAtt = tAtts.some((a) => a.driverStatus && a.driverStatus !== 'Pending');
       const arrPres = tAtts.filter((a) => a.driverStatus === 'Present').length;
       const hasDepAtt = tAtts.some((a) => a.assistantStatus && a.assistantStatus !== 'Pending');
       const depPres = tAtts.filter((a) => a.assistantStatus === 'Present').length;
 
-      // Arrival (In) Time & Strength only from Arrival
+      const tripNativeMatchesCampus =
+        !targetSummaryCampus || normalizeCampusCode(t.campus) === targetSummaryCampus;
+
+      // Arrival (In) Time & Strength only from Arrival (scoped to selected campus when campus filter is active)
       const inTime = t.inTime || '';
       const inStr = hasArrAtt
         ? String(arrPres).padStart(2, '0')
-        : t.inTime && t.inStrength !== undefined
+        : t.inTime && t.inStrength !== undefined && tripNativeMatchesCampus
         ? String(t.inStrength).padStart(2, '0')
         : '';
 
-      // Departure (Out) Time & Strength strictly from Departure (never fall back to Arrival presentCount!)
+      // Departure (Out) Time & Strength strictly from Departure
       const outTime = t.outTime || '';
       const outStr = hasDepAtt
         ? String(depPres).padStart(2, '0')
-        : t.outTime && t.outStrength !== undefined && hasDepAtt
+        : t.outTime && t.outStrength !== undefined && hasDepAtt && tripNativeMatchesCampus
         ? String(t.outStrength).padStart(2, '0')
         : '';
 
@@ -1839,7 +2050,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         .map((a) => `${a.studentName.split(' ')[0]}: ${a.resolutionReason || a.notes}`)
         .join('; ');
 
-      const rawRemark = t.strengthMismatchRemark || memberRemarks || '';
+      const rawRemark =
+        (tripNativeMatchesCampus ? t.strengthMismatchRemark : '') || memberRemarks || '';
       return {
         inTime,
         inStr,
@@ -1852,14 +2064,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
     const stats1 = getTripSummaryStats(trip1);
     const stats2 = getTripSummaryStats(trip2);
-    const ov = timingOverrides[veh.id] || {};
+    const overrideKey = `${veh.id}:${targetSummaryCampus || 'ALL'}`;
+    const ov = timingOverrides[overrideKey] || timingOverrides[veh.id] || {};
 
     return {
       sl: idx + 1,
       vehicleId: veh.id,
+      overrideKey,
       vehicleLabel: veh.nickname ? `${veh.nickname} (${veh.registrationNumber.slice(-4)})` : veh.registrationNumber,
       registrationNumber: veh.registrationNumber,
-      driverName: veh.assignedDriverName || trip1?.driverName || '—',
+      driverName: veh.assignedDriverName || trip1?.driverName || trip2?.driverName || '—',
       inTime1: ov.inTime1 !== undefined ? ov.inTime1 : stats1.inTime,
       inStrength1: ov.inStrength1 !== undefined ? ov.inStrength1 : stats1.inStr,
       outTime1: ov.outTime1 !== undefined ? ov.outTime1 : stats1.outTime,
@@ -1939,7 +2153,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <tr><th colspan="9" style="font-size:22px;font-weight:800;text-align:center;padding:10px;">${schoolName || 'Narendra Edu Valley'}</th></tr>
               <tr><th colspan="9" style="font-size:12px;text-transform:uppercase;text-align:center;background:#f8fafc;">Transport Timings & Attendance Summary</th></tr>
               <tr>
-                <th colspan="5" style="text-align:left;">Campus : ${summaryCampus}</th>
+                <th colspan="5" style="text-align:left;">Campus : ${summaryCampusDisplayLabel}</th>
                 <th colspan="4" style="text-align:left;">Date :- ${formattedSummaryDate}</th>
               </tr>
               <tr style="background:#f1f5f9;">
@@ -1958,7 +2172,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
     openHtmlPrintPreview({
       title: `Transport Timings & Attendance Summary — ${formattedSummaryDate}`,
-      subtitle: `Campus: ${summaryCampus} • Vehicles: ${summaryRows.length}`,
+      subtitle: `Campus: ${summaryCampusDisplayLabel} • Vehicles: ${summaryRows.length}`,
       html,
     });
   };
@@ -2217,16 +2431,22 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   Campus
                 </label>
                 <select
-                  value={selectedCampus}
-                  onChange={(e) => setSelectedCampus(e.target.value)}
-                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800"
+                  value={lockedCampus || selectedCampus}
+                  disabled={Boolean(lockedCampus)}
+                  onChange={(e) => {
+                    if (lockedCampus) return;
+                    setSelectedCampus(e.target.value);
+                  }}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800 disabled:opacity-80"
                 >
-                  <option value="all">All Campuses</option>
-                  {campuses.map((c) => (
-                    <option key={c.id} value={c.code}>
-                      {c.name} ({c.code})
-                    </option>
-                  ))}
+                  {!lockedCampus && <option value="all">All Campuses</option>}
+                  {campuses
+                    .filter((c) => !lockedCampus || c.code === lockedCampus)
+                    .map((c) => (
+                      <option key={c.id} value={c.code}>
+                        {c.name} ({c.code})
+                      </option>
+                    ))}
                 </select>
               </div>
 
@@ -2260,15 +2480,43 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   {availableRoutesForDropdown.length === 0 ? (
                     <option value="">No routes for selected vehicle</option>
                   ) : (
-                    availableRoutesForDropdown.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.code} — {r.name || `Trip ${r.tripNumber}`} ({r.vehicleNumber})
-                      </option>
-                    ))
+                    availableRoutesForDropdown.map((r) => {
+                      const isCrossCampusRoute =
+                        Boolean(activeCampusFilterCode) &&
+                        normalizeCampusCode(r.campus) !== activeCampusFilterCode;
+                      const campusMemberCount = activeCampusFilterCode
+                        ? getMembersForRoute(r, activeCampusFilterCode).length
+                        : getAllMembersForRouteRaw(r).length;
+                      return (
+                        <option key={r.id} value={r.id}>
+                          {r.code} — {r.name || `Trip ${r.tripNumber}`} ({r.vehicleNumber})
+                          {isCrossCampusRoute
+                            ? ` • [${campusMemberCount} ${activeCampusFilterCode} Campus Member${
+                                campusMemberCount === 1 ? '' : 's'
+                              }]`
+                            : ` • (${campusMemberCount} Members)`}
+                        </option>
+                      );
+                    })
                   )}
                 </select>
               </div>
             </div>
+
+            {selectedRouteObj &&
+              activeCampusFilterCode &&
+              normalizeCampusCode(selectedRouteObj.campus) !== activeCampusFilterCode && (
+                <div className="px-3.5 py-2 rounded-xl bg-violet-50 border border-violet-200 text-violet-900 text-xs font-semibold flex items-center justify-between gap-2">
+                  <span>
+                    Cross-Campus Route Notice: Route <strong>{selectedRouteObj.code}</strong> is assigned to{' '}
+                    <strong>{selectedRouteObj.campus}</strong> Campus, but carries{' '}
+                    <strong>
+                      {boardRouteMembers.length} {activeCampusFilterCode} Campus member(s)
+                    </strong>
+                    . Only {activeCampusFilterCode} Campus members are visible and allowed for attendance marking here.
+                  </span>
+                </div>
+              )}
 
             {currentTrip && (
               <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
@@ -2306,7 +2554,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         }`}
                       >
                         {isArrivalTimeMarked
-                          ? `✓ Arrival Time Marked: ${matchedTripForRouteAndDate?.inTime}`
+                          ? `✓ Arrival Time Marked: ${effectiveInTime}`
                           : '⚠ Mark Arrival Time First'}
                       </span>
                       <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
@@ -2345,7 +2593,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         }`}
                       >
                         {isDepartureTimeMarked
-                          ? `✓ Departure Time Marked: ${matchedTripForRouteAndDate?.outTime}`
+                          ? `✓ Departure Time Marked: ${effectiveOutTime}`
                           : '⚠ Mark Departure Time First'}
                       </span>
                       <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
@@ -2425,7 +2673,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <div className="px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 font-semibold">
                 Arrival (In):{' '}
                 <strong className="font-mono text-emerald-700">
-                  {matchedTripForRouteAndDate?.inTime || '—'}
+                  {effectiveInTime || '—'}
                 </strong>{' '}
                 • Strength:{' '}
                 <strong className="font-mono text-slate-900">
@@ -2437,7 +2685,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <div className="px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 font-semibold">
                 Departure (Out):{' '}
                 <strong className="font-mono text-indigo-700">
-                  {matchedTripForRouteAndDate?.outTime || '—'}
+                  {effectiveOutTime || '—'}
                 </strong>{' '}
                 • Strength:{' '}
                 <strong className="font-mono text-slate-900">
@@ -3352,16 +3600,22 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   Campus
                 </label>
                 <select
-                  value={summaryCampus}
-                  onChange={(e) => setSummaryCampus(e.target.value)}
-                  className="p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50"
+                  value={lockedCampus || summaryCampus}
+                  disabled={Boolean(lockedCampus)}
+                  onChange={(e) => {
+                    if (lockedCampus) return;
+                    setSummaryCampus(e.target.value);
+                  }}
+                  className="p-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 disabled:opacity-75"
                 >
-                  <option value="All Campuses">All Campuses</option>
-                  {campuses.map((c) => (
-                    <option key={c.id} value={`${c.name} (${c.code})`}>
-                      {c.name} ({c.code})
-                    </option>
-                  ))}
+                  {!lockedCampus && <option value="All Campuses">All Campuses</option>}
+                  {campuses
+                    .filter((c) => !lockedCampus || normalizeCampusCode(c.code) === lockedCampus)
+                    .map((c) => (
+                      <option key={c.id} value={c.code}>
+                        {c.name} ({c.code})
+                      </option>
+                    ))}
                 </select>
               </div>
               <div>
@@ -3428,7 +3682,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                     colSpan={5}
                     className="border border-slate-800 py-1.5 px-3 text-left font-bold text-xs"
                   >
-                    Campus : <span className="font-semibold ml-1">{summaryCampus}</span>
+                    Campus : <span className="font-semibold ml-1">{summaryCampusDisplayLabel}</span>
                   </th>
                   <th
                     colSpan={4}

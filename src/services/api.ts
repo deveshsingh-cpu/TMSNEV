@@ -1032,7 +1032,7 @@ export const api = {
     reason?: string,
     role?: string
   ): Promise<TripAttendanceRecord> => {
-    const res = await fetch(`/api/attendance/${recordId}/mark`, {
+    const res = await fetch(`/api/attendance/${encodeURIComponent(recordId)}/mark`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source, value, reason, role }),
@@ -1053,15 +1053,29 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ entries, role }),
     });
+    if (res.status === 404) {
+      const results: TripAttendanceRecord[] = [];
+      for (const item of entries) {
+        const single = await api.markAttendance(
+          item.recordId,
+          item.source,
+          item.value,
+          item.reason,
+          role
+        );
+        results.push(single);
+      }
+      return results;
+    }
     return parseApiJson(res, 'Failed to save attendance records');
   },
   resolveAttendanceMismatch: async (recordId: string, value: string, resolverName: string, reason: string): Promise<TripAttendanceRecord> => {
-    const res = await fetch(`/api/attendance/${recordId}/resolve`, {
+    const res = await fetch(`/api/attendance/${encodeURIComponent(recordId)}/resolve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ value, resolverName, reason }),
     });
-    return res.json();
+    return parseApiJson(res, 'Failed to resolve attendance mismatch');
   },
   verifyTrip: async (
     tripId: string,
@@ -1076,12 +1090,12 @@ export const api = {
       strengthMismatchRemark?: string;
     }
   ): Promise<DailyTrip> => {
-    const res = await fetch(`/api/trips/${tripId}/verify`, {
+    const res = await fetch(`/api/trips/${encodeURIComponent(tripId)}/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ verifiedBy, notes, statusOverride, ...(timingPayload || {}) }),
     });
-    return res.json();
+    return parseApiJson(res, 'Failed to verify trip timing');
   },
   cancelTrip: async (tripId: string, reason: string, cancelledBy: string): Promise<DailyTrip> => {
     const res = await fetch(`/api/trips/${tripId}/cancel`, {

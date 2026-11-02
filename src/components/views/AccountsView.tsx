@@ -12,6 +12,21 @@ import {
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
+import {
+  normalizeCampus,
+  formatCampusLabel,
+  getStudentCampus,
+  getInvoiceCampus,
+  getReceiptCampus,
+  getExpenseCampus,
+  getIncomeCampus,
+  getVoucherCampus,
+  vehicleServesCampus,
+  matchesCampusFilter,
+  calculateCampusFinancials,
+  CampusFilter,
+  ResolvedCampus,
+} from '../../utils/campus.js';
 
 type AccountsTabKey =
   | 'day_book'
@@ -104,8 +119,10 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
   // Campus scoping for Transport Assistant vs Coordinator/Admin
   const isAssistant = currentRole === 'Transport Assistant';
-  const lockedCampus =
-    isAssistant && userCampus && userCampus !== 'All Campuses' ? userCampus : null;
+  const lockedCampus: ResolvedCampus | null = isAssistant
+    ? normalizeCampus(userCampus) || 'Sr'
+    : null;
+  const [selectedCampus, setSelectedCampus] = useState<CampusFilter>(lockedCampus || 'all');
 
   // Route-wise Outstanding State
   const [routeOutCampusFilter, setRouteOutCampusFilter] = useState<string>(lockedCampus || 'all');
@@ -141,10 +158,71 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
   useEffect(() => {
     if (lockedCampus) {
+      setSelectedCampus(lockedCampus);
       setRouteOutCampusFilter(lockedCampus);
       setDemandCampusFilter(lockedCampus);
     }
   }, [lockedCampus]);
+
+  const handleCampusSwitch = (campus: CampusFilter) => {
+    if (lockedCampus) return;
+    setSelectedCampus(campus);
+    setRouteOutCampusFilter(campus);
+    setDemandCampusFilter(campus);
+  };
+
+  // Campus-scoped collections & records
+  const scopedStudents = students.filter((s) =>
+    matchesCampusFilter(getStudentCampus(s, routes), selectedCampus)
+  );
+  const scopedInvoices = invoices.filter((inv) =>
+    matchesCampusFilter(getInvoiceCampus(inv, students, routes), selectedCampus)
+  );
+  const scopedReceipts = receipts.filter((rec) =>
+    matchesCampusFilter(getReceiptCampus(rec, students, routes, invoices), selectedCampus)
+  );
+  const scopedIncomes = incomes.filter((inc) =>
+    matchesCampusFilter(getIncomeCampus(inc), selectedCampus)
+  );
+  const scopedApprovedExpenses = approvedExpenses.filter((exp) =>
+    matchesCampusFilter(getExpenseCampus(exp, vehicles, routes, students), selectedCampus)
+  );
+  const matchedCampusVehicles = vehicles.filter((v) =>
+    vehicleServesCampus(v, selectedCampus, routes, students)
+  );
+  const scopedVehicles = matchedCampusVehicles.length > 0 ? matchedCampusVehicles : vehicles;
+  const scopedVouchers = vouchers.filter((v) =>
+    matchesCampusFilter(getVoucherCampus(v, students, vehicles, routes), selectedCampus)
+  );
+
+  // Separate Campus Financial Calculations (Cash, Online/UPI/Bank, Inflow, Expense, Net Balance)
+  const activeCampusStats = calculateCampusFinancials(selectedCampus, {
+    students,
+    routes,
+    vehicles,
+    invoices,
+    receipts,
+    incomes,
+    expenses,
+  });
+  const srCampusStats = calculateCampusFinancials('Sr', {
+    students,
+    routes,
+    vehicles,
+    invoices,
+    receipts,
+    incomes,
+    expenses,
+  });
+  const jrCampusStats = calculateCampusFinancials('Jr', {
+    students,
+    routes,
+    vehicles,
+    invoices,
+    receipts,
+    incomes,
+    expenses,
+  });
 
   // Day Book Filters
   const [dayBookDateFrom, setDayBookDateFrom] = useState<string>('');
@@ -192,8 +270,32 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   // Vouchers & Ledgers State
   const [voucherSearch, setVoucherSearch] = useState('');
   const [voucherTypeFilter, setVoucherTypeFilter] = useState<string>('all');
-  const [selectedVehicleReg, setSelectedVehicleReg] = useState<string>(vehicles[0]?.registrationNumber || '');
-  const [selectedStudentId, setSelectedStudentId] = useState<string>(students[0]?.id || '');
+  const [selectedVehicleReg, setSelectedVehicleReg] = useState<string>(
+    scopedVehicles[0]?.registrationNumber || vehicles[0]?.registrationNumber || ''
+  );
+  const [selectedStudentId, setSelectedStudentId] = useState<string>(
+    scopedStudents[0]?.id || students[0]?.id || ''
+  );
+  const [incomeCampus, setIncomeCampus] = useState<ResolvedCampus>(
+    lockedCampus || (selectedCampus === 'Jr' ? 'Jr' : 'Sr')
+  );
+
+  useEffect(() => {
+    if (lockedCampus) {
+      setIncomeCampus(lockedCampus);
+    } else if (selectedCampus === 'Sr' || selectedCampus === 'Jr') {
+      setIncomeCampus(selectedCampus);
+    }
+    if (scopedStudents.length > 0 && !scopedStudents.some((s) => s.id === selectedStudentId)) {
+      setSelectedStudentId(scopedStudents[0].id);
+    }
+    if (
+      scopedVehicles.length > 0 &&
+      !scopedVehicles.some((v) => v.registrationNumber === selectedVehicleReg)
+    ) {
+      setSelectedVehicleReg(scopedVehicles[0].registrationNumber || '');
+    }
+  }, [selectedCampus, lockedCampus, scopedStudents.length, scopedVehicles.length]);
 
   // New Journal Voucher Modal State
   const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
@@ -262,6 +364,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       const headObj = incomeHeads.find(h => h.name === selectedIncomeHead);
       await onAddIncome({
         date: isAdmin ? incomeDate : todayStr,
+        campus: lockedCampus || incomeCampus,
         incomeHeadId: headObj?.id,
         incomeHeadName: selectedIncomeHead,
         receivedTo,
@@ -269,8 +372,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
         invoiceNumber: incomeInvoiceNo.trim() || undefined,
         amount: amt,
         attachment: incomeAttachment || undefined,
-        description: incomeDescription.trim() || `${selectedIncomeHead} received in ${receivedTo}`,
-        recordedBy: isAdmin ? 'Transport Admin' : 'Transport Assistant',
+        description: incomeDescription.trim() || `${selectedIncomeHead} received in ${receivedTo} (${lockedCampus || incomeCampus} Campus)`,
+        recordedBy: `${currentRole} (${lockedCampus || incomeCampus} Campus)`,
       });
       setPayerName('');
       setIncomeInvoiceNo('');
@@ -301,18 +404,18 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   }
 
   const allDayBookIncomes: DayBookIncomeEntry[] = [
-    ...receipts.map((r): DayBookIncomeEntry => ({
+    ...scopedReceipts.map((r): DayBookIncomeEntry => ({
       id: r.id,
       date: r.date,
       invoiceNo: r.receiptNo,
-      incomeHead: 'Transport Fees (Auto)',
+      incomeHead: `Transport Fees (${getReceiptCampus(r, students, routes, invoices)})`,
       name: `${r.studentName} (${r.admissionNo})`,
       toMode: r.paymentMode === 'Cash' ? 'Cash' : r.paymentMode === 'UPI' ? 'UPI' : 'Bank',
       amount: r.amountPaid ?? r.amount ?? 0,
       sourceType: 'Fee Receipt',
       attachment: r.upiScreenshot,
     })),
-    ...incomes.map((inc): DayBookIncomeEntry => ({
+    ...scopedIncomes.map((inc): DayBookIncomeEntry => ({
       id: inc.id,
       date: inc.date,
       invoiceNo: inc.invoiceNumber || inc.incomeNo,
@@ -332,7 +435,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     return true;
   });
 
-  const filteredDayBookExpenses = approvedExpenses
+  const filteredDayBookExpenses = scopedApprovedExpenses
     .filter(exp => {
       if (dayBookDateFrom && exp.date < dayBookDateFrom) return false;
       if (dayBookDateTo && exp.date > dayBookDateTo) return false;
@@ -376,9 +479,9 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   ].sort((a, b) => b.date.localeCompare(a.date));
 
   // ============================================================================
-  // OTHER INCOME LIST FILTERING
+  // OTHER INCOME LIST FILTERING (Scoped to Campus)
   // ============================================================================
-  const filteredOtherIncomes = incomes.filter(inc => {
+  const filteredOtherIncomes = scopedIncomes.filter(inc => {
     if (incomeHeadFilter !== 'all' && inc.incomeHeadName !== incomeHeadFilter) return false;
     if (incomeDateFrom && inc.date < incomeDateFrom) return false;
     if (incomeDateTo && inc.date > incomeDateTo) return false;
@@ -395,17 +498,116 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   });
 
   // ============================================================================
-  // 1. TRIAL BALANCE & VOUCHERS COMPUTATION
+  // 1. TRIAL BALANCE & VOUCHERS COMPUTATION (Campus-Scoped)
   // ============================================================================
-  const totalDebitNormal = accounts
+  const buildCampusTrialBalanceAccounts = (): AccountHead[] => {
+    if (selectedCampus === 'all' && accounts.length > 0) {
+      return accounts;
+    }
+    const campLabel = selectedCampus === 'Sr' ? 'Senior Campus (Sr)' : selectedCampus === 'Jr' ? 'Junior Campus (Jr)' : 'All Campuses';
+    const cashAsset = Math.max(0, activeCampusStats.netCashBalance);
+    const onlineAsset = Math.max(0, activeCampusStats.netOnlineBalance);
+    const receivableAsset = Math.max(0, activeCampusStats.outstandingDues);
+
+    const fuelExp = scopedApprovedExpenses
+      .filter((e) => e.category.toLowerCase().includes('fuel'))
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const repairExp = scopedApprovedExpenses
+      .filter((e) => e.category.toLowerCase().includes('repair') || e.category.toLowerCase().includes('maint'))
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const otherExp = Math.max(0, activeCampusStats.expenseTotal - fuelExp - repairExp);
+
+    const feeRevenue = activeCampusStats.feeTotal + receivableAsset;
+    const otherRevenue = activeCampusStats.otherIncomeTotal;
+
+    const totalDebits = cashAsset + onlineAsset + receivableAsset + fuelExp + repairExp + otherExp;
+    const rawCredits = feeRevenue + otherRevenue;
+    const capitalReserve = Math.max(0, totalDebits - rawCredits);
+    const deficitAdjust = Math.max(0, rawCredits - totalDebits);
+
+    const rows: AccountHead[] = [
+      {
+        id: `tb-1010-${selectedCampus}`,
+        code: '1010',
+        name: `Cash in Hand — Transport Counter (${campLabel})`,
+        accountClass: 'Asset',
+        balance: cashAsset + deficitAdjust,
+      },
+      {
+        id: `tb-1020-${selectedCampus}`,
+        code: '1020',
+        name: `Bank & Online UPI Account (${campLabel})`,
+        accountClass: 'Asset',
+        balance: onlineAsset,
+      },
+      {
+        id: `tb-1100-${selectedCampus}`,
+        code: '1100',
+        name: `Member Transport Fee Receivable (${campLabel})`,
+        accountClass: 'Asset',
+        balance: receivableAsset,
+      },
+      {
+        id: `tb-5010-${selectedCampus}`,
+        code: '5010',
+        name: `Fuel & Diesel Expense (${campLabel})`,
+        accountClass: 'Expense',
+        balance: fuelExp,
+      },
+      {
+        id: `tb-5020-${selectedCampus}`,
+        code: '5020',
+        name: `Vehicle Repairs & Maintenance (${campLabel})`,
+        accountClass: 'Expense',
+        balance: repairExp,
+      },
+      {
+        id: `tb-5030-${selectedCampus}`,
+        code: '5030',
+        name: `General Operational & Fleet Expense (${campLabel})`,
+        accountClass: 'Expense',
+        balance: otherExp,
+      },
+      {
+        id: `tb-4010-${selectedCampus}`,
+        code: '4010',
+        name: `Transport Fee Revenue (${campLabel})`,
+        accountClass: 'Income',
+        balance: feeRevenue,
+      },
+      {
+        id: `tb-4020-${selectedCampus}`,
+        code: '4020',
+        name: `Other Transport & Misc Income (${campLabel})`,
+        accountClass: 'Income',
+        balance: otherRevenue,
+      },
+    ];
+
+    if (capitalReserve > 0) {
+      rows.push({
+        id: `tb-3010-${selectedCampus}`,
+        code: '3010',
+        name: `Campus Transport Fund / Opening Reserve (${campLabel})`,
+        accountClass: 'Equity',
+        balance: capitalReserve,
+      });
+    }
+
+    return rows;
+  };
+
+  const scopedAccounts = buildCampusTrialBalanceAccounts();
+
+  const totalDebitNormal = scopedAccounts
     .filter(a => a.accountClass === 'Asset' || a.accountClass === 'Expense')
     .reduce((s, a) => s + a.balance, 0);
 
-  const totalCreditNormal = accounts
+  const totalCreditNormal = scopedAccounts
     .filter(a => a.accountClass === 'Liability' || a.accountClass === 'Income' || a.accountClass === 'Equity')
     .reduce((s, a) => s + a.balance, 0);
 
-  const filteredVouchers = vouchers.filter(v => {
+  const filteredVouchers = scopedVouchers.filter(v => {
     if (voucherTypeFilter !== 'all' && v.voucherType !== voucherTypeFilter) return false;
     if (voucherSearch) {
       const q = voucherSearch.toLowerCase();
@@ -419,10 +621,10 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   });
 
   // ============================================================================
-  // 2. VEHICLE COST LEDGER COMPUTATION
+  // 2. VEHICLE COST LEDGER COMPUTATION (Scoped to Campus)
   // ============================================================================
-  const targetVehicle = vehicles.find(v => v.registrationNumber === selectedVehicleReg) || vehicles[0];
-  const vehicleExpenses = approvedExpenses.filter(e => e.vehicleNumber === targetVehicle?.registrationNumber);
+  const targetVehicle = scopedVehicles.find(v => v.registrationNumber === selectedVehicleReg) || scopedVehicles[0] || vehicles[0];
+  const vehicleExpenses = scopedApprovedExpenses.filter(e => e.vehicleNumber === targetVehicle?.registrationNumber);
   const vehicleOdoLogs = odometerLogs.filter(o => o.vehicleNumber === targetVehicle?.registrationNumber);
 
   const vehFuelSpend = vehicleExpenses.filter(e => e.category.toLowerCase().includes('fuel')).reduce((s, e) => s + e.amount, 0);
@@ -433,11 +635,11 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   const vehCostPerKm = vehTotalKm > 0 ? (vehTotalSpend / vehTotalKm).toFixed(1) : '—';
 
   // ============================================================================
-  // 3. STUDENT FEE LEDGER COMPUTATION
+  // 3. STUDENT FEE LEDGER COMPUTATION (Scoped to Campus)
   // ============================================================================
-  const selectedStudent = students.find(s => s.id === selectedStudentId) || students[0];
-  const studentInvoices = invoices.filter(i => i.studentId === selectedStudent?.id);
-  const studentReceipts = receipts.filter(r => r.studentId === selectedStudent?.id);
+  const selectedStudent = scopedStudents.find(s => s.id === selectedStudentId) || scopedStudents[0];
+  const studentInvoices = scopedInvoices.filter(i => i.studentId === selectedStudent?.id);
+  const studentReceipts = scopedReceipts.filter(r => r.studentId === selectedStudent?.id);
 
   interface StudentStatementEntry {
     date: string;
@@ -450,9 +652,19 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   }
 
   const rawEntries: Omit<StudentStatementEntry, 'runningBalance'>[] = [
+    ...(selectedStudent && (selectedStudent.previousDues || 0) > 0 && !studentInvoices.some(i => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-'))
+      ? [{
+          date: '2026-10-31',
+          refNo: `PREV-${selectedStudent.admissionNo}`,
+          type: 'Invoice' as const,
+          description: `Opening Previous Dues (${selectedStudent.previousDuesRemarks || 'Old Software Arrears'})`,
+          debit: Number(selectedStudent.previousDues || 0),
+          credit: 0,
+        }]
+      : []),
     ...studentInvoices.map(inv => ({
-      date: `${inv.month}-01`,
-      refNo: inv.id.toUpperCase(),
+      date: inv.month.includes('-') ? `${inv.month}-01` : '2026-10-31',
+      refNo: inv.invoiceNo || inv.id.toUpperCase(),
       type: 'Invoice' as const,
       description: `Monthly Transport Fee (${inv.month}) — ${inv.routeStop || 'Stop'}`,
       debit: inv.netPayable ?? inv.netAmount ?? 0,
@@ -462,7 +674,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       date: rcp.date,
       refNo: rcp.receiptNo,
       type: 'Receipt' as const,
-      description: `Payment via ${rcp.paymentMode} (${(rcp.monthsCovered || []).join(', ') || 'Fee'})`,
+      description: `Payment via ${rcp.paymentMode} (${rcp.feeBreakupDescription || (rcp.monthsCovered || []).join(', ') || 'Fee'})`,
       debit: 0,
       credit: rcp.amountPaid ?? rcp.amount ?? 0,
     })),
@@ -1047,6 +1259,19 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <span>Vehicle Cost Ledger</span>
           </button>
 
+          <button
+            type="button"
+            onClick={() => handleSelectTab('trial_balance')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'trial_balance'
+                ? 'bg-amber-500 text-slate-950 shadow-xs'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Scale className="w-3.5 h-3.5" />
+            <span>Trial Balance</span>
+          </button>
+
           {currentRole !== 'Transport Assistant' && (
             <>
               <button
@@ -1074,55 +1299,173 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                 <FileText className="w-3.5 h-3.5" />
                 <span>Vouchers</span>
               </button>
-
-              <button
-                type="button"
-                onClick={() => handleSelectTab('trial_balance')}
-                className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activeTab === 'trial_balance'
-                    ? 'bg-amber-500 text-slate-950 shadow-xs'
-                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-                }`}
-              >
-                <Scale className="w-3.5 h-3.5" />
-                <span>Trial Balance</span>
-              </button>
             </>
           )}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {lockedCampus && (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[11px] font-bold">
-              <span>Scoped Campus: {lockedCampus}</span>
-            </span>
-          )}
-          {isAdmin ? (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-300 text-[11px] font-bold">
-              <CheckCircle className="w-3.5 h-3.5" />
-              <span>Admin: Full Authority</span>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {lockedCampus ? (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-300 text-xs font-bold">
+              <Lock className="w-3.5 h-3.5" />
+              <span>Campus Locked: {formatCampusLabel(lockedCampus)}</span>
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-200 text-[11px] font-bold">
-              <Eye className="w-3.5 h-3.5" />
-              <span>{currentRole}: View, Print &amp; Follow-up</span>
+            <div className="flex items-center gap-1 bg-slate-800 p-1 rounded-xl border border-slate-700">
+              <span className="text-[11px] font-bold text-slate-400 px-2">Campus View:</span>
+              {(['all', 'Sr', 'Jr'] as CampusFilter[]).map((camp) => (
+                <button
+                  key={camp}
+                  type="button"
+                  onClick={() => handleCampusSwitch(camp)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    selectedCampus === camp
+                      ? 'bg-amber-500 text-slate-950 shadow-2xs'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                  }`}
+                >
+                  {camp === 'all' ? 'All Campuses' : camp === 'Sr' ? 'Senior (Sr)' : 'Junior (Jr)'}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Campus Separate Cash & Online/Bank Financial Balance Summary Bar */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-3 print:hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 text-xs font-bold">
+              {formatCampusLabel(selectedCampus)}
+            </span>
+            <span className="text-xs font-semibold text-slate-600">
+              Financial Books, Cash in Hand &amp; Online/Bank Balance ({scopedStudents.length} Campus Members)
+            </span>
+          </div>
+          {!lockedCampus && (
+            <span className="text-[11px] text-slate-500 font-medium">
+              Coordinator &amp; Admin can switch between Senior (Sr), Junior (Jr), or All Campuses
             </span>
           )}
         </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200">
+            <div className="text-[10px] font-bold uppercase text-emerald-800">
+              Net Cash in Hand ({selectedCampus === 'all' ? 'All' : selectedCampus})
+            </div>
+            <div className="text-lg font-extrabold font-mono text-emerald-700 mt-0.5">
+              ₹{activeCampusStats.netCashBalance.toLocaleString('en-IN')}
+            </div>
+            <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+              In: ₹{activeCampusStats.totalInflowCash.toLocaleString('en-IN')} • Out: ₹{activeCampusStats.expenseCash.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200">
+            <div className="text-[10px] font-bold uppercase text-blue-800">
+              Online / UPI / Bank ({selectedCampus === 'all' ? 'All' : selectedCampus})
+            </div>
+            <div className="text-lg font-extrabold font-mono text-blue-700 mt-0.5">
+              ₹{activeCampusStats.netOnlineBalance.toLocaleString('en-IN')}
+            </div>
+            <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+              In: ₹{activeCampusStats.totalInflowOnline.toLocaleString('en-IN')} • Out: ₹{activeCampusStats.expenseOnline.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200">
+            <div className="text-[10px] font-bold uppercase text-indigo-800">
+              Total Campus Inflow
+            </div>
+            <div className="text-lg font-extrabold font-mono text-indigo-700 mt-0.5">
+              ₹{activeCampusStats.totalInflow.toLocaleString('en-IN')}
+            </div>
+            <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+              Fee: ₹{activeCampusStats.feeTotal.toLocaleString('en-IN')} • Other: ₹{activeCampusStats.otherIncomeTotal.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200">
+            <div className="text-[10px] font-bold uppercase text-rose-800">
+              Total Campus Expenses
+            </div>
+            <div className="text-lg font-extrabold font-mono text-rose-600 mt-0.5">
+              ₹{activeCampusStats.expenseTotal.toLocaleString('en-IN')}
+            </div>
+            <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+              Cash: ₹{activeCampusStats.expenseCash.toLocaleString('en-IN')} • Online: ₹{activeCampusStats.expenseOnline.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-slate-900 text-white border border-slate-800 col-span-2 lg:col-span-1">
+            <div className="text-[10px] font-bold uppercase text-amber-400">
+              Net Campus Balance
+            </div>
+            <div className="text-lg font-extrabold font-mono text-white mt-0.5">
+              ₹{activeCampusStats.netTotalBalance.toLocaleString('en-IN')}
+            </div>
+            <div className="text-[10px] text-slate-300 font-mono mt-0.5">
+              Dues Pending: ₹{activeCampusStats.outstandingDues.toLocaleString('en-IN')}
+            </div>
+          </div>
+        </div>
+
+        {!lockedCampus && selectedCampus === 'all' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            <div
+              onClick={() => handleCampusSwitch('Sr')}
+              className="p-3 rounded-xl bg-slate-50 hover:bg-indigo-50/40 border border-slate-200 hover:border-indigo-300 flex flex-wrap items-center justify-between gap-2 cursor-pointer transition-colors"
+            >
+              <div>
+                <div className="text-xs font-bold text-slate-900">
+                  Senior Campus (Sr) Separate Balance • {srCampusStats.studentCount} Members
+                </div>
+                <div className="text-[11px] text-slate-600 font-mono mt-0.5">
+                  Cash Balance: <strong className="text-emerald-700">₹{srCampusStats.netCashBalance.toLocaleString('en-IN')}</strong> • Online Balance:{' '}
+                  <strong className="text-blue-700">₹{srCampusStats.netOnlineBalance.toLocaleString('en-IN')}</strong> • Exp:{' '}
+                  <strong className="text-rose-600">₹{srCampusStats.expenseTotal.toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-bold">
+                Net: ₹{srCampusStats.netTotalBalance.toLocaleString('en-IN')}
+              </span>
+            </div>
+
+            <div
+              onClick={() => handleCampusSwitch('Jr')}
+              className="p-3 rounded-xl bg-slate-50 hover:bg-indigo-50/40 border border-slate-200 hover:border-indigo-300 flex flex-wrap items-center justify-between gap-2 cursor-pointer transition-colors"
+            >
+              <div>
+                <div className="text-xs font-bold text-slate-900">
+                  Junior Campus (Jr) Separate Balance • {jrCampusStats.studentCount} Members
+                </div>
+                <div className="text-[11px] text-slate-600 font-mono mt-0.5">
+                  Cash Balance: <strong className="text-emerald-700">₹{jrCampusStats.netCashBalance.toLocaleString('en-IN')}</strong> • Online Balance:{' '}
+                  <strong className="text-blue-700">₹{jrCampusStats.netOnlineBalance.toLocaleString('en-IN')}</strong> • Exp:{' '}
+                  <strong className="text-rose-600">₹{jrCampusStats.expenseTotal.toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-bold">
+                Net: ₹{jrCampusStats.netTotalBalance.toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Unified Top Header Bar (Scoped strictly to active Sidebar screen) */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
-            {activeTab === 'day_book' && 'Print / View Day Book (Income & Expense)'}
+            {activeTab === 'day_book' && `Print / View Day Book — ${formatCampusLabel(selectedCampus)}`}
             {activeTab === 'route_outstanding' && 'Route-wise Outstanding & Collected Fee Details'}
             {activeTab === 'demand_slip' && 'Demand Slip / Fee Reminder Generator & Phone Follow-up'}
-            {activeTab === 'income' && 'Other Income & Heads'}
-            {activeTab === 'vouchers' && 'Vouchers & Chart of Accounts'}
-            {activeTab === 'vehicle_ledger' && 'Vehicle Cost Ledger & Expenses'}
-            {activeTab === 'student_ledger' && 'Member Fee Ledger'}
-            {activeTab === 'trial_balance' && 'Trial Balance'}
+            {activeTab === 'income' && `Other Income & Heads — ${formatCampusLabel(selectedCampus)}`}
+            {activeTab === 'vouchers' && `Vouchers & Chart of Accounts — ${formatCampusLabel(selectedCampus)}`}
+            {activeTab === 'vehicle_ledger' && `Vehicle Cost Ledger — ${formatCampusLabel(selectedCampus)}`}
+            {activeTab === 'student_ledger' && `Member Fee Ledger — ${formatCampusLabel(selectedCampus)}`}
+            {activeTab === 'trial_balance' && `Trial Balance — ${formatCampusLabel(selectedCampus)}`}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeTab === 'day_book' && `${combinedDayBookExportRows.length} Entries`}
@@ -1132,7 +1475,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             {activeTab === 'vouchers' && `${filteredVouchers.length} Vouchers`}
             {activeTab === 'vehicle_ledger' && `${vehicleExpenses.length} Vouchers`}
             {activeTab === 'student_ledger' && `${studentLedgerEntries.length} Entries`}
-            {activeTab === 'trial_balance' && `${accounts.length} Accounts`}
+            {activeTab === 'trial_balance' && `${scopedAccounts.length} Accounts`}
           </span>
           {!isAdmin && (
             <span className="px-2.5 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1">
@@ -1426,18 +1769,18 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <>
               <FilterPopover
                 activeCount={selectedVehicleReg ? 1 : 0}
-                onReset={() => setSelectedVehicleReg(vehicles[0]?.registrationNumber || '')}
+                onReset={() => setSelectedVehicleReg(scopedVehicles[0]?.registrationNumber || '')}
               >
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
-                    Select Vehicle
+                    Select Vehicle ({formatCampusLabel(selectedCampus)})
                   </label>
                   <select
                     value={selectedVehicleReg}
                     onChange={(e) => setSelectedVehicleReg(e.target.value)}
                     className="w-full p-2 border border-slate-200 rounded-xl text-xs font-bold font-mono bg-slate-50 text-slate-900"
                   >
-                    {vehicles.map((v) => (
+                    {scopedVehicles.map((v) => (
                       <option key={v.id} value={v.registrationNumber}>
                         {v.registrationNumber} — {v.nickname} ({v.ownership})
                       </option>
@@ -1447,11 +1790,11 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
               </FilterPopover>
 
               <PrintExportToolbar
-                title={`Vehicle Cost Ledger — ${targetVehicle?.registrationNumber || 'Vehicle'}`}
+                title={`Vehicle Cost Ledger — ${targetVehicle?.registrationNumber || 'Vehicle'} (${formatCampusLabel(selectedCampus)})`}
                 filename={`vehicle_cost_ledger_${targetVehicle?.registrationNumber || 'all'}`}
                 schoolName={schoolName}
                 filteredData={vehicleExpenses}
-                allData={approvedExpenses}
+                allData={scopedApprovedExpenses}
                 hasActiveFilters={true}
                 columns={[
                   { header: 'Expense No', accessor: (e) => e.expenseNo },
@@ -1482,18 +1825,18 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <>
               <FilterPopover
                 activeCount={selectedStudentId ? 1 : 0}
-                onReset={() => setSelectedStudentId(students[0]?.id || '')}
+                onReset={() => setSelectedStudentId(scopedStudents[0]?.id || '')}
               >
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
-                    Select Member
+                    Select Member ({formatCampusLabel(selectedCampus)})
                   </label>
                   <select
                     value={selectedStudentId}
                     onChange={(e) => setSelectedStudentId(e.target.value)}
                     className="w-full p-2 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 text-slate-900"
                   >
-                    {students.map((s) => (
+                    {scopedStudents.map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.name} ({s.admissionNo}) — Class {s.class}-{s.section}
                       </option>
@@ -1535,12 +1878,13 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
           {activeTab === 'trial_balance' && (
             <PrintExportToolbar
-              title="Double-Entry Trial Balance"
+              title={`Double-Entry Trial Balance (${formatCampusLabel(selectedCampus)})`}
               filename="trial_balance"
               schoolName={schoolName}
-              filteredData={accounts}
-              allData={accounts}
-              hasActiveFilters={false}
+              filteredData={scopedAccounts}
+              allData={scopedAccounts}
+              hasActiveFilters={selectedCampus !== 'all'}
+              filterSummary={`Campus: ${formatCampusLabel(selectedCampus)}`}
               columns={[
                 { header: 'Account Code', accessor: (a) => a.code },
                 { header: 'Account Title', accessor: (a) => a.name },
@@ -1941,19 +2285,36 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     </div>
                   )}
 
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">
-                      To (Cash / UPI) <span className="text-rose-600">*</span>
-                    </label>
-                    <select
-                      value={receivedTo}
-                      onChange={(e) => setReceivedTo(e.target.value as any)}
-                      className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold"
-                    >
-                      <option value="Cash">Cash</option>
-                      <option value="UPI">UPI</option>
-                      <option value="Bank">Bank</option>
-                    </select>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        To (Cash / UPI) <span className="text-rose-600">*</span>
+                      </label>
+                      <select
+                        value={receivedTo}
+                        onChange={(e) => setReceivedTo(e.target.value as any)}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold"
+                      >
+                        <option value="Cash">Cash</option>
+                        <option value="UPI">UPI</option>
+                        <option value="Bank">Bank</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        Campus <span className="text-rose-600">*</span>
+                      </label>
+                      <select
+                        value={lockedCampus || incomeCampus}
+                        disabled={Boolean(lockedCampus)}
+                        onChange={(e) => setIncomeCampus(e.target.value as ResolvedCampus)}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold disabled:bg-slate-100"
+                      >
+                        <option value="Sr">Senior (Sr)</option>
+                        <option value="Jr">Junior (Jr)</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div>
@@ -2200,14 +2561,14 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs flex flex-wrap items-center justify-between gap-4">
             <div>
               <label className="block text-slate-500 text-[11px] font-bold uppercase tracking-wider mb-1">
-                Select Vehicle for Cost Ledger Analysis
+                Select Vehicle for Cost Ledger Analysis ({formatCampusLabel(selectedCampus)})
               </label>
               <select
                 value={selectedVehicleReg}
                 onChange={(e) => setSelectedVehicleReg(e.target.value)}
                 className="p-2 border border-slate-300 rounded-xl text-sm font-bold font-mono bg-slate-50 text-slate-900"
               >
-                {vehicles.map(v => (
+                {scopedVehicles.map(v => (
                   <option key={v.id} value={v.registrationNumber}>
                     {v.registrationNumber} — {v.nickname} ({v.ownership})
                   </option>
@@ -2327,14 +2688,14 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs flex flex-wrap items-center justify-between gap-4">
             <div className="w-full sm:w-96">
               <label className="block text-slate-500 text-[11px] font-bold uppercase tracking-wider mb-1">
-                Search &amp; Select Member (Student / Staff)
+                Search &amp; Select Member ({formatCampusLabel(selectedCampus)} — {scopedStudents.length} Members)
               </label>
               <select
                 value={selectedStudentId}
                 onChange={(e) => setSelectedStudentId(e.target.value)}
                 className="w-full p-2 border border-slate-300 rounded-xl text-xs font-medium bg-slate-50 text-slate-900"
               >
-                {students.map(s => (
+                {scopedStudents.map(s => (
                   <option key={s.id} value={s.id}>
                     {s.name} ({s.admissionNo}) — Class {s.class}-{s.section} — {s.transportStatus}
                   </option>
@@ -2430,7 +2791,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           <div className="bg-emerald-50/70 border border-emerald-300 rounded-2xl p-4 text-xs text-emerald-950 flex flex-wrap items-center justify-between gap-4">
             <div className="font-bold flex items-center gap-2 text-sm">
               <Scale className="w-4 h-4 text-emerald-700" />
-              <span>Double-Entry Trial Balance</span>
+              <span>Double-Entry Trial Balance — {formatCampusLabel(selectedCampus)}</span>
             </div>
 
             <div className="bg-white px-3 py-2 rounded-xl border border-emerald-200 text-right">
@@ -2443,7 +2804,9 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
             <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="font-bold text-slate-900 text-sm">Trial Balance as of Today</h3>
+              <h3 className="font-bold text-slate-900 text-sm">
+                Trial Balance as of Today ({formatCampusLabel(selectedCampus)})
+              </h3>
               <span className="text-xs text-slate-500 font-mono">Currency: INR (₹)</span>
             </div>
 
@@ -2459,7 +2822,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {accounts.map((acc) => {
+                  {scopedAccounts.map((acc) => {
                     const isDebitNormal = acc.accountClass === 'Asset' || acc.accountClass === 'Expense';
                     return (
                       <tr key={acc.id} className="hover:bg-slate-50/80 transition-colors">
@@ -2483,7 +2846,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                 <tfoot className="bg-slate-900 text-white font-mono text-xs font-bold">
                   <tr>
                     <td colSpan={3} className="py-3 px-4 text-right uppercase tracking-wider text-amber-400">
-                      Trial Balance Totals:
+                      Trial Balance Totals ({formatCampusLabel(selectedCampus)}):
                     </td>
                     <td className="py-3 px-3 text-right">₹{totalDebitNormal.toLocaleString('en-IN')}</td>
                     <td className="py-3 px-4 text-right">₹{totalCreditNormal.toLocaleString('en-IN')}</td>

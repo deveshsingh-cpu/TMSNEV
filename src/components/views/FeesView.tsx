@@ -11,6 +11,17 @@ import {
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
 import { api } from '../../services/api.js';
+import {
+  normalizeCampus,
+  formatCampusLabel,
+  getStudentCampus,
+  getInvoiceCampus,
+  getReceiptCampus,
+  getStudentLinkedCampus,
+  matchesCampusFilter,
+  calculateCampusFinancials,
+  CampusFilter,
+} from '../../utils/campus.js';
 
 interface FeesViewProps {
   schoolName?: string;
@@ -73,8 +84,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
 }) => {
   const isAdmin = currentRole === 'Admin';
   const isAssistant = currentRole === 'Transport Assistant';
-  const lockedCampus =
-    isAssistant && userCampus && userCampus !== 'All Campuses' ? userCampus : null;
+  const lockedCampus: 'Sr' | 'Jr' | null = isAssistant
+    ? normalizeCampus(userCampus) || 'Sr'
+    : null;
+  const [selectedCampus, setSelectedCampus] = useState<CampusFilter>(lockedCampus || 'all');
   const todayStr = new Date().toISOString().split('T')[0];
 
   const [activeTab, setActiveTab] = useState<
@@ -106,16 +119,66 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [demandFollowUpStudent, setDemandFollowUpStudent] = useState<StudentMember | null>(null);
 
   // Month-wise Fee & Previous Dues Matrix State (Visible to Everyone)
-  const [matrixCampusFilter, setMatrixCampusFilter] = useState<string>('all');
+  const [matrixCampusFilter, setMatrixCampusFilter] = useState<string>(lockedCampus || 'all');
   const [matrixRouteFilter, setMatrixRouteFilter] = useState<string>('all');
   const [matrixClassFilter, setMatrixClassFilter] = useState<string>('all');
   const [matrixSearch, setMatrixSearch] = useState<string>('');
 
   useEffect(() => {
     if (lockedCampus) {
+      setSelectedCampus(lockedCampus);
       setDemandCampusFilter(lockedCampus);
+      setMatrixCampusFilter(lockedCampus);
     }
   }, [lockedCampus]);
+
+  const handleCampusSwitch = (campus: CampusFilter) => {
+    if (lockedCampus) return;
+    setSelectedCampus(campus);
+    setDemandCampusFilter(campus);
+    setMatrixCampusFilter(campus);
+  };
+
+  // Campus-scoped records: Transport Assistants strictly see only their assigned campus;
+  // Admin and Transport Coordinator see records based on their selectedCampus ('all', 'Sr', or 'Jr').
+  const scopedStudents = students.filter((s) =>
+    matchesCampusFilter(getStudentCampus(s, routes), selectedCampus)
+  );
+  const scopedInvoices = invoices.filter((inv) =>
+    matchesCampusFilter(getInvoiceCampus(inv, students, routes), selectedCampus)
+  );
+  const scopedReceipts = receipts.filter((rec) =>
+    matchesCampusFilter(getReceiptCampus(rec, students, routes, invoices), selectedCampus)
+  );
+  const scopedFollowUps = followUps.filter((f) =>
+    matchesCampusFilter(getStudentLinkedCampus(f, students, routes), selectedCampus)
+  );
+  const scopedWarningLetters = warningLetters.filter((wl) =>
+    matchesCampusFilter(getStudentLinkedCampus(wl, students, routes), selectedCampus)
+  );
+
+  // Separate Campus Financial Calculations (Cash, Online/UPI/Bank, Total Collected, Outstanding)
+  const activeCampusStats = calculateCampusFinancials(selectedCampus, {
+    students,
+    routes,
+    vehicles,
+    invoices,
+    receipts,
+  });
+  const srCampusStats = calculateCampusFinancials('Sr', {
+    students,
+    routes,
+    vehicles,
+    invoices,
+    receipts,
+  });
+  const jrCampusStats = calculateCampusFinancials('Jr', {
+    students,
+    routes,
+    vehicles,
+    invoices,
+    receipts,
+  });
 
   const [selectedMonth, setSelectedMonth] = useState('2026-11');
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
@@ -139,7 +202,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [memberSearchQuery, setMemberSearchQuery] = useState('');
   const [memberFilterClass, setMemberFilterClass] = useState('all');
   const [memberFilterType, setMemberFilterType] = useState('all');
-  const [selectedStudentId, setSelectedStudentId] = useState(students[0]?.id || '');
+  const [selectedStudentId, setSelectedStudentId] = useState(scopedStudents[0]?.id || '');
 
   // Month-by-Month selection & per-month Admin discount
   const [selectedMonthIds, setSelectedMonthIds] = useState<string[]>([]);
@@ -155,14 +218,17 @@ export const FeesView: React.FC<FeesViewProps> = ({
   // Open Collect Fee Modal if preselectedStudentIdForCollect is passed
   useEffect(() => {
     if (preselectedStudentIdForCollect) {
-      setSelectedStudentId(preselectedStudentIdForCollect);
-      setIsReceiptModalOpen(true);
+      const targetStu = scopedStudents.find((s) => s.id === preselectedStudentIdForCollect);
+      if (targetStu) {
+        setSelectedStudentId(preselectedStudentIdForCollect);
+        setIsReceiptModalOpen(true);
+      }
       if (onClearPreselectedStudent) onClearPreselectedStudent();
     }
-  }, [preselectedStudentIdForCollect]);
+  }, [preselectedStudentIdForCollect, scopedStudents.length]);
 
-  // Narrowed down member list for Collect Fee modal
-  const narrowedMembers = students.filter((s) => {
+  // Narrowed down member list for Collect Fee modal (Strictly scoped to campus!)
+  const narrowedMembers = scopedStudents.filter((s) => {
     if (memberFilterClass !== 'all' && s.class !== memberFilterClass) return false;
     if (memberFilterType !== 'all' && s.memberType !== memberFilterType) return false;
     if (memberSearchQuery.trim()) {
@@ -178,8 +244,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
     return true;
   });
 
-  // Selected Member object
-  const selectedMember = students.find((s) => s.id === selectedStudentId) || narrowedMembers[0] || students[0];
+  // Selected Member object (strictly from scopedStudents)
+  const selectedMember =
+    scopedStudents.find((s) => s.id === selectedStudentId) ||
+    narrowedMembers[0] ||
+    scopedStudents[0];
 
   // Build pending monthly dues rows for the selected member
   const memberAllInvoices = invoices.filter((i) => i.studentId === selectedMember?.id);
@@ -284,7 +353,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
   // --- Follow-Up & Warning Letter Modals State ---
   const [isFollowUpModalOpen, setIsFollowUpModalOpen] = useState(false);
   const [folStudentId, setFolStudentId] = useState(
-    students.find((s) => s.balanceDue > 0)?.id || students[0]?.id || ''
+    scopedStudents.find((s) => s.balanceDue > 0)?.id || scopedStudents[0]?.id || ''
   );
   const [folDate, setFolDate] = useState(todayStr);
   const [folContactPerson, setFolContactPerson] = useState('');
@@ -294,16 +363,18 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [folNotes, setFolNotes] = useState('');
 
   useEffect(() => {
-    const st = students.find((s) => s.id === folStudentId);
+    const st = scopedStudents.find((s) => s.id === folStudentId);
     if (st) {
       setFolContactPerson(`${st.fatherName} (Parent)`);
       setFolPhone(st.mobile);
+    } else if (scopedStudents[0]) {
+      setFolStudentId(scopedStudents.find((s) => s.balanceDue > 0)?.id || scopedStudents[0].id);
     }
-  }, [folStudentId, students]);
+  }, [folStudentId, scopedStudents.length, selectedCampus]);
 
   const [isWarningModalOpen, setIsWarningModalOpen] = useState(false);
   const [warnStudentId, setWarnStudentId] = useState(
-    students.find((s) => s.balanceDue > 0)?.id || students[0]?.id || ''
+    scopedStudents.find((s) => s.balanceDue > 0)?.id || scopedStudents[0]?.id || ''
   );
   const [warnLevel, setWarnLevel] = useState<WarningLetter['warningLevel']>(
     'Level 2: Urgent Notice'
@@ -563,7 +634,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
   };
 
   const handleBulkWarningLettersBy15th = async () => {
-    const overdueMembers = students.filter(
+    const overdueMembers = scopedStudents.filter(
       (s) => s.balanceDue > 0 && s.transportStatus !== 'Left'
     );
     if (overdueMembers.length === 0) {
@@ -586,6 +657,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
           studentId: st.id,
           studentName: st.name,
           admissionNo: st.admissionNo,
+          campus: getStudentCampus(st, routes),
           parentName: st.fatherName,
           fatherName: st.fatherName,
           address: st.address,
@@ -614,7 +686,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
   };
 
   // Eligible list for manual individual suspension: neither permission extension received nor overall dues clear
-  const eligibleForManualSuspension = students.filter(
+  const eligibleForManualSuspension = scopedStudents.filter(
     (s) =>
       s.transportStatus === 'Active' &&
       s.balanceDue > 0 &&
@@ -656,8 +728,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
         : '';
     const descriptionStr = `Transport Fee (${selectedRows.map((r) => r.month).join(', ')})${lateFineDesc}`;
 
+    const memberCampus = getStudentCampus(selectedMember, routes);
+
     await onRecordReceipt({
       studentId: selectedMember.id,
+      campus: memberCampus,
       amount: totalNetPayable,
       discountAmount: totalSelectedDiscount,
       lateFineAmount: netLateFine,
@@ -668,7 +743,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       paymentMode,
       referenceNo,
       upiScreenshot: upiScreenshot || undefined,
-      receivedBy: `${currentRole}`,
+      receivedBy: `${currentRole} (${memberCampus} Campus)`,
       remarks: remarks || descriptionStr,
     });
 
@@ -679,27 +754,28 @@ export const FeesView: React.FC<FeesViewProps> = ({
     setUpiScreenshotName('');
     setStatusMessage({
       type: 'success',
-      text: `Fee receipt recorded for ${selectedMember.name} — Paid ₹${totalNetPayable.toLocaleString('en-IN')}.`,
+      text: `Fee receipt recorded for ${selectedMember.name} (${memberCampus} Campus) — Paid ₹${totalNetPayable.toLocaleString('en-IN')}.`,
     });
   };
 
   const handleSaveFollowUpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!onAddFollowUp) return;
-    const st = students.find((s) => s.id === folStudentId);
+    const st = scopedStudents.find((s) => s.id === folStudentId);
     if (!st) return;
     await onAddFollowUp({
       date: folDate || todayStr,
       studentId: st.id,
       admissionNo: st.admissionNo,
       studentName: st.name,
+      campus: getStudentCampus(st, routes),
       contactPerson: folContactPerson || st.fatherName,
       phone: folPhone || st.mobile,
       overdueAmount: st.balanceDue,
       promiseDate: folPromiseDate || undefined,
       outcome: folOutcome,
       notes: folNotes || 'Called parent regarding transport fee deposit.',
-      officerName: currentRole,
+      officerName: `${currentRole} (${getStudentCampus(st, routes)} Campus)`,
     });
     setIsFollowUpModalOpen(false);
     setFolNotes('');
@@ -709,7 +785,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const handleSaveWarningLetterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!onIssueWarningLetter) return;
-    const st = students.find((s) => s.id === warnStudentId);
+    const st = scopedStudents.find((s) => s.id === warnStudentId);
     if (!st) return;
     const created = await onIssueWarningLetter({
       date: todayStr,
@@ -717,6 +793,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       studentId: st.id,
       studentName: st.name,
       admissionNo: st.admissionNo,
+      campus: getStudentCampus(st, routes),
       parentName: st.fatherName,
       fatherName: st.fatherName,
       address: st.address,
@@ -726,7 +803,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       proposedSuspensionDate: warnDeadline,
       warningLevel: warnLevel,
       sentVia: warnSentVia,
-      issuedBy: currentRole,
+      issuedBy: `${currentRole} (${getStudentCampus(st, routes)} Campus)`,
     });
     setIsWarningModalOpen(false);
     printWarningCumReminderLetters([
@@ -821,10 +898,128 @@ export const FeesView: React.FC<FeesViewProps> = ({
           </button>
         </div>
 
-        {lockedCampus && (
-          <span className="px-2.5 py-1 rounded-lg bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[11px] font-bold">
-            Demand Slip Campus Scope: {lockedCampus}
-          </span>
+        {lockedCampus ? (
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-300 text-xs font-bold">
+            <Lock className="w-3.5 h-3.5" />
+            <span>Campus Locked: {formatCampusLabel(lockedCampus)} ({scopedStudents.length} Members)</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 bg-slate-800 p-1 rounded-xl border border-slate-700">
+            <span className="text-[11px] font-bold text-slate-400 px-2">Campus View:</span>
+            {(['all', 'Sr', 'Jr'] as CampusFilter[]).map((camp) => (
+              <button
+                key={camp}
+                type="button"
+                onClick={() => handleCampusSwitch(camp)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  selectedCampus === camp
+                    ? 'bg-amber-500 text-slate-950 shadow-2xs'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                }`}
+              >
+                {camp === 'all' ? 'All Campuses' : camp === 'Sr' ? 'Senior (Sr)' : 'Junior (Jr)'}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Campus Cash & Online Fee Collection Balance Summary Bar */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-3 print:hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 text-xs font-bold">
+              {formatCampusLabel(selectedCampus)}
+            </span>
+            <span className="text-xs font-semibold text-slate-600">
+              Fee Collection &amp; Mode-wise Balance ({scopedStudents.length} Campus Members)
+            </span>
+          </div>
+          {!lockedCampus && (
+            <span className="text-[11px] text-slate-500 font-medium">
+              Switch between Senior (Sr), Junior (Jr), or All Campuses above
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200">
+            <div className="text-[10px] font-bold uppercase text-emerald-800">
+              Cash Fee Collected ({selectedCampus === 'all' ? 'All' : selectedCampus})
+            </div>
+            <div className="text-lg font-extrabold font-mono text-emerald-700 mt-0.5">
+              ₹{activeCampusStats.feeCash.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200">
+            <div className="text-[10px] font-bold uppercase text-blue-800">
+              Online / UPI / Bank ({selectedCampus === 'all' ? 'All' : selectedCampus})
+            </div>
+            <div className="text-lg font-extrabold font-mono text-blue-700 mt-0.5">
+              ₹{activeCampusStats.feeOnline.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200">
+            <div className="text-[10px] font-bold uppercase text-indigo-800">
+              Total Fee Received ({selectedCampus === 'all' ? 'All' : selectedCampus})
+            </div>
+            <div className="text-lg font-extrabold font-mono text-indigo-700 mt-0.5">
+              ₹{activeCampusStats.feeTotal.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200">
+            <div className="text-[10px] font-bold uppercase text-rose-800">
+              Pending Fee Dues ({selectedCampus === 'all' ? 'All' : selectedCampus})
+            </div>
+            <div className="text-lg font-extrabold font-mono text-rose-600 mt-0.5">
+              ₹{activeCampusStats.outstandingDues.toLocaleString('en-IN')}
+            </div>
+          </div>
+        </div>
+
+        {!lockedCampus && selectedCampus === 'all' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            <div
+              onClick={() => handleCampusSwitch('Sr')}
+              className="p-3 rounded-xl bg-slate-50 hover:bg-indigo-50/40 border border-slate-200 hover:border-indigo-300 flex flex-wrap items-center justify-between gap-2 cursor-pointer transition-colors"
+            >
+              <div>
+                <div className="text-xs font-bold text-slate-900">
+                  Senior Campus (Sr) • {srCampusStats.studentCount} Members
+                </div>
+                <div className="text-[11px] text-slate-600 font-mono mt-0.5">
+                  Cash: <strong className="text-emerald-700">₹{srCampusStats.feeCash.toLocaleString('en-IN')}</strong> • Online:{' '}
+                  <strong className="text-blue-700">₹{srCampusStats.feeOnline.toLocaleString('en-IN')}</strong> • Dues:{' '}
+                  <strong className="text-rose-600">₹{srCampusStats.outstandingDues.toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-bold">
+                Total: ₹{srCampusStats.feeTotal.toLocaleString('en-IN')}
+              </span>
+            </div>
+
+            <div
+              onClick={() => handleCampusSwitch('Jr')}
+              className="p-3 rounded-xl bg-slate-50 hover:bg-indigo-50/40 border border-slate-200 hover:border-indigo-300 flex flex-wrap items-center justify-between gap-2 cursor-pointer transition-colors"
+            >
+              <div>
+                <div className="text-xs font-bold text-slate-900">
+                  Junior Campus (Jr) • {jrCampusStats.studentCount} Members
+                </div>
+                <div className="text-[11px] text-slate-600 font-mono mt-0.5">
+                  Cash: <strong className="text-emerald-700">₹{jrCampusStats.feeCash.toLocaleString('en-IN')}</strong> • Online:{' '}
+                  <strong className="text-blue-700">₹{jrCampusStats.feeOnline.toLocaleString('en-IN')}</strong> • Dues:{' '}
+                  <strong className="text-rose-600">₹{jrCampusStats.outstandingDues.toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-bold">
+                Total: ₹{jrCampusStats.feeTotal.toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
         )}
       </div>
 
@@ -844,14 +1039,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeTab === 'billing'
-              ? `${invoices.length} Invoices`
+              ? `${scopedInvoices.length} Invoices`
               : activeTab === 'recovery'
-              ? `${followUps.length} Follow-ups`
+              ? `${scopedFollowUps.length} Follow-ups`
               : activeTab === 'demand_slip'
               ? 'Print Slips & Call History'
               : activeTab === 'monthly_matrix'
-              ? 'Visible to All Staff'
-              : `${receipts.length} Receipts`}
+              ? formatCampusLabel(selectedCampus)
+              : `${scopedReceipts.length} Receipts`}
           </span>
         </div>
 
@@ -869,13 +1064,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
 
               <PrintExportToolbar
-                title={`Monthly Transport Fee Invoices (${selectedMonth})`}
+                title={`Monthly Transport Fee Invoices (${selectedMonth} - ${formatCampusLabel(selectedCampus)})`}
                 filename={`fee_invoices_${selectedMonth}`}
                 schoolName={schoolName}
-                filteredData={invoices}
-                allData={invoices}
+                filteredData={scopedInvoices}
+                allData={scopedInvoices}
                 hasActiveFilters={true}
-                filterSummary={`Billing Month: ${selectedMonth}`}
+                filterSummary={`Billing Month: ${selectedMonth} • Campus: ${formatCampusLabel(selectedCampus)}`}
                 columns={[
                   { header: 'Invoice No', accessor: (i) => i.invoiceNo },
                   { header: 'Member Name', accessor: (i) => i.studentName },
@@ -925,11 +1120,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 <span>+ Previous Dues (Old Software)</span>
               </button>
               <PrintExportToolbar
-                title="Transport Fee Receipts & Collections Register"
+                title={`Transport Fee Receipts & Collections Register (${formatCampusLabel(selectedCampus)})`}
                 filename="fee_receipts"
                 schoolName={schoolName}
-                filteredData={receipts}
-                allData={receipts}
+                filteredData={scopedReceipts}
+                allData={scopedReceipts}
                 columns={[
                   { header: 'Receipt No', accessor: (r) => r.receiptNo },
                   { header: 'Payment Date', accessor: (r) => r.date },
@@ -962,11 +1157,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
           {activeTab === 'recovery' && (
             <>
               <PrintExportToolbar
-                title="Fee Follow-Up & Promise Date Register"
+                title={`Fee Follow-Up & Promise Date Register (${formatCampusLabel(selectedCampus)})`}
                 filename="fee_followups"
                 schoolName={schoolName}
-                filteredData={followUps}
-                allData={followUps}
+                filteredData={scopedFollowUps}
+                allData={scopedFollowUps}
                 columns={[
                   { header: 'Call Date', accessor: (f) => f.date },
                   { header: 'Member Name', accessor: (f) => f.studentName },
@@ -999,8 +1194,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
         <div className="space-y-5">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
             <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-bold text-slate-900 text-sm">Fee Receipts &amp; Collections Ledger</h3>
-              <span className="text-xs font-bold text-slate-600">{receipts.length} Receipts</span>
+              <h3 className="font-bold text-slate-900 text-sm">
+                Fee Receipts &amp; Collections Ledger ({formatCampusLabel(selectedCampus)})
+              </h3>
+              <span className="text-xs font-bold text-slate-600">{scopedReceipts.length} Receipts</span>
             </div>
 
             <div className="overflow-x-auto">
@@ -1022,7 +1219,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {receipts.map((rec) => (
+                  {scopedReceipts.map((rec) => (
                     <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3 px-4 font-mono font-bold text-indigo-700">{rec.receiptNo}</td>
                       <td className="py-3 px-3 font-mono text-slate-600">{rec.date}</td>
@@ -1130,7 +1327,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
             <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="font-bold text-slate-900 text-sm">Issued Transport Invoices ({invoices.length})</h3>
+              <h3 className="font-bold text-slate-900 text-sm">
+                Issued Transport Invoices ({scopedInvoices.length}) — {formatCampusLabel(selectedCampus)}
+              </h3>
               <span className="text-xs text-slate-500">Click Collect Fee to clear any invoice</span>
             </div>
 
@@ -1152,7 +1351,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {invoices.map((inv) => (
+                  {scopedInvoices.map((inv) => (
                     <tr key={inv.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3 px-4 font-mono font-bold text-slate-900">{inv.invoiceNo}</td>
                       <td className="py-3 px-3 font-semibold text-slate-900">{inv.studentName}</td>
@@ -1316,11 +1515,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
 
               <div className="space-y-3">
-                {followUps.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-6 text-center">No follow-up calls logged yet.</p>
+                {scopedFollowUps.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">No follow-up calls logged yet for this campus.</p>
                 ) : (
-                  followUps.map((f) => {
-                    const stu = students.find((s) => s.id === f.studentId);
+                  scopedFollowUps.map((f) => {
+                    const stu = scopedStudents.find((s) => s.id === f.studentId);
                     const isMissedPromise =
                       f.promiseDate && f.promiseDate <= todayStr && (stu ? stu.balanceDue > 0 : (f.overdueAmount || 0) > 0);
                     return (
@@ -1416,11 +1615,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
 
               <div className="space-y-3">
-                {warningLetters.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-6 text-center">No Warning cum Reminder letters issued yet.</p>
+                {scopedWarningLetters.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">No Warning cum Reminder letters issued yet for this campus.</p>
                 ) : (
-                  warningLetters.map((wl) => {
-                    const memberObj = students.find(
+                  scopedWarningLetters.map((wl) => {
+                    const memberObj = scopedStudents.find(
                       (s) => s.id === wl.studentId || s.admissionNo === wl.admissionNo
                     );
                     return (
@@ -2066,11 +2265,21 @@ export const FeesView: React.FC<FeesViewProps> = ({
           '2027-03': 'Mar 2027',
         };
 
-        // 1. Separate Previous Dues Summary
-        const prevDuesInvoices = invoices.filter(
+        const effectiveMatrixCampus: CampusFilter = lockedCampus
+          ? lockedCampus
+          : (matrixCampusFilter as CampusFilter);
+        const matrixStudents = students.filter((s) =>
+          matchesCampusFilter(getStudentCampus(s, routes), effectiveMatrixCampus)
+        );
+        const matrixInvoices = invoices.filter((inv) =>
+          matchesCampusFilter(getInvoiceCampus(inv, students, routes), effectiveMatrixCampus)
+        );
+
+        // 1. Separate Previous Dues Summary (Scoped to Campus)
+        const prevDuesInvoices = matrixInvoices.filter(
           (i) => i.month === 'Previous Dues' || i.id.startsWith('inv-prev-')
         );
-        const totalPrevDuesBilled = students
+        const totalPrevDuesBilled = matrixStudents
           .filter((s) => s.transportStatus !== 'Left' && s.transportStatus !== 'Left School')
           .reduce((sum, s) => {
             const inv = prevDuesInvoices.find((i) => i.studentId === s.id);
@@ -2082,9 +2291,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
         );
         const totalPrevDuesPending = Math.max(0, totalPrevDuesBilled - totalPrevDuesPaid);
 
-        // 2. Separate Month-by-Month Session Breakdown
+        // 2. Separate Month-by-Month Session Breakdown (Scoped to Campus)
         const monthBreakdown = SESSION_MONTHS.map((mKey) => {
-          const mInvoices = invoices.filter((i) => i.month === mKey);
+          const mInvoices = matrixInvoices.filter((i) => i.month === mKey);
           const billed = mInvoices.reduce((s, i) => s + Number(i.netPayable ?? i.netAmount ?? 0), 0);
           const collected = mInvoices.reduce((s, i) => s + Number(i.paidAmount ?? 0), 0);
           const outstanding = mInvoices.reduce((s, i) => s + Number(i.balanceDue ?? 0), 0);
@@ -2099,7 +2308,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
         });
 
         // 3. Member-wise Matrix (Previous Dues vs Month-wise Session Fees)
-        const matrixRows = students
+        const matrixRows = matrixStudents
           .filter((s) => s.transportStatus !== 'Left' && s.transportStatus !== 'Left School')
           .filter((s) => {
             const rt = routes.find(
@@ -2107,8 +2316,6 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 (Boolean(r.id) && r.id === s.routeId) ||
                 (Boolean(r.code) && Boolean(s.routeCode) && r.code.trim() === s.routeCode.trim())
             );
-            const stuCampus = s.campus || rt?.campus || 'Sr';
-            if (matrixCampusFilter !== 'all' && stuCampus !== matrixCampusFilter) return false;
             if (matrixClassFilter !== 'all' && s.class !== matrixClassFilter) return false;
             if (
               matrixRouteFilter !== 'all' &&
@@ -2403,11 +2610,18 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
                 <div className="flex flex-wrap items-center gap-2">
                   <select
-                    value={matrixCampusFilter}
-                    onChange={(e) => setMatrixCampusFilter(e.target.value)}
-                    className="p-2 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50"
+                    value={lockedCampus || matrixCampusFilter}
+                    disabled={Boolean(lockedCampus)}
+                    onChange={(e) => {
+                      const val = e.target.value as CampusFilter;
+                      setMatrixCampusFilter(val);
+                      if (!lockedCampus) setSelectedCampus(val);
+                    }}
+                    className={`p-2 rounded-xl border border-slate-200 text-xs font-bold ${
+                      lockedCampus ? 'bg-slate-100 text-slate-600 cursor-not-allowed' : 'bg-slate-50'
+                    }`}
                   >
-                    <option value="all">All Campuses</option>
+                    {!lockedCampus && <option value="all">All Campuses</option>}
                     <option value="Sr">Sr Campus</option>
                     <option value="Jr">Jr Campus</option>
                   </select>
@@ -3202,7 +3416,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   onChange={(e) => setFolStudentId(e.target.value)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl bg-slate-50 font-semibold"
                 >
-                  {students.map((s) => (
+                  {scopedStudents.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.admissionNo}) — Overdue: ₹{s.balanceDue}
                     </option>
@@ -3333,7 +3547,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   onChange={(e) => setWarnStudentId(e.target.value)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl bg-slate-50 font-semibold"
                 >
-                  {students.map((s) => (
+                  {scopedStudents.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.admissionNo}) — Overdue: ₹{s.balanceDue}
                     </option>
@@ -3544,8 +3758,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
       {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) ENTRY MODAL */}
       {isPrevDuesModalOpen && (() => {
-        const distinctRoutes = Array.from(new Set(students.map(s => s.routeCode).filter(Boolean))).sort();
-        const filteredForPrevDues = students.filter(s => {
+        const distinctRoutes = Array.from(new Set(scopedStudents.map(s => s.routeCode).filter(Boolean))).sort();
+        const filteredForPrevDues = scopedStudents.filter(s => {
           if (prevDuesFilterClass !== 'all' && s.class !== prevDuesFilterClass) return false;
           if (prevDuesFilterRoute !== 'all' && s.routeCode !== prevDuesFilterRoute) return false;
           if (prevDuesSearch.trim()) {
