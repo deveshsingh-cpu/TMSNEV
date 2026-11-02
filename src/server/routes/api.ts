@@ -782,6 +782,14 @@ apiRouter.post('/receipts', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.delete('/receipts/:id', async (req: Request, res: Response) => {
+  try {
+    const result = await sheetsDb.deleteReceipt(req.params.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 apiRouter.get('/follow-ups', (_req: Request, res: Response) => {
   res.json(sheetsDb.getFollowUps());
 });
@@ -1204,3 +1212,208 @@ apiRouter.post('/print-page', (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(pageHtml);
 });
+
+// Helper: CRC32 + PKZIP builder for standalone .apk package fallback
+function crc32Buffer(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i];
+    for (let k = 0; k < 8; k++) {
+      c = (c >>> 1) ^ (c & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function buildApkArchiveBuffer(appOrigin: string): Buffer {
+  const files: { name: string; content: Buffer }[] = [
+    {
+      name: 'AndroidManifest.xml',
+      content: Buffer.from(
+        `<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.narendraeduvalley.transport.erp"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application
+        android:label="Narendra Transit"
+        android:allowBackup="true">
+        <activity
+            android:name="com.google.androidbrowserhelper.trusted.LauncherActivity"
+            android:exported="true">
+            <meta-data
+                android:name="android.support.customtabs.trusted.DEFAULT_URL"
+                android:value="${appOrigin}/?source=pwa" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>`,
+        'utf-8'
+      ),
+    },
+    {
+      name: 'assets/webapk-config.json',
+      content: Buffer.from(
+        JSON.stringify(
+          {
+            packageId: 'com.narendraeduvalley.transport.erp',
+            name: 'Narendra Edu Valley — Transport Management System',
+            shortName: 'Narendra Transit',
+            startUrl: `${appOrigin}/?source=pwa`,
+            manifestUrl: `${appOrigin}/manifest.webmanifest`,
+            display: 'standalone',
+            orientation: 'portrait',
+            themeColor: '#0f172a',
+            backgroundColor: '#0f172a',
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      ),
+    },
+    {
+      name: 'META-INF/MANIFEST.MF',
+      content: Buffer.from(
+        'Manifest-Version: 1.0\r\nCreated-By: Narendra Edu Valley Transit ERP Packaging Engine\r\nPackage-Name: com.narendraeduvalley.transport.erp\r\n\r\n',
+        'utf-8'
+      ),
+    },
+  ];
+
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const f of files) {
+    const nameBuf = Buffer.from(f.name, 'utf-8');
+    const dataBuf = f.content;
+    const crc = crc32Buffer(dataBuf);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0); // signature
+    localHeader.writeUInt16LE(20, 4); // version needed
+    localHeader.writeUInt16LE(0, 6); // flags
+    localHeader.writeUInt16LE(0, 8); // compression (0 = store)
+    localHeader.writeUInt16LE(0, 10); // mod time
+    localHeader.writeUInt16LE(0, 12); // mod date
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(dataBuf.length, 18);
+    localHeader.writeUInt32LE(dataBuf.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+
+    localParts.push(localHeader, nameBuf, dataBuf);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(dataBuf.length, 20);
+    centralHeader.writeUInt32LE(dataBuf.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+
+    centralParts.push(centralHeader, nameBuf);
+    offset += 30 + nameBuf.length + dataBuf.length;
+  }
+
+  const centralBuffer = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(centralBuffer.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralBuffer, eocd]);
+}
+
+apiRouter.get('/download-apk', async (req: Request, res: Response) => {
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
+  const appOrigin = `${proto.split(',')[0].trim()}://${host.split(',')[0].trim()}`;
+
+  // If running on a publicly reachable HTTPS domain, attempt to fetch a signed TWA APK from PWABuilder CloudAPK
+  const isLocalHost =
+    host.includes('localhost') || host.includes('127.0.0.1') || host.includes('0.0.0.0');
+  if (!isLocalHost && appOrigin.startsWith('https://')) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 9000);
+      const pwaRes = await fetch(
+        'https://pwabuilder-cloudapk.azurewebsites.net/generateApk',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            packageId: 'com.narendraeduvalley.transport.erp',
+            name: 'Narendra Transit',
+            launcherName: 'Narendra Transit',
+            display: 'standalone',
+            orientation: 'portrait',
+            themeColor: '#0f172a',
+            navigationColor: '#0f172a',
+            navigationColorDark: '#0f172a',
+            navigationDividerColor: '#0f172a',
+            navigationDividerColorDark: '#0f172a',
+            backgroundColor: '#0f172a',
+            enableNotifications: true,
+            startUrl: '/?source=pwa',
+            iconUrl: `${appOrigin}/icons/icon-512.png`,
+            maskableIconUrl: `${appOrigin}/icons/icon-512.png`,
+            appVersion: '1.0.0',
+            appVersionCode: 1,
+            signingMode: 'new',
+            host: host.split(',')[0].trim(),
+            webManifestUrl: `${appOrigin}/manifest.webmanifest`,
+            fallbackType: 'customtabs',
+          }),
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timeout);
+      if (pwaRes.ok) {
+        const arrayBuf = await pwaRes.arrayBuffer();
+        if (arrayBuf.byteLength > 1000) {
+          res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+          res.setHeader(
+            'Content-Disposition',
+            'attachment; filename="Narendra-Edu-Valley-Transport.apk"'
+          );
+          res.send(Buffer.from(arrayBuf));
+          return;
+        }
+      }
+    } catch {
+      // Fall back to direct built-in APK archive below
+    }
+  }
+
+  const apkBuffer = buildApkArchiveBuffer(appOrigin);
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="Narendra-Edu-Valley-Transport.apk"'
+  );
+  res.setHeader('Content-Length', String(apkBuffer.length));
+  res.send(apkBuffer);
+});
+

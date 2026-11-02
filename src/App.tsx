@@ -1136,6 +1136,12 @@ export function App() {
     return res;
   };
 
+  const handleDeleteReceipt = async (receiptId: string) => {
+    const res = await api.deleteReceipt(receiptId);
+    await loadAllData();
+    return res;
+  };
+
   const handleIssueWarningLetter = async (data: Partial<WarningLetter>) => {
     const res = await api.issueWarningLetter(data);
     await loadAllData();
@@ -1299,33 +1305,44 @@ export function App() {
         </div>
 
         <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs text-slate-700">
-          {/* Option 1: Direct 1-Tap Android WebAPK Install (Recommended) */}
+          {/* Option 1: Direct .APK File Download + 1-Tap Phone Install */}
           <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <span className="inline-block px-2 py-0.5 rounded-md bg-emerald-700 text-white text-[10px] font-bold uppercase tracking-wider mb-1">
-                  Direct Phone Installation • Full-Screen Android App
+                  Direct Android APK File Download &amp; Phone Installer
                 </span>
                 <h4 className="text-sm font-bold text-slate-900">
-                  1-Tap Direct Install to Android Phone (Not a Browser Shortcut)
+                  Download `Narendra-Edu-Valley-Transport.apk` Directly to Phone / Computer
                 </h4>
                 <p className="text-slate-600 mt-0.5">
-                  Installs Narendra Edu Valley Transit ERP directly onto your Android phone&apos;s app drawer as a standalone native WebAPK application with automatic live updates.
+                  Click below to directly download the `.apk` file or install the standalone Android app straight into your phone&apos;s app drawer.
                 </p>
               </div>
             </div>
 
-            {deferredPrompt ? (
-              <button
-                onClick={handleInstallAndroidApp}
-                className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md cursor-pointer"
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <a
+                href="/api/download-apk"
+                download="Narendra-Edu-Valley-Transport.apk"
+                className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md cursor-pointer text-center"
               >
-                <Download className="w-4 h-4" />
-                <span>Install Android App to Phone Now (1-Tap)</span>
-              </button>
-            ) : (
-              <div className="space-y-2.5">
+                <Download className="w-4 h-4 shrink-0" />
+                <span>Download .APK File Directly</span>
+              </a>
+
+              {deferredPrompt ? (
                 <button
+                  type="button"
+                  onClick={handleInstallAndroidApp}
+                  className="w-full py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                >
+                  <Smartphone className="w-4 h-4 shrink-0" />
+                  <span>1-Tap Direct Phone Install</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
                   onClick={() => {
                     const promptEvent = (window as any).__deferredPwaPrompt;
                     if (promptEvent) {
@@ -1333,34 +1350,34 @@ export function App() {
                       promptEvent.prompt();
                       return;
                     }
-                    const targetUrl = `${window.location.origin}/?install=apk`;
-                    if (window.self !== window.top) {
-                      window.open(targetUrl, '_blank', 'noopener,noreferrer');
-                    } else {
-                      window.location.href = targetUrl;
-                    }
+                    const link = document.createElement('a');
+                    link.href = '/api/download-apk';
+                    link.download = 'Narendra-Edu-Valley-Transport.apk';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
                   }}
-                  className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                  className="w-full py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer"
                 >
-                  <Download className="w-4 h-4" />
-                  <span>Activate Direct Android Phone Installer</span>
+                  <Smartphone className="w-4 h-4 shrink-0" />
+                  <span>Install Directly on Android</span>
                 </button>
+              )}
+            </div>
 
-                <div className="bg-white/90 rounded-lg p-3 border border-emerald-200 text-slate-700 space-y-1.5">
-                  <p className="font-bold text-slate-900">
-                    Direct Install from Chrome on Android:
-                  </p>
-                  <ol className="list-decimal list-inside space-y-1 text-slate-700">
-                    <li>
-                      Tap <strong>&quot;Activate Direct Android Phone Installer&quot;</strong> above, or tap the <strong>⋮ (Three Dots Menu)</strong> at the top-right of Chrome.
-                    </li>
-                    <li>
-                      Select <strong>&quot;Install app&quot;</strong> (or if prompted between options, choose <strong>Install app</strong> instead of Create shortcut) to install the full app directly into your phone.
-                    </li>
-                  </ol>
-                </div>
-              </div>
-            )}
+            <div className="bg-white/90 rounded-lg p-3 border border-emerald-200 text-slate-700 space-y-1.5">
+              <p className="font-bold text-slate-900">
+                How to Open / Install on Android Phone:
+              </p>
+              <ol className="list-decimal list-inside space-y-1 text-slate-700">
+                <li>
+                  Tap <strong>&quot;Download .APK File Directly&quot;</strong> above to download <code className="font-mono font-bold">Narendra-Edu-Valley-Transport.apk</code> directly to your device, or tap <strong>1-Tap Direct Phone Install</strong>.
+                </li>
+                <li>
+                  In Chrome on Android, you can also tap the <strong>⋮ (Three Dots Menu)</strong> at the top-right and select <strong>&quot;Install app&quot;</strong> to install the full-screen app directly into your phone&apos;s app drawer.
+                </li>
+              </ol>
+            </div>
           </div>
 
           {/* Shareable App URL + QR Code for Android Phones */}
@@ -1368,30 +1385,31 @@ export function App() {
             <div className="bg-white p-2 rounded-xl border border-slate-200 shrink-0">
               <img
                 src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
-                  `${window.location.origin}/?install=apk`
+                  `${window.location.origin}/api/download-apk`
                 )}`}
-                alt="Scan QR to install on Android"
+                alt="Scan QR to download Android APK"
                 className="w-28 h-28 rounded-lg"
               />
             </div>
             <div className="flex-1 space-y-2 w-full">
               <div className="flex items-center gap-1.5 font-bold text-slate-900 text-xs">
                 <QrCode className="w-4 h-4 text-slate-700" />
-                <span>Scan QR Code or Copy Direct Install Link</span>
+                <span>Scan QR Code or Copy Direct .APK Download Link</span>
               </div>
               <p className="text-slate-600">
-                Scan with your Android camera or share this direct installer link on WhatsApp:
+                Scan with your Android camera or share this direct `.apk` download link on WhatsApp:
               </p>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   readOnly
-                  value={`${window.location.origin}/?install=apk`}
+                  value={`${window.location.origin}/api/download-apk`}
                   className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white font-mono text-[11px] text-slate-800"
                 />
                 <button
+                  type="button"
                   onClick={() => {
-                    navigator.clipboard.writeText(`${window.location.origin}/?install=apk`);
+                    navigator.clipboard.writeText(`${window.location.origin}/api/download-apk`);
                     setCopiedUrl(true);
                     setTimeout(() => setCopiedUrl(false), 2500);
                   }}
@@ -1401,35 +1419,6 @@ export function App() {
                   <span>{copiedUrl ? 'Copied' : 'Copy Link'}</span>
                 </button>
               </div>
-            </div>
-          </div>
-
-          {/* Option 2: Download Standalone .APK File via PWABuilder */}
-          <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2.5">
-            <div>
-              <span className="inline-block px-2 py-0.5 rounded-md bg-amber-500 text-slate-950 text-[10px] font-bold uppercase tracking-wider mb-1">
-                Option 2 • Standalone .APK File Download
-              </span>
-              <h4 className="text-sm font-bold text-slate-900">
-                Generate &amp; Download Signed `.apk` File for WhatsApp / Offline Sharing
-              </h4>
-              <p className="text-slate-600 mt-0.5">
-                Need a raw `.apk` file to send directly on WhatsApp? Click below to package and download the standalone `.apk` file:
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2.5 pt-1">
-              <a
-                href={`https://www.pwabuilder.com/reportcard?site=${encodeURIComponent(
-                  window.location.origin
-                )}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs inline-flex items-center gap-2 shadow-2xs"
-              >
-                <Download className="w-4 h-4" />
-                <span>Download Standalone .APK File ({window.location.hostname})</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
             </div>
           </div>
         </div>
@@ -1862,6 +1851,7 @@ export function App() {
                   onClearPreselectedStudent={() => setPreselectedFeeMemberId(null)}
                   onRunBilling={handleRunBilling}
                   onRecordReceipt={handleRecordReceipt}
+                  onDeleteReceipt={handleDeleteReceipt}
                   onAddFollowUp={handleAddFeeFollowUp}
                   onDeleteFollowUp={handleDeleteFeeFollowUp}
                   onIssueWarningLetter={handleIssueWarningLetter}

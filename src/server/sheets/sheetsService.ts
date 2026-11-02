@@ -9819,6 +9819,145 @@ export class SheetsDatabaseManager {
     });
   }
 
+  public async deleteReceipt(id: string) {
+    return this.enqueueWrite(async () => {
+      const targetId = String(id || '').trim();
+      if (!targetId) {
+        throw new Error('Receipt ID is required to delete a fee receipt.');
+      }
+      const idx = this.receipts.findIndex(
+        r => r.id === targetId || r.receiptNo === targetId
+      );
+      if (idx === -1) {
+        throw new Error('Fee receipt not found or already deleted.');
+      }
+
+      const [deleted] = this.receipts.splice(idx, 1);
+      const netPaidDeleted = Number(deleted.amount) || 0;
+      const lateFineDeleted = Number(deleted.lateFine ?? deleted.lateFineAmount) || 0;
+      const discountDeleted = Number(deleted.discountAmount) || 0;
+      const feePortionDeleted = Math.max(0, netPaidDeleted - lateFineDeleted);
+
+      // Revert Cash or Bank account balance
+      const debitAccountId = deleted.paymentMode === 'Cash' ? 'acc-101' : 'acc-102';
+      const debitAcc = this.accounts.find(a => a.id === debitAccountId);
+      if (debitAcc) {
+        debitAcc.balance = Math.max(0, (Number(debitAcc.balance) || 0) - netPaidDeleted);
+      }
+
+      const student = this.students.find(
+        s =>
+          s.id === deleted.studentId ||
+          (deleted.admissionNo && s.admissionNo === deleted.admissionNo)
+      );
+
+      if (student) {
+        const studentInvoices = this.invoices.filter(i => i.studentId === student.id);
+
+        if (studentInvoices.length > 0) {
+          // 1. Reset all invoices of this student to their base unpaid state
+          for (const inv of studentInvoices) {
+            const key = String(inv.idempotencyKey || '').trim();
+            const mStr = String(inv.month || '').trim();
+            const isPrevDues =
+              key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues');
+            const base = Math.max(0, Number(inv.baseFee) || 0);
+            const stdConc = isPrevDues
+              ? 0
+              : Math.min(base, Math.max(0, Number(student.concessionAmount) || 0));
+            inv.concession = stdConc;
+            inv.netAmount = Math.max(0, base - stdConc);
+            inv.paidAmount = 0;
+            inv.balanceDue = inv.netAmount;
+            inv.status = inv.balanceDue <= 0 ? 'Paid' : 'Unpaid';
+          }
+
+          // 2. Replay all remaining receipts for this student in chronological order
+          const remainingReceipts = this.receipts
+            .filter(
+              r =>
+                r.studentId === student.id ||
+                (student.admissionNo && r.admissionNo === student.admissionNo)
+            )
+            .slice()
+            .reverse();
+
+          for (const rec of remainingReceipts) {
+            const currentStudentDue = studentInvoices
+              .filter(i => i.status !== 'Paid')
+              .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0);
+            rec.balanceDueBefore = currentStudentDue;
+
+            const recDiscount = Math.max(0, Number(rec.discountAmount) || 0);
+            const recLateFine = Math.max(0, Number(rec.lateFine ?? rec.lateFineAmount) || 0);
+            const recNetPaid = Math.max(0, Number(rec.amount) || 0);
+            let recFeeRemaining = Math.max(0, recNetPaid - recLateFine);
+
+            // Order invoices so any month explicitly mentioned in feeBreakupDescription is settled first
+            const desc = String(rec.feeBreakupDescription || '').toLowerCase();
+            const orderedInvoices = [...studentInvoices].sort((a, b) => {
+              const aMentioned = desc.includes(String(a.month || '').toLowerCase()) ? 0 : 1;
+              const bMentioned = desc.includes(String(b.month || '').toLowerCase()) ? 0 : 1;
+              return aMentioned - bMentioned;
+            });
+
+            let discountLeft = recDiscount;
+            for (const inv of orderedInvoices) {
+              if (inv.balanceDue <= 0) continue;
+              if (discountLeft > 0) {
+                const applyDisc = Math.min(discountLeft, inv.balanceDue);
+                inv.concession += applyDisc;
+                inv.netAmount = Math.max(0, inv.baseFee - inv.concession);
+                inv.balanceDue = Math.max(0, inv.netAmount - inv.paidAmount);
+                discountLeft -= applyDisc;
+              }
+              if (recFeeRemaining > 0 && inv.balanceDue > 0) {
+                const pay = Math.min(recFeeRemaining, inv.balanceDue);
+                inv.paidAmount += pay;
+                inv.balanceDue = Math.max(0, inv.balanceDue - pay);
+                recFeeRemaining -= pay;
+              }
+              inv.status =
+                inv.balanceDue <= 0
+                  ? 'Paid'
+                  : inv.paidAmount > 0
+                  ? 'Partially Paid'
+                  : 'Unpaid';
+            }
+
+            const afterStudentDue = studentInvoices
+              .filter(i => i.status !== 'Paid')
+              .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0);
+            rec.balanceDueAfter = afterStudentDue;
+            rec.advanceLiabilityAmount = Math.max(0, recFeeRemaining);
+          }
+
+          student.balanceDue = studentInvoices
+            .filter(i => i.status !== 'Paid')
+            .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0);
+        } else {
+          // Student has no invoice records; directly restore balanceDue
+          student.balanceDue = Math.max(
+            0,
+            (Number(student.balanceDue) || 0) + feePortionDeleted + discountDeleted
+          );
+        }
+      }
+
+      this.purgeOctober2026AppliedFeesAndSyncBalances();
+      await this.internalSyncToGoogleSheets();
+      return {
+        success: true,
+        deletedReceiptId: deleted.id,
+        receiptNo: deleted.receiptNo,
+        studentId: deleted.studentId,
+        studentName: deleted.studentName,
+        revertedAmount: netPaidDeleted,
+        updatedBalanceDue: student?.balanceDue ?? 0,
+      };
+    });
+  }
+
   public async addFollowUp(data: Partial<FollowUpRecord> & { memberId?: string; personTalkedTo?: string; responseReceived?: string; promisedDate?: string; callDate?: string; loggedBy?: string }): Promise<FollowUpRecord> {
     return this.enqueueWrite(async () => {
       const targetStudentId = data.studentId || data.memberId;

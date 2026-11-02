@@ -956,6 +956,16 @@ export const api = {
     }
     return res.json();
   },
+  deleteReceipt: async (id: string) => {
+    const res = await fetch(`/api/receipts/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to delete receipt');
+    }
+    return res.json();
+  },
   getFollowUps: async (): Promise<FollowUpRecord[]> => {
     const res = await fetch('/api/follow-ups');
     return res.json();
