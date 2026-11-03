@@ -771,7 +771,9 @@ export interface AbsenteeCallRecord {
   attendanceRemarks?: string;
   calledBy?: string;
   calledByName?: string;
+  callerName?: string;
   calledByRole?: UserRole;
+  callerRole?: UserRole;
   calledAt?: string;
   calledByAssistant?: boolean;
   assistantName?: string;

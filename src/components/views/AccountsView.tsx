@@ -224,10 +224,53 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     expenses,
   });
 
-  // Day Book Filters
+  // Day Book Filters (Supports Single Date / Back-Date, Date Range, or All Dates)
+  const [dayBookDateMode, setDayBookDateMode] = useState<'all_dates' | 'single_date' | 'date_range'>('all_dates');
+  const [dayBookSingleDate, setDayBookSingleDate] = useState<string>(todayStr);
   const [dayBookDateFrom, setDayBookDateFrom] = useState<string>('');
   const [dayBookDateTo, setDayBookDateTo] = useState<string>('');
   const [dayBookModeFilter, setDayBookModeFilter] = useState<'all' | 'Cash' | 'UPI' | 'Bank'>('all');
+
+  const handleSelectSingleDayBookDate = (dateVal: string) => {
+    const clean = dateVal || todayStr;
+    setDayBookDateMode('single_date');
+    setDayBookSingleDate(clean);
+    setDayBookDateFrom(clean);
+    setDayBookDateTo(clean);
+  };
+
+  const handleShiftDayBookDate = (offsetDays: number) => {
+    const baseStr = dayBookSingleDate || dayBookDateFrom || todayStr;
+    const parts = baseStr.split('-').map(Number);
+    const dt =
+      parts.length === 3 && !parts.some(isNaN)
+        ? new Date(parts[0], parts[1] - 1, parts[2])
+        : new Date();
+    dt.setDate(dt.getDate() + offsetDays);
+    const yyyy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    handleSelectSingleDayBookDate(`${yyyy}-${mm}-${dd}`);
+  };
+
+  const handleSelectYesterdayDayBook = () => {
+    const parts = todayStr.split('-').map(Number);
+    const dt =
+      parts.length === 3 && !parts.some(isNaN)
+        ? new Date(parts[0], parts[1] - 1, parts[2])
+        : new Date();
+    dt.setDate(dt.getDate() - 1);
+    const yyyy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    handleSelectSingleDayBookDate(`${yyyy}-${mm}-${dd}`);
+  };
+
+  const handleSelectAllDayBookDates = () => {
+    setDayBookDateMode('all_dates');
+    setDayBookDateFrom('');
+    setDayBookDateTo('');
+  };
 
   // Other Income & Income Heads State
   const [incomeSubView, setIncomeSubView] = useState<'income_list' | 'income_heads'>('income_list');
@@ -394,6 +437,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   interface DayBookIncomeEntry {
     id: string;
     date: string;
+    campus: ResolvedCampus;
     invoiceNo: string;
     incomeHead: string;
     name: string;
@@ -403,29 +447,39 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     attachment?: string;
   }
 
+  const normalizeEntryDate = (d?: string): string => String(d || '').trim().slice(0, 10);
+
   const allDayBookIncomes: DayBookIncomeEntry[] = [
-    ...scopedReceipts.map((r): DayBookIncomeEntry => ({
-      id: r.id,
-      date: r.date,
-      invoiceNo: r.receiptNo,
-      incomeHead: `Transport Fees (${getReceiptCampus(r, students, routes, invoices)})`,
-      name: `${r.studentName} (${r.admissionNo})`,
-      toMode: r.paymentMode === 'Cash' ? 'Cash' : r.paymentMode === 'UPI' ? 'UPI' : 'Bank',
-      amount: r.amountPaid ?? r.amount ?? 0,
-      sourceType: 'Fee Receipt',
-      attachment: r.upiScreenshot,
-    })),
-    ...scopedIncomes.map((inc): DayBookIncomeEntry => ({
-      id: inc.id,
-      date: inc.date,
-      invoiceNo: inc.invoiceNumber || inc.incomeNo,
-      incomeHead: inc.incomeHeadName || inc.headName || 'Other Income',
-      name: inc.name || inc.receivedFrom || 'General',
-      toMode: inc.receivedTo || (inc.paymentMode === 'Cash' ? 'Cash' : inc.paymentMode === 'UPI' ? 'UPI' : 'Bank'),
-      amount: inc.amount,
-      sourceType: 'Other Income',
-      attachment: inc.attachment,
-    })),
+    ...scopedReceipts.map((r): DayBookIncomeEntry => {
+      const recCampus = getReceiptCampus(r, students, routes, invoices);
+      return {
+        id: r.id,
+        date: normalizeEntryDate(r.date),
+        campus: recCampus,
+        invoiceNo: r.receiptNo,
+        incomeHead: `Transport Fees (${recCampus})`,
+        name: `${r.studentName} (${r.admissionNo})`,
+        toMode: r.paymentMode === 'Cash' ? 'Cash' : r.paymentMode === 'UPI' ? 'UPI' : 'Bank',
+        amount: Number(r.amountPaid ?? r.amount ?? 0) || 0,
+        sourceType: 'Fee Receipt',
+        attachment: r.upiScreenshot,
+      };
+    }),
+    ...scopedIncomes.map((inc): DayBookIncomeEntry => {
+      const incCamp = getIncomeCampus(inc);
+      return {
+        id: inc.id,
+        date: normalizeEntryDate(inc.date),
+        campus: incCamp,
+        invoiceNo: inc.invoiceNumber || inc.incomeNo,
+        incomeHead: inc.incomeHeadName || inc.headName || 'Other Income',
+        name: inc.name || inc.receivedFrom || 'General',
+        toMode: inc.receivedTo || (inc.paymentMode === 'Cash' ? 'Cash' : inc.paymentMode === 'UPI' ? 'UPI' : 'Bank'),
+        amount: Number(inc.amount) || 0,
+        sourceType: 'Other Income',
+        attachment: inc.attachment,
+      };
+    }),
   ].sort((a, b) => b.date.localeCompare(a.date));
 
   const filteredDayBookIncomes = allDayBookIncomes.filter(item => {
@@ -437,12 +491,13 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
   const filteredDayBookExpenses = scopedApprovedExpenses
     .filter(exp => {
-      if (dayBookDateFrom && exp.date < dayBookDateFrom) return false;
-      if (dayBookDateTo && exp.date > dayBookDateTo) return false;
+      const expDate = normalizeEntryDate(exp.date);
+      if (dayBookDateFrom && expDate < dayBookDateFrom) return false;
+      if (dayBookDateTo && expDate > dayBookDateTo) return false;
       if (dayBookModeFilter !== 'all' && exp.paymentMode !== dayBookModeFilter) return false;
       return true;
     })
-    .sort((a, b) => b.date.localeCompare(a.date));
+    .sort((a, b) => normalizeEntryDate(b.date).localeCompare(normalizeEntryDate(a.date)));
 
   const totalDayBookIncome = filteredDayBookIncomes.reduce((s, i) => s + i.amount, 0);
   const totalDayBookIncomeCash = filteredDayBookIncomes.filter(i => i.toMode === 'Cash').reduce((s, i) => s + i.amount, 0);
@@ -454,10 +509,150 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
   const netDayBookProfit = totalDayBookIncome - totalDayBookExpense;
 
+  // Compute Opening Balance (prior to dayBookDateFrom), Selected Date/Period Flow, Net Cash & Closing Balance per Campus
+  interface DayBookCampusBalanceSummary {
+    campus: CampusFilter;
+    campusLabel: string;
+    openingCash: number;
+    openingOnline: number;
+    openingTotal: number;
+    periodCashIn: number;
+    periodOnlineIn: number;
+    periodTotalIn: number;
+    periodCashOut: number;
+    periodOnlineOut: number;
+    periodTotalOut: number;
+    periodNetCash: number;
+    periodNetOnline: number;
+    periodNetTotal: number;
+    closingCash: number; // Net Cash in Hand at close of selected date
+    closingOnline: number;
+    closingTotal: number;
+  }
+
+  const computeCampusDayBookBalance = (campusFilter: CampusFilter): DayBookCampusBalanceSummary => {
+    const campReceipts = receipts.filter((r) =>
+      matchesCampusFilter(getReceiptCampus(r, students, routes, invoices), campusFilter)
+    );
+    const campIncomes = incomes.filter((inc) =>
+      matchesCampusFilter(getIncomeCampus(inc), campusFilter)
+    );
+    const campExpenses = approvedExpenses.filter((exp) =>
+      matchesCampusFilter(getExpenseCampus(exp, vehicles, routes, students), campusFilter)
+    );
+
+    const isModeAllowed = (mode: string) => {
+      if (dayBookModeFilter === 'all') return true;
+      return mode === dayBookModeFilter;
+    };
+
+    let openingCashIn = 0;
+    let openingOnlineIn = 0;
+    let openingCashOut = 0;
+    let openingOnlineOut = 0;
+
+    let periodCashIn = 0;
+    let periodOnlineIn = 0;
+    let periodCashOut = 0;
+    let periodOnlineOut = 0;
+
+    const processInflow = (dRaw: string, modeRaw: string, amtRaw: number) => {
+      const d = normalizeEntryDate(dRaw);
+      const mode: 'Cash' | 'UPI' | 'Bank' =
+        modeRaw === 'Cash' ? 'Cash' : modeRaw === 'UPI' ? 'UPI' : 'Bank';
+      if (!isModeAllowed(mode)) return;
+      const amt = Number(amtRaw) || 0;
+      if (dayBookDateFrom && d < dayBookDateFrom) {
+        if (mode === 'Cash') openingCashIn += amt;
+        else openingOnlineIn += amt;
+      } else if ((!dayBookDateFrom || d >= dayBookDateFrom) && (!dayBookDateTo || d <= dayBookDateTo)) {
+        if (mode === 'Cash') periodCashIn += amt;
+        else periodOnlineIn += amt;
+      }
+    };
+
+    const processOutflow = (dRaw: string, modeRaw: string, amtRaw: number) => {
+      const d = normalizeEntryDate(dRaw);
+      const mode: 'Cash' | 'UPI' | 'Bank' =
+        modeRaw === 'Cash' ? 'Cash' : modeRaw === 'UPI' ? 'UPI' : 'Bank';
+      if (!isModeAllowed(mode)) return;
+      const amt = Number(amtRaw) || 0;
+      if (dayBookDateFrom && d < dayBookDateFrom) {
+        if (mode === 'Cash') openingCashOut += amt;
+        else openingOnlineOut += amt;
+      } else if ((!dayBookDateFrom || d >= dayBookDateFrom) && (!dayBookDateTo || d <= dayBookDateTo)) {
+        if (mode === 'Cash') periodCashOut += amt;
+        else periodOnlineOut += amt;
+      }
+    };
+
+    campReceipts.forEach((r) =>
+      processInflow(r.date, r.paymentMode || 'Cash', Number(r.amountPaid ?? r.amount ?? 0))
+    );
+    campIncomes.forEach((inc) =>
+      processInflow(inc.date, inc.receivedTo || inc.paymentMode || 'Cash', Number(inc.amount || 0))
+    );
+    campExpenses.forEach((exp) =>
+      processOutflow(exp.date, exp.paymentMode || 'Cash', Number(exp.amount || 0))
+    );
+
+    const openingCash = openingCashIn - openingCashOut;
+    const openingOnline = openingOnlineIn - openingOnlineOut;
+    const openingTotal = openingCash + openingOnline;
+
+    const periodTotalIn = periodCashIn + periodOnlineIn;
+    const periodTotalOut = periodCashOut + periodOnlineOut;
+
+    const periodNetCash = periodCashIn - periodCashOut;
+    const periodNetOnline = periodOnlineIn - periodOnlineOut;
+    const periodNetTotal = periodTotalIn - periodTotalOut;
+
+    const closingCash = openingCash + periodNetCash;
+    const closingOnline = openingOnline + periodNetOnline;
+    const closingTotal = openingTotal + periodNetTotal;
+
+    return {
+      campus: campusFilter,
+      campusLabel:
+        campusFilter === 'Sr'
+          ? 'Senior Campus (Sr)'
+          : campusFilter === 'Jr'
+          ? 'Junior Campus (Jr)'
+          : 'All Campuses (Senior + Junior)',
+      openingCash,
+      openingOnline,
+      openingTotal,
+      periodCashIn,
+      periodOnlineIn,
+      periodTotalIn,
+      periodCashOut,
+      periodOnlineOut,
+      periodTotalOut,
+      periodNetCash,
+      periodNetOnline,
+      periodNetTotal,
+      closingCash,
+      closingOnline,
+      closingTotal,
+    };
+  };
+
+  const activeDayBookBalance = computeCampusDayBookBalance(selectedCampus);
+  const srDayBookBalance = computeCampusDayBookBalance('Sr');
+  const jrDayBookBalance = computeCampusDayBookBalance('Jr');
+
+  const dayBookPeriodDisplay =
+    dayBookDateFrom && dayBookDateTo && dayBookDateFrom === dayBookDateTo
+      ? `Date: ${dayBookDateFrom}`
+      : dayBookDateFrom || dayBookDateTo
+      ? `Period: ${dayBookDateFrom || 'Start'} to ${dayBookDateTo || todayStr}`
+      : `All Dates (Start to ${todayStr})`;
+
   // Combined rows for Day Book Print/Export
   const combinedDayBookExportRows = [
     ...filteredDayBookIncomes.map(inc => ({
       date: inc.date,
+      campus: inc.campus,
       type: 'INCOME',
       refNo: inc.invoiceNo,
       head: inc.incomeHead,
@@ -467,7 +662,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       expenseAmount: 0,
     })),
     ...filteredDayBookExpenses.map(exp => ({
-      date: exp.date,
+      date: normalizeEntryDate(exp.date),
+      campus: getExpenseCampus(exp, vehicles, routes, students),
       type: 'EXPENSE',
       refNo: exp.billNumber || exp.expenseNo,
       head: exp.category,
@@ -477,6 +673,362 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       expenseAmount: exp.amount,
     })),
   ].sort((a, b) => b.date.localeCompare(a.date));
+
+  const handlePrintDayBookReport = () => {
+    const campusTitleLabel =
+      selectedCampus === 'Sr'
+        ? 'SENIOR CAMPUS (Sr)'
+        : selectedCampus === 'Jr'
+        ? 'JUNIOR CAMPUS (Jr)'
+        : 'ALL CAMPUSES (COMBINED SENIOR & JUNIOR CAMPUS)';
+
+    const openingAsOfLabel = dayBookDateFrom
+      ? `Before ${dayBookDateFrom}`
+      : 'Session Start (Opening)';
+    const closingAsOfLabel = dayBookDateTo || todayStr;
+
+    const campusBreakdownHtml =
+      selectedCampus === 'all'
+        ? `
+        <div style="margin-bottom: 14px;">
+          <div style="font-size: 11px; font-weight: 800; text-transform: uppercase; color: #0f172a; margin-bottom: 5px;">
+            Campus-Wise Opening Balance, Net Cash &amp; Closing Balance Breakdown
+          </div>
+          <table style="width: 100%; border-collapse: collapse; font-size: 10.5px; background: #ffffff; color: #0f172a;">
+            <thead>
+              <tr style="background: #f1f5f9; border-bottom: 1.5px solid #0f172a;">
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: left;">Campus Name</th>
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: right;">Opening Balance (B/F)</th>
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: right;">Period Income (+)</th>
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: right;">Period Expense (-)</th>
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: right; background: #ecfdf5;">Net Cash in Hand (₹)</th>
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: right;">Closing Online/Bank (₹)</th>
+                <th style="border: 1px solid #94a3b8; padding: 5px 7px; text-align: right; background: #f8fafc;">Closing Balance (C/F)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; font-weight: 700;">Senior Campus (Sr)</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace;">
+                  ₹${srDayBookBalance.openingTotal.toLocaleString('en-IN')}
+                  <span style="display:block; font-size:9px; color:#475569;">(Cash: ₹${srDayBookBalance.openingCash.toLocaleString('en-IN')} | Online: ₹${srDayBookBalance.openingOnline.toLocaleString('en-IN')})</span>
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; color: #047857; font-weight: 700;">
+                  ₹${srDayBookBalance.periodTotalIn.toLocaleString('en-IN')}
+                  <span style="display:block; font-size:9px; color:#475569;">(Cash: ₹${srDayBookBalance.periodCashIn.toLocaleString('en-IN')} | Online: ₹${srDayBookBalance.periodOnlineIn.toLocaleString('en-IN')})</span>
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; color: #be123c; font-weight: 700;">
+                  ₹${srDayBookBalance.periodTotalOut.toLocaleString('en-IN')}
+                  <span style="display:block; font-size:9px; color:#475569;">(Cash: ₹${srDayBookBalance.periodCashOut.toLocaleString('en-IN')} | Online: ₹${srDayBookBalance.periodOnlineOut.toLocaleString('en-IN')})</span>
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; font-weight: 800; color: #047857; background: #ecfdf5;">
+                  ₹${srDayBookBalance.closingCash.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; font-weight: 700; color: #1d4ed8;">
+                  ₹${srDayBookBalance.closingOnline.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; font-weight: 800; color: #0f172a; background: #f8fafc;">
+                  ₹${srDayBookBalance.closingTotal.toLocaleString('en-IN')}
+                </td>
+              </tr>
+              <tr>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; font-weight: 700;">Junior Campus (Jr)</td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace;">
+                  ₹${jrDayBookBalance.openingTotal.toLocaleString('en-IN')}
+                  <span style="display:block; font-size:9px; color:#475569;">(Cash: ₹${jrDayBookBalance.openingCash.toLocaleString('en-IN')} | Online: ₹${jrDayBookBalance.openingOnline.toLocaleString('en-IN')})</span>
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; color: #047857; font-weight: 700;">
+                  ₹${jrDayBookBalance.periodTotalIn.toLocaleString('en-IN')}
+                  <span style="display:block; font-size:9px; color:#475569;">(Cash: ₹${jrDayBookBalance.periodCashIn.toLocaleString('en-IN')} | Online: ₹${jrDayBookBalance.periodOnlineIn.toLocaleString('en-IN')})</span>
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; color: #be123c; font-weight: 700;">
+                  ₹${jrDayBookBalance.periodTotalOut.toLocaleString('en-IN')}
+                  <span style="display:block; font-size:9px; color:#475569;">(Cash: ₹${jrDayBookBalance.periodCashOut.toLocaleString('en-IN')} | Online: ₹${jrDayBookBalance.periodOnlineOut.toLocaleString('en-IN')})</span>
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; font-weight: 800; color: #047857; background: #ecfdf5;">
+                  ₹${jrDayBookBalance.closingCash.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; font-weight: 700; color: #1d4ed8;">
+                  ₹${jrDayBookBalance.closingOnline.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #cbd5e1; padding: 5px 7px; text-align: right; font-family: monospace; font-weight: 800; color: #0f172a; background: #f8fafc;">
+                  ₹${jrDayBookBalance.closingTotal.toLocaleString('en-IN')}
+                </td>
+              </tr>
+              <tr style="background: #f1f5f9; font-weight: 800;">
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px;">COMBINED ALL CAMPUSES (Sr + Jr)</td>
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px; text-align: right; font-family: monospace;">
+                  ₹${activeDayBookBalance.openingTotal.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px; text-align: right; font-family: monospace; color: #047857;">
+                  ₹${activeDayBookBalance.periodTotalIn.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px; text-align: right; font-family: monospace; color: #be123c;">
+                  ₹${activeDayBookBalance.periodTotalOut.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px; text-align: right; font-family: monospace; color: #047857; background: #d1fae5;">
+                  ₹${activeDayBookBalance.closingCash.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px; text-align: right; font-family: monospace; color: #1d4ed8;">
+                  ₹${activeDayBookBalance.closingOnline.toLocaleString('en-IN')}
+                </td>
+                <td style="border: 1px solid #94a3b8; padding: 6px 7px; text-align: right; font-family: monospace; color: #0f172a;">
+                  ₹${activeDayBookBalance.closingTotal.toLocaleString('en-IN')}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `
+        : '';
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Day Book Statement — ${activeDayBookBalance.campusLabel}</title>
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      margin: 0;
+      padding: 12px;
+      font-size: 11px;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+  </style>
+</head>
+<body>
+  <div style="border-bottom: 2.5px solid #0f172a; padding-bottom: 10px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: flex-end; gap: 12px;">
+    <div>
+      <div style="font-size: 19px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.02em; color: #0f172a;">
+        ${schoolName}
+      </div>
+      <div style="font-size: 13.5px; font-weight: 800; color: #1e293b; margin-top: 2px;">
+        TRANSPORT DAY BOOK STATEMENT (WITH OPENING &amp; CLOSING BALANCE)
+      </div>
+      <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+        <span style="display: inline-block; background: #0f172a; color: #ffffff; font-weight: 800; font-size: 11px; padding: 4px 10px; border-radius: 5px; letter-spacing: 0.03em;">
+          CAMPUS: ${campusTitleLabel}
+        </span>
+        <span style="display: inline-block; background: #f1f5f9; border: 1px solid #94a3b8; color: #0f172a; font-weight: 700; font-size: 11px; padding: 3px 9px; border-radius: 5px;">
+          ${dayBookPeriodDisplay}
+        </span>
+        ${
+          dayBookModeFilter !== 'all'
+            ? `<span style="display: inline-block; background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; font-weight: 700; font-size: 10.5px; padding: 3px 8px; border-radius: 5px;">Mode Filter: ${dayBookModeFilter} Only</span>`
+            : ''
+        }
+      </div>
+    </div>
+    <div style="text-align: right; font-size: 10px; color: #334155; line-height: 1.45;">
+      <div><strong>Selected Campus:</strong> ${activeDayBookBalance.campusLabel}</div>
+      <div><strong>Printed On:</strong> ${new Date().toLocaleString()}</div>
+      <div><strong>Total Entries:</strong> ${combinedDayBookExportRows.length}</div>
+    </div>
+  </div>
+
+  <!-- 4-Box Financial Summary: Opening Balance, Period Flow, Net Cash of Selected Campus, Closing Balance -->
+  <table style="width: 100%; border-collapse: collapse; margin-bottom: 14px; background: #ffffff;">
+    <tbody>
+      <tr>
+        <td style="width: 25%; border: 1.5px solid #475569; padding: 8px 10px; background: #f8fafc; vertical-align: top;">
+          <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #334155;">
+            1. Opening Balance (B/F)
+          </div>
+          <div style="font-size: 9.5px; color: #64748b; margin-bottom: 4px;">
+            As of ${openingAsOfLabel} (${activeDayBookBalance.campusLabel})
+          </div>
+          <div style="font-size: 15px; font-weight: 900; font-family: monospace; color: #0f172a;">
+            ₹${activeDayBookBalance.openingTotal.toLocaleString('en-IN')}
+          </div>
+          <div style="font-size: 10px; color: #1e293b; margin-top: 4px; font-family: monospace;">
+            • Opening Cash: <strong>₹${activeDayBookBalance.openingCash.toLocaleString('en-IN')}</strong><br/>
+            • Opening Online/Bank: <strong>₹${activeDayBookBalance.openingOnline.toLocaleString('en-IN')}</strong>
+          </div>
+        </td>
+
+        <td style="width: 25%; border: 1.5px solid #475569; padding: 8px 10px; background: #ffffff; vertical-align: top;">
+          <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #334155;">
+            2. Day / Period Transactions
+          </div>
+          <div style="font-size: 9.5px; color: #64748b; margin-bottom: 4px;">
+            ${dayBookPeriodDisplay}
+          </div>
+          <div style="font-size: 11px; font-family: monospace; color: #047857; font-weight: 800;">
+            (+) Income: ₹${activeDayBookBalance.periodTotalIn.toLocaleString('en-IN')}
+            <span style="font-weight: 600; font-size: 9.5px; color: #334155;">(Cash: ₹${activeDayBookBalance.periodCashIn.toLocaleString('en-IN')} | UPI/Bank: ₹${activeDayBookBalance.periodOnlineIn.toLocaleString('en-IN')})</span>
+          </div>
+          <div style="font-size: 11px; font-family: monospace; color: #be123c; font-weight: 800; margin-top: 3px;">
+            (-) Expense: ₹${activeDayBookBalance.periodTotalOut.toLocaleString('en-IN')}
+            <span style="font-weight: 600; font-size: 9.5px; color: #334155;">(Cash: ₹${activeDayBookBalance.periodCashOut.toLocaleString('en-IN')} | UPI/Bank: ₹${activeDayBookBalance.periodOnlineOut.toLocaleString('en-IN')})</span>
+          </div>
+          <div style="font-size: 10px; font-family: monospace; color: #0f172a; font-weight: 700; margin-top: 4px; border-top: 1px dashed #cbd5e1; padding-top: 3px;">
+            Period Net Flow: ₹${activeDayBookBalance.periodNetTotal.toLocaleString('en-IN')}
+          </div>
+        </td>
+
+        <td style="width: 25%; border: 1.5px solid #047857; padding: 8px 10px; background: #ecfdf5; vertical-align: top;">
+          <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #065f46;">
+            3. Net Cash (${activeDayBookBalance.campusLabel})
+          </div>
+          <div style="font-size: 9.5px; color: #047857; margin-bottom: 4px;">
+            Closing Cash in Hand as on ${closingAsOfLabel}
+          </div>
+          <div style="font-size: 16px; font-weight: 900; font-family: monospace; color: #065f46;">
+            ₹${activeDayBookBalance.closingCash.toLocaleString('en-IN')}
+          </div>
+          <div style="font-size: 9.5px; color: #064e3b; margin-top: 4px; font-family: monospace;">
+            • Op. Cash: ₹${activeDayBookBalance.openingCash.toLocaleString('en-IN')}<br/>
+            • (+) Cash In: ₹${activeDayBookBalance.periodCashIn.toLocaleString('en-IN')} | (-) Cash Out: ₹${activeDayBookBalance.periodCashOut.toLocaleString('en-IN')}<br/>
+            • Day Net Cash: <strong>₹${activeDayBookBalance.periodNetCash.toLocaleString('en-IN')}</strong>
+          </div>
+        </td>
+
+        <td style="width: 25%; border: 1.5px solid #0f172a; padding: 8px 10px; background: #f1f5f9; vertical-align: top;">
+          <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #0f172a;">
+            4. Closing Balance (C/F)
+          </div>
+          <div style="font-size: 9.5px; color: #475569; margin-bottom: 4px;">
+            As on ${closingAsOfLabel} (${activeDayBookBalance.campusLabel})
+          </div>
+          <div style="font-size: 16px; font-weight: 900; font-family: monospace; color: #0f172a;">
+            ₹${activeDayBookBalance.closingTotal.toLocaleString('en-IN')}
+          </div>
+          <div style="font-size: 10px; color: #0f172a; margin-top: 4px; font-family: monospace;">
+            • Closing Net Cash: <strong>₹${activeDayBookBalance.closingCash.toLocaleString('en-IN')}</strong><br/>
+            • Closing Online/Bank: <strong>₹${activeDayBookBalance.closingOnline.toLocaleString('en-IN')}</strong>
+          </div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  ${campusBreakdownHtml}
+
+  <!-- Transactions Table -->
+  <table style="width: 100%; border-collapse: collapse; font-size: 10.5px; background: #ffffff; color: #0f172a;">
+    <thead>
+      <tr style="background: #f8fafc; border-bottom: 2px solid #0f172a;">
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; width: 32px; text-align: center;">#</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: left;">DATE</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: center;">CAMPUS</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: left;">ENTRY TYPE</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: left;">INVOICE / RECEIPT NO</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: left;">INCOME / EXPENSE HEAD</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: left;">NAME / PARTY</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: center;">MODE (CASH/UPI)</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: right;">INCOME (INR)</th>
+        <th style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: right;">EXPENSE (INR)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- Opening Balance Brought Forward Row -->
+      <tr style="background: #f8fafc; font-weight: 700;">
+        <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: center;">B/F</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px; font-family: monospace;">${dayBookDateFrom || 'OPENING'}</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: center;">${selectedCampus === 'all' ? 'Sr + Jr' : selectedCampus}</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px;">OPENING BAL</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px; font-family: monospace;">OP-BAL-BF</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px;">Opening Balance Brought Forward</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px;">
+          Cash B/F: ₹${activeDayBookBalance.openingCash.toLocaleString('en-IN')} | Online/Bank B/F: ₹${activeDayBookBalance.openingOnline.toLocaleString('en-IN')}
+        </td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: center;">Cash &amp; Online</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-family: monospace;">
+          ₹${activeDayBookBalance.openingTotal.toLocaleString('en-IN')}
+        </td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px; text-align: right; font-family: monospace;">—</td>
+      </tr>
+
+      ${
+        combinedDayBookExportRows.length === 0
+          ? `<tr><td colspan="10" style="border: 1px solid #cbd5e1; padding: 16px; text-align: center; color: #64748b;">No income or expense entries recorded for ${dayBookPeriodDisplay} (${activeDayBookBalance.campusLabel}).</td></tr>`
+          : combinedDayBookExportRows
+              .map(
+                (r, idx) => `
+        <tr>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; text-align: center;">${idx + 1}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; font-family: monospace;">${r.date}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; text-align: center; font-weight: 700;">${r.campus}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; font-weight: 700; color: ${r.type === 'INCOME' ? '#047857' : '#be123c'};">${r.type}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; font-family: monospace; font-weight: 600;">${r.refNo || '—'}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px;">${r.head || '—'}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px;">${r.partyName || '—'}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; text-align: center; font-weight: 700;">${r.mode}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; text-align: right; font-family: monospace; font-weight: 700; color: #047857;">
+            ${r.incomeAmount ? `₹${r.incomeAmount.toLocaleString('en-IN')}` : ''}
+          </td>
+          <td style="border: 1px solid #cbd5e1; padding: 5px 6px; text-align: right; font-family: monospace; font-weight: 700; color: #be123c;">
+            ${r.expenseAmount ? `₹${r.expenseAmount.toLocaleString('en-IN')}` : ''}
+          </td>
+        </tr>
+      `
+              )
+              .join('')
+      }
+    </tbody>
+    <tfoot>
+      <tr style="background: #f8fafc; font-weight: 800; border-top: 2px solid #0f172a;">
+        <td colspan="8" style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right;">
+          DAY / PERIOD TRANSACTION TOTAL (${activeDayBookBalance.campusLabel} • ${dayBookPeriodDisplay}):
+        </td>
+        <td style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: right; font-family: monospace; color: #047857;">
+          ₹${activeDayBookBalance.periodTotalIn.toLocaleString('en-IN')}
+        </td>
+        <td style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: right; font-family: monospace; color: #be123c;">
+          ₹${activeDayBookBalance.periodTotalOut.toLocaleString('en-IN')}
+        </td>
+      </tr>
+      <tr style="background: #ecfdf5; font-weight: 800;">
+        <td colspan="8" style="border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; color: #065f46;">
+          NET CASH IN HAND (${activeDayBookBalance.campusLabel}) [Opening Cash ₹${activeDayBookBalance.openingCash.toLocaleString('en-IN')} + Cash In ₹${activeDayBookBalance.periodCashIn.toLocaleString('en-IN')} - Cash Out ₹${activeDayBookBalance.periodCashOut.toLocaleString('en-IN')}]:
+        </td>
+        <td colspan="2" style="border: 1px solid #94a3b8; padding: 6px 6px; text-align: right; font-family: monospace; font-size: 12px; color: #065f46;">
+          ₹${activeDayBookBalance.closingCash.toLocaleString('en-IN')}
+        </td>
+      </tr>
+      <tr style="background: #f1f5f9; font-weight: 900;">
+        <td colspan="8" style="border: 1px solid #0f172a; padding: 7px 8px; text-align: right; color: #0f172a;">
+          CLOSING BALANCE CARRIED FORWARD (C/F) [Net Cash: ₹${activeDayBookBalance.closingCash.toLocaleString('en-IN')} + Online/Bank: ₹${activeDayBookBalance.closingOnline.toLocaleString('en-IN')}]:
+        </td>
+        <td colspan="2" style="border: 1px solid #0f172a; padding: 7px 6px; text-align: right; font-family: monospace; font-size: 12.5px; color: #0f172a;">
+          ₹${activeDayBookBalance.closingTotal.toLocaleString('en-IN')}
+        </td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <div style="margin-top: 22px; display: flex; justify-content: space-between; align-items: flex-end; font-size: 10.5px; color: #334155; border-top: 1px solid #cbd5e1; padding-top: 12px;">
+    <div>
+      <div>Generated by School Transport Management System • <strong>${schoolName}</strong></div>
+      <div style="margin-top: 2px;">Campus Report: <strong>${activeDayBookBalance.campusLabel}</strong> • ${dayBookPeriodDisplay}</div>
+    </div>
+    <div style="display: flex; gap: 36px; text-align: center;">
+      <div>
+        <div style="border-top: 1px solid #334155; padding-top: 4px; width: 140px; font-weight: 700;">Prepared By (Assistant)</div>
+      </div>
+      <div>
+        <div style="border-top: 1px solid #334155; padding-top: 4px; width: 150px; font-weight: 700;">Checked By (Coordinator)</div>
+      </div>
+      <div>
+        <div style="border-top: 1px solid #334155; padding-top: 4px; width: 150px; font-weight: 700;">Authorized Signatory</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    openHtmlPrintPreview({
+      title: `Day Book Statement — ${activeDayBookBalance.campusLabel}`,
+      subtitle: `${dayBookPeriodDisplay} • Opening: ₹${activeDayBookBalance.openingTotal.toLocaleString('en-IN')} • Net Cash: ₹${activeDayBookBalance.closingCash.toLocaleString('en-IN')} • Closing: ₹${activeDayBookBalance.closingTotal.toLocaleString('en-IN')}`,
+      html,
+      filename: `day_book_${selectedCampus}_${dayBookDateFrom || 'start'}_to_${dayBookDateTo || todayStr}`,
+    });
+  };
 
   // ============================================================================
   // OTHER INCOME LIST FILTERING (Scoped to Campus)
@@ -1495,8 +2047,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   (dayBookModeFilter !== 'all' ? 1 : 0)
                 }
                 onReset={() => {
-                  setDayBookDateFrom('');
-                  setDayBookDateTo('');
+                  handleSelectAllDayBookDates();
                   setDayBookModeFilter('all');
                 }}
               >
@@ -1515,6 +2066,17 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     <option value="Bank">Bank Only</option>
                   </select>
                 </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                    Specific Date / Back Date
+                  </label>
+                  <input
+                    type="date"
+                    value={dayBookSingleDate}
+                    onChange={(e) => handleSelectSingleDayBookDate(e.target.value)}
+                    className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-slate-50 font-mono"
+                  />
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
@@ -1523,7 +2085,10 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     <input
                       type="date"
                       value={dayBookDateFrom}
-                      onChange={(e) => setDayBookDateFrom(e.target.value)}
+                      onChange={(e) => {
+                        setDayBookDateMode('date_range');
+                        setDayBookDateFrom(e.target.value);
+                      }}
                       className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-slate-50 font-mono"
                     />
                   </div>
@@ -1534,7 +2099,10 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     <input
                       type="date"
                       value={dayBookDateTo}
-                      onChange={(e) => setDayBookDateTo(e.target.value)}
+                      onChange={(e) => {
+                        setDayBookDateMode('date_range');
+                        setDayBookDateTo(e.target.value);
+                      }}
                       className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-slate-50 font-mono"
                     />
                   </div>
@@ -1542,26 +2110,33 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                 <div className="pt-1 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => {
-                      setDayBookDateFrom(todayStr);
-                      setDayBookDateTo(todayStr);
-                    }}
+                    onClick={() => handleSelectSingleDayBookDate(todayStr)}
                     className="flex-1 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-bold cursor-pointer"
                   >
                     Today Only
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSelectYesterdayDayBook}
+                    className="flex-1 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-lg text-xs font-bold cursor-pointer"
+                  >
+                    Yesterday
                   </button>
                 </div>
               </FilterPopover>
 
               <PrintExportToolbar
-                title={`Day Book Statement (${dayBookDateFrom || 'Start'} to ${dayBookDateTo || 'Today'})`}
-                filename="transport_day_book"
+                title={`Day Book Statement — ${activeDayBookBalance.campusLabel} (${dayBookPeriodDisplay})`}
+                filename={`transport_day_book_${selectedCampus}_${dayBookDateFrom || 'start'}_to_${dayBookDateTo || todayStr}`}
                 schoolName={schoolName}
+                onPrint={handlePrintDayBookReport}
                 filteredData={combinedDayBookExportRows}
                 allData={combinedDayBookExportRows}
                 hasActiveFilters={Boolean(dayBookDateFrom || dayBookDateTo || dayBookModeFilter !== 'all')}
+                filterSummary={`Campus: ${activeDayBookBalance.campusLabel} • ${dayBookPeriodDisplay}`}
                 columns={[
                   { header: 'Date', accessor: (r) => r.date },
+                  { header: 'Campus', accessor: (r) => r.campus },
                   { header: 'Entry Type', accessor: (r) => r.type },
                   { header: 'Invoice / Receipt No', accessor: (r) => r.refNo },
                   { header: 'Income / Expense Head', accessor: (r) => r.head },
@@ -1898,10 +2473,238 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
       </div>
 
       {/* =====================================================================
-          TAB 1: DAY BOOK (Side-by-Side Income & Expenses + Profit Summary)
+          TAB 1: DAY BOOK (Date / Back-Date Selector + Opening/Closing Balance + Side-by-Side Income & Expenses)
          ===================================================================== */}
       {activeTab === 'day_book' && (
         <div className="space-y-5">
+          {/* Prominent Date / Back-Date Selection & Print Day Book Bar */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-3 print:hidden">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+              {/* Left: Date / Back-Date Mode & Picker */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 text-amber-400 text-xs font-bold">
+                  <Calendar className="w-3.5 h-3.5" />
+                  <span>Select Date / Back Date:</span>
+                </div>
+
+                {/* Mode Buttons */}
+                <div className="inline-flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectSingleDayBookDate(dayBookSingleDate || todayStr)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      dayBookDateMode === 'single_date'
+                        ? 'bg-slate-900 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Specific / Back Date
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDayBookDateMode('date_range');
+                      if (!dayBookDateFrom) setDayBookDateFrom(todayStr);
+                      if (!dayBookDateTo) setDayBookDateTo(todayStr);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      dayBookDateMode === 'date_range'
+                        ? 'bg-slate-900 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Date Range (From – To)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSelectAllDayBookDates}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      dayBookDateMode === 'all_dates'
+                        ? 'bg-slate-900 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    All Dates (Start to Today)
+                  </button>
+                </div>
+
+                {/* Single / Back-Date Picker Controls (Always accessible for 1-click back-date selection) */}
+                {dayBookDateMode !== 'date_range' ? (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleShiftDayBookDate(-1)}
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold cursor-pointer"
+                      title="Previous Day (Back Date)"
+                    >
+                      ◀ Prev Day
+                    </button>
+                    <input
+                      type="date"
+                      value={dayBookDateMode === 'single_date' ? dayBookSingleDate : ''}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          handleSelectSingleDayBookDate(e.target.value);
+                        } else {
+                          handleSelectAllDayBookDates();
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-xl border-2 border-indigo-300 bg-indigo-50/40 text-slate-900 text-xs font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      title="Pick any date or back date to view & print Day Book"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleShiftDayBookDate(1)}
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold cursor-pointer"
+                      title="Next Day"
+                    >
+                      Next Day ▶
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectSingleDayBookDate(todayStr)}
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
+                        dayBookDateMode === 'single_date' && dayBookSingleDate === todayStr
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white hover:bg-slate-50 text-indigo-700 border-indigo-200'
+                      }`}
+                    >
+                      Today ({todayStr})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSelectYesterdayDayBook}
+                      className="px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-bold cursor-pointer"
+                    >
+                      Yesterday
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-bold text-slate-500 uppercase">From:</span>
+                      <input
+                        type="date"
+                        value={dayBookDateFrom}
+                        onChange={(e) => setDayBookDateFrom(e.target.value)}
+                        className="px-2.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 text-xs font-mono font-bold text-slate-900"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-bold text-slate-500 uppercase">To:</span>
+                      <input
+                        type="date"
+                        value={dayBookDateTo}
+                        onChange={(e) => setDayBookDateTo(e.target.value)}
+                        className="px-2.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 text-xs font-mono font-bold text-slate-900"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Right: Mode Selector & Direct Print Day Book Button */}
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={dayBookModeFilter}
+                  onChange={(e) => setDayBookModeFilter(e.target.value as any)}
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-slate-50 font-bold text-slate-700"
+                >
+                  <option value="all">All Modes (Cash + UPI/Bank)</option>
+                  <option value="Cash">Cash Only</option>
+                  <option value="UPI">UPI Only</option>
+                  <option value="Bank">Bank Only</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={handlePrintDayBookReport}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-amber-400 font-extrabold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print Day Book (With Opening &amp; Closing Balance)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Opening Balance, Day/Period Flow, Net Cash of Selected Campus, and Closing Balance Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-extrabold uppercase text-slate-600">
+                    1. Opening Balance (B/F)
+                  </span>
+                  <span className="text-[10px] font-mono font-semibold text-slate-500">
+                    {dayBookDateFrom ? `Before ${dayBookDateFrom}` : 'Session Start'}
+                  </span>
+                </div>
+                <div className="text-lg font-extrabold font-mono text-slate-900 mt-1">
+                  ₹{activeDayBookBalance.openingTotal.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[10px] text-slate-600 font-mono mt-0.5">
+                  Op. Cash: <strong>₹{activeDayBookBalance.openingCash.toLocaleString('en-IN')}</strong> • Online:{' '}
+                  <strong>₹{activeDayBookBalance.openingOnline.toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-indigo-50/50 border border-indigo-200">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-extrabold uppercase text-indigo-900">
+                    2. Selected Date / Period Flow
+                  </span>
+                  <span className="text-[10px] font-mono font-semibold text-indigo-700">
+                    {dayBookPeriodDisplay}
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between mt-1 font-mono text-xs">
+                  <span className="font-extrabold text-emerald-700">
+                    +₹{activeDayBookBalance.periodTotalIn.toLocaleString('en-IN')} In
+                  </span>
+                  <span className="font-extrabold text-rose-600">
+                    -₹{activeDayBookBalance.periodTotalOut.toLocaleString('en-IN')} Out
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-600 font-mono mt-1">
+                  Cash In: ₹{activeDayBookBalance.periodCashIn.toLocaleString('en-IN')} • Cash Out: ₹{activeDayBookBalance.periodCashOut.toLocaleString('en-IN')}
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-emerald-50/80 border border-emerald-300">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-extrabold uppercase text-emerald-900">
+                    3. Net Cash ({selectedCampus === 'all' ? 'All Campuses' : `${selectedCampus} Campus`})
+                  </span>
+                  <span className="text-[10px] font-mono font-bold text-emerald-800">
+                    Cash in Hand
+                  </span>
+                </div>
+                <div className="text-lg font-extrabold font-mono text-emerald-800 mt-1">
+                  ₹{activeDayBookBalance.closingCash.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[10px] text-emerald-900 font-mono mt-0.5">
+                  Op. Cash ₹{activeDayBookBalance.openingCash.toLocaleString('en-IN')} + Day Net Cash ₹{activeDayBookBalance.periodNetCash.toLocaleString('en-IN')}
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-900 text-white border border-slate-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-extrabold uppercase text-amber-400">
+                    4. Closing Balance (C/F)
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-300">
+                    As on {dayBookDateTo || todayStr}
+                  </span>
+                </div>
+                <div className="text-lg font-extrabold font-mono text-white mt-1">
+                  ₹{activeDayBookBalance.closingTotal.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[10px] text-slate-300 font-mono mt-0.5">
+                  Cash: <strong>₹{activeDayBookBalance.closingCash.toLocaleString('en-IN')}</strong> • Online:{' '}
+                  <strong>₹{activeDayBookBalance.closingOnline.toLocaleString('en-IN')}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* Side-by-Side Income & Expenses Tables (matching image_f789c2c6.png) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -1909,9 +2712,11 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-emerald-50/70 border-b border-emerald-200 flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-emerald-950">Income</h3>
+                  <h3 className="text-sm font-bold text-emerald-950">
+                    Income — {activeDayBookBalance.campusLabel}
+                  </h3>
                   <span className="text-[10px] text-emerald-700">
-                    Automated Fee Receipts + Other Income ({filteredDayBookIncomes.length} entries)
+                    {dayBookPeriodDisplay} • Automated Fee Receipts + Other Income ({filteredDayBookIncomes.length} entries)
                   </span>
                 </div>
                 <span className="font-mono font-bold text-sm text-emerald-800">
@@ -1936,7 +2741,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     {filteredDayBookIncomes.length === 0 ? (
                       <tr>
                         <td colSpan={isAdmin ? 7 : 6} className="py-8 text-center text-slate-400">
-                          No income entries for selected criteria.
+                          No income entries for selected date / criteria.
                         </td>
                       </tr>
                     ) : (
@@ -1996,9 +2801,11 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-rose-50/70 border-b border-rose-200 flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-rose-950">Expenses</h3>
+                  <h3 className="text-sm font-bold text-rose-950">
+                    Expenses — {activeDayBookBalance.campusLabel}
+                  </h3>
                   <span className="text-[10px] text-rose-700">
-                    All Transport &amp; Operational Expenses ({filteredDayBookExpenses.length} entries)
+                    {dayBookPeriodDisplay} • All Transport &amp; Operational Expenses ({filteredDayBookExpenses.length} entries)
                   </span>
                 </div>
                 <span className="font-mono font-bold text-sm text-rose-800">
@@ -2023,13 +2830,13 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     {filteredDayBookExpenses.length === 0 ? (
                       <tr>
                         <td colSpan={isAdmin && onDeleteExpense ? 7 : 6} className="py-8 text-center text-slate-400">
-                          No expense entries for selected criteria.
+                          No expense entries for selected date / criteria.
                         </td>
                       </tr>
                     ) : (
                       filteredDayBookExpenses.map((exp) => (
                         <tr key={exp.id} className="hover:bg-slate-50/80">
-                          <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap">{exp.date}</td>
+                          <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap">{normalizeEntryDate(exp.date)}</td>
                           <td className="py-2.5 px-2.5 font-mono font-bold text-slate-800">
                             <div>{exp.billNumber || exp.expenseNo}</div>
                             {exp.billPhoto && (
@@ -2077,11 +2884,23 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             </div>
           </div>
 
-          {/* Bottom Day Book Summary Bar (matching image_27ef554a.png) */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Bottom Day Book Summary Bar (Opening, Period Income, Period Expense, Net Cash & Closing Balance) */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-white p-4 rounded-2xl border-2 border-slate-200 shadow-2xs flex items-center justify-between">
+              <div>
+                <span className="text-xs font-bold uppercase text-slate-500 block">Opening Balance (B/F)</span>
+                <span className="text-[11px] text-slate-500 mt-0.5 block">
+                  Cash: ₹{activeDayBookBalance.openingCash.toLocaleString('en-IN')} | Online: ₹{activeDayBookBalance.openingOnline.toLocaleString('en-IN')}
+                </span>
+              </div>
+              <div className="text-xl font-bold font-mono text-slate-800">
+                ₹{activeDayBookBalance.openingTotal.toLocaleString('en-IN')}
+              </div>
+            </div>
+
             <div className="bg-white p-4 rounded-2xl border-2 border-emerald-200 shadow-2xs flex items-center justify-between">
               <div>
-                <span className="text-xs font-bold uppercase text-slate-500 block">Total Income</span>
+                <span className="text-xs font-bold uppercase text-slate-500 block">Period Income (+)</span>
                 <span className="text-[11px] text-slate-500 mt-0.5 block">
                   Cash: ₹{totalDayBookIncomeCash.toLocaleString('en-IN')} | UPI/Bank: ₹{totalDayBookIncomeDigital.toLocaleString('en-IN')}
                 </span>
@@ -2093,7 +2912,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
             <div className="bg-white p-4 rounded-2xl border-2 border-rose-200 shadow-2xs flex items-center justify-between">
               <div>
-                <span className="text-xs font-bold uppercase text-slate-500 block">Total Expense</span>
+                <span className="text-xs font-bold uppercase text-slate-500 block">Period Expense (-)</span>
                 <span className="text-[11px] text-slate-500 mt-0.5 block">
                   Cash: ₹{totalDayBookExpenseCash.toLocaleString('en-IN')} | UPI/Bank: ₹{totalDayBookExpenseDigital.toLocaleString('en-IN')}
                 </span>
@@ -2104,18 +2923,23 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             </div>
 
             <div className={`p-4 rounded-2xl border-2 shadow-2xs flex items-center justify-between ${
-              netDayBookProfit >= 0
+              activeDayBookBalance.closingTotal >= 0
                 ? 'bg-slate-900 border-slate-800 text-white'
                 : 'bg-rose-950 border-rose-800 text-white'
             }`}>
               <div>
-                <span className="text-xs font-bold uppercase text-amber-400 block">Total Profit / Net Balance</span>
-                <span className="text-[11px] text-slate-300 mt-0.5 block">
-                  Net Cash in Hand: ₹{(totalDayBookIncomeCash - totalDayBookExpenseCash).toLocaleString('en-IN')}
+                <span className="text-xs font-bold uppercase text-amber-400 block">
+                  Closing Balance ({selectedCampus === 'all' ? 'All' : selectedCampus})
+                </span>
+                <span className="text-[11px] text-emerald-300 font-semibold mt-0.5 block">
+                  Net Cash in Hand: ₹{activeDayBookBalance.closingCash.toLocaleString('en-IN')}
+                </span>
+                <span className="text-[10px] text-slate-300 block">
+                  Closing Online/Bank: ₹{activeDayBookBalance.closingOnline.toLocaleString('en-IN')}
                 </span>
               </div>
               <div className="text-xl font-bold font-mono text-white">
-                ₹{netDayBookProfit.toLocaleString('en-IN')}
+                ₹{activeDayBookBalance.closingTotal.toLocaleString('en-IN')}
               </div>
             </div>
           </div>

@@ -1302,17 +1302,21 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const [callExpectedReturnDateInput, setCallExpectedReturnDateInput] = useState<string>('');
   const [callExpectedReturnReasonInput, setCallExpectedReturnReasonInput] = useState<string>('');
   const [isSavingCall, setIsSavingCall] = useState<boolean>(false);
+  const [callSaveError, setCallSaveError] = useState<string | null>(null);
+  const [directCallStudentId, setDirectCallStudentId] = useState<string>('');
 
   // Compute consecutive days absent and daily absentee status for all active members
   const enrichedAbsenteeItems = React.useMemo(() => {
-    const activeMembers = students.filter((s) => s.transportStatus === 'Active');
+    const activeMembers = students.filter((s) => s.transportStatus !== 'Left');
 
     return activeMembers
       .map((s) => {
         const stuCampus = s.campus || (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
         // Attendance records for this student on absenteeDate
         const dayAttRecs = attendanceRecords.filter(
-          (a) => a.studentId === s.id && a.date === absenteeDate
+          (a) =>
+            (a.studentId === s.id || (s.admissionNo && a.admissionNo === s.admissionNo)) &&
+            a.date === absenteeDate
         );
         const isMarkedAbsentToday = dayAttRecs.some(
           (a) =>
@@ -1330,15 +1334,21 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         );
 
         const existingCallToday = absenteeCalls.find(
-          (c) => c.studentId === s.id && c.date === absenteeDate
+          (c) =>
+            (c.studentId === s.id || (s.admissionNo && c.admissionNo === s.admissionNo)) &&
+            c.date === absenteeDate
         );
         const latestCallAnyDate = [...absenteeCalls]
-          .filter((c) => c.studentId === s.id)
+          .filter((c) => c.studentId === s.id || (s.admissionNo && c.admissionNo === s.admissionNo))
           .sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
 
         // Compute consecutive days absent backwards from absenteeDate
         const stuAllAtt = attendanceRecords
-          .filter((a) => a.studentId === s.id && (a.date || '') <= absenteeDate)
+          .filter(
+            (a) =>
+              (a.studentId === s.id || (s.admissionNo && a.admissionNo === s.admissionNo)) &&
+              (a.date || '') <= absenteeDate
+          )
           .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
         const distinctDates = Array.from(new Set(stuAllAtt.map((a) => a.date).filter(Boolean))) as string[];
@@ -1374,7 +1384,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         // If student has an expected return date or call log, ensure streak reflects it
         const consecutiveDaysAbsent = Math.max(
           streak,
-          existingCallToday?.consecutiveDaysAbsent || 0,
+          existingCallToday?.consecutiveDaysAbsent || existingCallToday?.consecutiveAbsentDays || 0,
           (isMarkedAbsentToday || Boolean(effectiveExpectedReturn)) ? (s.absentDaysCount || 1) : 0
         );
 
@@ -1424,7 +1434,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         // - Marked Absent today, OR
         // - Has an absentee call logged today, OR
         // - Has an active expectedReturnDate (either scheduled return, overdue return, or early arrival today), OR
-        // - Consecutive days absent > 3 and not marked Present today
+        // - Consecutive days absent >= 3 and not marked Present today
         const isRelevantAbsentee =
           (!isMarkedPresentToday &&
             (isMarkedAbsentToday ||
@@ -1450,7 +1460,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           isOverdueOrDueTodayReturn,
           isEarlyArrivalToday,
           isRelevantAbsentee,
-          isCalledToday: Boolean(existingCallToday && existingCallToday.callStatus !== 'Pending'),
+          isCalledToday: Boolean(
+            existingCallToday &&
+              existingCallToday.status !== 'Pending Call' &&
+              existingCallToday.callStatus !== 'Pending'
+          ),
         };
       })
       .filter((item) => item.isRelevantAbsentee);
@@ -1508,13 +1522,10 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   // 2. > 3 Consecutive Days Absent Escalation Queue (Across Both Campuses for Transport Coordinator & Admin; Campus-scoped for Assistant)
   const escalationMoreThan3DaysQueue = React.useMemo(
     () =>
-      enrichedAbsenteeItems
-        .filter((i) => {
-          if (lockedCampus && i.campus.toLowerCase() !== lockedCampus.toLowerCase()) return false;
-          return i.consecutiveDaysAbsent > 3 && !i.isMarkedPresentToday;
-        })
+      filteredAbsenteeItems
+        .filter((i) => i.consecutiveDaysAbsent > 3 && !i.isMarkedPresentToday)
         .sort((a, b) => b.consecutiveDaysAbsent - a.consecutiveDaysAbsent),
-    [enrichedAbsenteeItems, lockedCampus]
+    [filteredAbsenteeItems]
   );
 
   // 3. Scheduled Return / Tentative Date of Arrival List (Informed Leave — Do Not Disturb Until Expected Date)
@@ -1533,6 +1544,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   );
 
   const openAbsenteeCallModal = (item: (typeof enrichedAbsenteeItems)[number]) => {
+    setCallSaveError(null);
     setCallModalTarget({
       student: item.student,
       consecutiveDaysAbsent: item.consecutiveDaysAbsent,
@@ -1550,13 +1562,65 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     setCallExpectedReturnReasonInput(item.expectedReturnReason || '');
   };
 
+  const openDirectStudentCallModal = (studentId: string) => {
+    const existingItem = enrichedAbsenteeItems.find((i) => i.student.id === studentId);
+    if (existingItem) {
+      openAbsenteeCallModal(existingItem);
+      return;
+    }
+    const stu = students.find((s) => s.id === studentId);
+    if (!stu) return;
+    const existingCallToday = absenteeCalls.find(
+      (c) =>
+        (c.studentId === stu.id || (stu.admissionNo && c.admissionNo === stu.admissionNo)) &&
+        c.date === absenteeDate
+    );
+    setCallSaveError(null);
+    setCallModalTarget({
+      student: stu,
+      consecutiveDaysAbsent: Math.max(stu.absentDaysCount || 1, 1),
+      attendanceRemarks: existingCallToday?.attendanceRemarks || '',
+      existingCall: existingCallToday,
+    });
+    setCallStatusInput(
+      existingCallToday?.callStatus && existingCallToday.callStatus !== 'Pending'
+        ? existingCallToday.callStatus
+        : 'Answered - Will Return on Date'
+    );
+    setCallAssistantRemarksInput(existingCallToday?.assistantRemarks || stu.lastAbsentAssistantRemark || '');
+    setCallCoordinatorRemarksInput(existingCallToday?.coordinatorRemarks || stu.lastAbsentCoordinatorRemark || '');
+    setCallExpectedReturnDateInput(existingCallToday?.expectedReturnDate || stu.expectedReturnDate || '');
+    setCallExpectedReturnReasonInput(existingCallToday?.expectedReturnReason || stu.expectedReturnReason || '');
+  };
+
   const handleSaveAbsenteeCallForm = async (e: React.FormEvent, clearExpectedReturn = false) => {
     e.preventDefault();
     if (!callModalTarget || !onSaveAbsenteeCall) return;
     setIsSavingCall(true);
+    setCallSaveError(null);
     try {
       const stu = callModalTarget.student;
       const stuCampus = stu.campus || (stu.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+      const trimmedAsst = callAssistantRemarksInput.trim();
+      const trimmedCoord = callCoordinatorRemarksInput.trim();
+      const isCoordOrAdminCaller =
+        currentRole === 'Transport Coordinator' || currentRole === 'Admin' || isCoordinator || isAdmin;
+
+      // If Transport Coordinator or Admin calls directly and types into either box (or selects callStatus), ensure coordinatorRemarks is saved
+      const effectiveCoordRemarks = isCoordOrAdminCaller
+        ? trimmedCoord || trimmedAsst || `${callStatusInput}${callExpectedReturnReasonInput.trim() ? ` - ${callExpectedReturnReasonInput.trim()}` : ''}`
+        : trimmedCoord;
+      const effectiveAsstRemarks = !isCoordOrAdminCaller
+        ? trimmedAsst || `${callStatusInput}${callExpectedReturnReasonInput.trim() ? ` - ${callExpectedReturnReasonInput.trim()}` : ''}`
+        : trimmedAsst;
+
+      const callerDisplayName =
+        currentRole === 'Transport Coordinator'
+          ? 'Transport Coordinator'
+          : currentRole === 'Transport Assistant'
+          ? `Transport Assistant (${stuCampus})`
+          : 'Transport Admin';
+
       await onSaveAbsenteeCall({
         studentId: stu.id,
         admissionNo: stu.admissionNo,
@@ -1571,16 +1635,15 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         phone: stu.mobile || stu.whatsappNo,
         date: absenteeDate,
         consecutiveDaysAbsent: callModalTarget.consecutiveDaysAbsent,
+        consecutiveAbsentDays: callModalTarget.consecutiveDaysAbsent,
         callStatus: callStatusInput,
         calledByRole: currentRole,
-        calledByName:
-          currentRole === 'Transport Coordinator'
-            ? 'Transport Coordinator'
-            : currentRole === 'Transport Assistant'
-            ? `Transport Assistant (${stuCampus})`
-            : 'Transport Admin',
-        assistantRemarks: callAssistantRemarksInput.trim(),
-        coordinatorRemarks: callCoordinatorRemarksInput.trim(),
+        callerRole: currentRole,
+        calledByName: callerDisplayName,
+        callerName: callerDisplayName,
+        calledBy: callerDisplayName,
+        assistantRemarks: effectiveAsstRemarks,
+        coordinatorRemarks: effectiveCoordRemarks,
         attendanceRemarks: callModalTarget.attendanceRemarks,
         expectedReturnDate: clearExpectedReturn ? '' : callExpectedReturnDateInput,
         expectedReturnReason: clearExpectedReturn ? '' : callExpectedReturnReasonInput.trim(),
@@ -1592,10 +1655,12 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           ? `Cleared Tentative Date of Arrival for ${stu.name} and saved call follow-up.`
           : callExpectedReturnDateInput && callExpectedReturnDateInput > absenteeDate
           ? `Saved follow-up for ${stu.name}. Moved to "Scheduled Return (Tentative Date: ${callExpectedReturnDateInput})" list so parents are not repeatedly called.`
-          : `Saved Absentee Parent Call Follow-up for ${stu.name} (${stu.admissionNo}).`
+          : `Saved Absentee Parent Call & Remarks for ${stu.name} (${stu.admissionNo}).`
       );
       setCallModalTarget(null);
       setTimeout(() => setStatusFeedback(null), 4500);
+    } catch (err: any) {
+      setCallSaveError(err?.message || 'Unable to save absentee calling remarks. Please try again.');
     } finally {
       setIsSavingCall(false);
     }
@@ -4288,6 +4353,61 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             </div>
           </div>
 
+          {/* Direct Call Any Member Bar (Coordinator & Admin can call any member of Both Campuses directly & save remarks) */}
+          <div className="bg-indigo-50/70 rounded-2xl border border-indigo-200 p-3.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                <Phone className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-black text-indigo-950">
+                  Direct Absentee Call &amp; Remarks Entry ({lockedCampus ? `${lockedCampus} Campus` : 'Both Sr & Jr Campuses'})
+                </div>
+                <div className="text-[11px] text-indigo-800">
+                  Transport Coordinator, Admin, or Assistant can directly select any member below to call parents and save calling remarks immediately.
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+              <select
+                value={directCallStudentId}
+                onChange={(e) => setDirectCallStudentId(e.target.value)}
+                className="flex-1 md:w-80 p-2 border border-indigo-300 rounded-xl text-xs font-bold bg-white text-slate-900"
+              >
+                <option value="">-- Select Member to Call &amp; Enter Remarks --</option>
+                {students
+                  .filter((s) => {
+                    if (s.transportStatus === 'Left') return false;
+                    const stuCamp = s.campus || (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+                    if (lockedCampus && stuCamp.toLowerCase() !== lockedCampus.toLowerCase()) return false;
+                    if (absenteeCampusFilter !== 'all' && stuCamp.toLowerCase() !== absenteeCampusFilter.toLowerCase()) return false;
+                    return true;
+                  })
+                  .map((s) => {
+                    const stuCamp = s.campus || (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+                    return (
+                      <option key={s.id} value={s.id}>
+                        [{stuCamp}] {s.name} ({s.admissionNo}) — {s.routeCode} • {s.mobile}
+                      </option>
+                    );
+                  })}
+              </select>
+              <button
+                type="button"
+                disabled={!directCallStudentId}
+                onClick={() => {
+                  if (directCallStudentId) {
+                    openDirectStudentCallModal(directCallStudentId);
+                  }
+                }}
+                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+              >
+                <Phone className="w-3.5 h-3.5" />
+                <span>Call &amp; Enter Remarks</span>
+              </button>
+            </div>
+          </div>
+
           {/* Early Arrivals Confirmation Banner (if any student with a future Tentative Date of Arrival was marked Present today) */}
           {earlyArrivalsTodayList.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 space-y-2.5">
@@ -4590,6 +4710,10 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                               <div className="text-[11px] text-emerald-900 bg-emerald-50/80 border border-emerald-200 px-2 py-1 rounded-lg">
                                 <span className="font-bold">Assistant:</span> {item.assistantRemarks}
                               </div>
+                            ) : item.coordinatorRemarks ? (
+                              <span className="inline-block px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-bold">
+                                Direct Call by Coordinator
+                              </span>
                             ) : (
                               <span className="text-slate-400 text-[11px]">
                                 No assistant remark yet
@@ -4753,7 +4877,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Transport Assistant Remarks
+                    Transport Assistant / Parent Call Remarks
                   </label>
                   <textarea
                     rows={3}
@@ -4766,20 +4890,52 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-bold text-indigo-900 mb-1">
-                    Transport Coordinator Remarks{' '}
+                    Transport Coordinator Direct Call / Follow-up Remarks{' '}
+                    {(currentRole === 'Transport Coordinator' || isCoordinator) && (
+                      <span className="text-indigo-600 font-black">(Direct Coordinator Entry)</span>
+                    )}
                     {callModalTarget.consecutiveDaysAbsent > 3 && (
-                      <span className="text-rose-600 font-black">(* &gt;3 Days Absent)</span>
+                      <span className="text-rose-600 font-black"> (* &gt;3 Days Absent)</span>
                     )}
                   </label>
                   <textarea
                     rows={3}
                     value={callCoordinatorRemarksInput}
                     onChange={(e) => setCallCoordinatorRemarksInput(e.target.value)}
-                    placeholder="Coordinator verification remarks (especially for >3 consecutive days absent)..."
-                    className="w-full p-2.5 border border-indigo-200 rounded-xl text-xs font-medium bg-indigo-50/40 text-slate-900"
+                    placeholder="Coordinator can directly call absentees of both campuses and enter calling remarks here..."
+                    className="w-full p-2.5 border border-indigo-300 rounded-xl text-xs font-medium bg-indigo-50/40 text-slate-900 focus:ring-2 focus:ring-indigo-500"
                   />
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    {[
+                      'Called parent directly — Coming tomorrow',
+                      'Called parent directly — Medical / Fever leave',
+                      'Called parent directly — Out of station',
+                      'Called parent — Phone not answered',
+                    ].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          if (currentRole === 'Transport Coordinator' || isCoordinator || isAdmin) {
+                            setCallCoordinatorRemarksInput(preset);
+                          } else {
+                            setCallAssistantRemarksInput(preset);
+                          }
+                        }}
+                        className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded text-[10px] font-bold cursor-pointer"
+                      >
+                        + {preset}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
+
+              {callSaveError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-800 text-xs font-bold">
+                  {callSaveError}
+                </div>
+              )}
 
               {/* Tentative / Expected Date of Arrival Box */}
               <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3.5 space-y-3">

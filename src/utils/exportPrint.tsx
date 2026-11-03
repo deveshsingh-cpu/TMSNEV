@@ -473,6 +473,8 @@ export interface PrintExportToolbarProps<T> {
   allRows?: T[];
   isFiltered?: boolean;
   filterSummary?: string;
+  onPrint?: () => void;
+  onExport?: () => void;
 }
 
 export function PrintExportToolbar<T>({
@@ -485,12 +487,18 @@ export function PrintExportToolbar<T>({
   filteredRows,
   isFiltered,
   filterSummary,
+  onPrint,
+  onExport,
 }: PrintExportToolbarProps<T>) {
   const [exportedDone, setExportedDone] = useState(false);
   const rowsToUse = filteredData ?? filteredRows ?? [];
   const activeFilterFlag = hasActiveFilters ?? isFiltered ?? false;
 
   const handlePrint = () => {
+    if (onPrint) {
+      onPrint();
+      return;
+    }
     const desc = activeFilterFlag && filterSummary ? `Filter Applied: ${filterSummary}` : undefined;
     printTableReport({
       title,
@@ -502,7 +510,11 @@ export function PrintExportToolbar<T>({
   };
 
   const handleExport = () => {
-    exportToCsv(filename, columns, rowsToUse);
+    if (onExport) {
+      onExport();
+    } else {
+      exportToCsv(filename, columns, rowsToUse);
+    }
     setExportedDone(true);
     setTimeout(() => setExportedDone(false), 2200);
   };

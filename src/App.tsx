@@ -717,14 +717,68 @@ export function App() {
   };
 
   // --- Absentee Calls & Complaints/Feedback Handlers ---
-  const handleSaveAbsenteeCall = async (payload: Partial<AbsenteeCallRecord> & { clearExpectedReturn?: boolean }) => {
+  const handleSaveAbsenteeCall = async (
+    payload: Partial<AbsenteeCallRecord> & {
+      callerRole?: UserRole;
+      callerName?: string;
+      clearExpectedReturn?: boolean;
+    }
+  ) => {
+    const resolvedRole = payload.calledByRole || payload.callerRole || activeRole;
+    const resolvedName =
+      payload.calledByName ||
+      payload.callerName ||
+      payload.calledBy ||
+      currentUser?.fullName ||
+      resolvedRole;
     const res = await api.saveAbsenteeCall({
       ...payload,
       studentId: payload.studentId || '',
       date: payload.date || new Date().toISOString().split('T')[0],
-      calledBy: payload.calledBy || currentUser?.fullName || activeRole,
-      calledByRole: payload.calledByRole || activeRole,
-    });
+      calledBy: resolvedName,
+      calledByName: resolvedName,
+      callerName: resolvedName,
+      calledByRole: resolvedRole,
+      callerRole: resolvedRole,
+      consecutiveAbsentDays:
+        payload.consecutiveAbsentDays ?? payload.consecutiveDaysAbsent ?? 1,
+      consecutiveDaysAbsent:
+        payload.consecutiveDaysAbsent ?? payload.consecutiveAbsentDays ?? 1,
+    } as any);
+
+    if (res && res.id) {
+      setAbsenteeCalls((prev) => {
+        const idx = prev.findIndex(
+          (c) => c.id === res.id || (c.studentId === res.studentId && c.date === res.date)
+        );
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = res;
+          return copy;
+        }
+        return [res, ...prev];
+      });
+      setStudents((prev) =>
+        prev.map((s) =>
+          s.id === res.studentId
+            ? {
+                ...s,
+                expectedReturnDate: payload.clearExpectedReturn
+                  ? undefined
+                  : res.expectedReturnDate ?? s.expectedReturnDate,
+                expectedReturnReason: payload.clearExpectedReturn
+                  ? undefined
+                  : res.expectedReturnReason ?? s.expectedReturnReason,
+                lastAbsentAssistantRemark:
+                  res.assistantRemarks || s.lastAbsentAssistantRemark,
+                lastAbsentCoordinatorRemark:
+                  res.coordinatorRemarks || s.lastAbsentCoordinatorRemark,
+              }
+            : s
+        )
+      );
+    }
+
     await loadAllData();
     return res;
   };
@@ -1132,12 +1186,32 @@ export function App() {
 
   const handleRecordReceipt = async (data: any) => {
     const res = await api.recordReceipt(data);
+    if (res && res.id) {
+      setReceipts((prev) => (prev.some((r) => r.id === res.id) ? prev : [res, ...prev]));
+      if (res.studentId && res.balanceDueAfter !== undefined) {
+        setStudents((prev) =>
+          prev.map((s) =>
+            s.id === res.studentId ? { ...s, balanceDue: Number(res.balanceDueAfter) } : s
+          )
+        );
+      }
+    }
     await loadAllData();
     return res;
   };
 
   const handleDeleteReceipt = async (receiptId: string) => {
+    // Optimistically remove receipt from UI list immediately so screen refreshes without delay
+    setReceipts((prev) => prev.filter((r) => r.id !== receiptId && r.receiptNo !== receiptId));
     const res = await api.deleteReceipt(receiptId);
+    setReceipts((prev) => prev.filter((r) => r.id !== receiptId && r.receiptNo !== receiptId));
+    if (res && res.studentId && res.updatedBalanceDue !== undefined) {
+      setStudents((prev) =>
+        prev.map((s) =>
+          s.id === res.studentId ? { ...s, balanceDue: Number(res.updatedBalanceDue) } : s
+        )
+      );
+    }
     await loadAllData();
     return res;
   };
@@ -1618,6 +1692,7 @@ export function App() {
                   onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
                   onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
                   onResolveComplaint={handleResolveComplaint}
+                  onSaveAbsenteeCall={handleSaveAbsenteeCall}
                 />
               )}
 

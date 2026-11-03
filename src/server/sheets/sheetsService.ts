@@ -588,6 +588,40 @@ export class SheetsDatabaseManager {
                 // fallback to columns
               }
             }
+            // Also check dedicated overflow-safe rows in School_Masters
+            const absenteeCallsRow = schoolMastersRows.find(
+              r => Array.isArray(r) && String(r[0] || '').trim() === 'AbsenteeCalls_JSON'
+            );
+            if (absenteeCallsRow && typeof absenteeCallsRow[1] === 'string' && absenteeCallsRow[1].trim().startsWith('[')) {
+              try {
+                const parsedCalls = JSON.parse(absenteeCallsRow[1]);
+                if (Array.isArray(parsedCalls)) this.absenteeCalls = parsedCalls;
+              } catch {
+                // ignore malformed JSON
+              }
+            }
+            const complaintsRow = schoolMastersRows.find(
+              r => Array.isArray(r) && String(r[0] || '').trim() === 'Complaints_JSON'
+            );
+            if (complaintsRow && typeof complaintsRow[1] === 'string' && complaintsRow[1].trim().startsWith('[')) {
+              try {
+                const parsedComplaints = JSON.parse(complaintsRow[1]);
+                if (Array.isArray(parsedComplaints)) this.complaints = parsedComplaints;
+              } catch {
+                // ignore malformed JSON
+              }
+            }
+            const memberReqsRow = schoolMastersRows.find(
+              r => Array.isArray(r) && String(r[0] || '').trim() === 'MemberRequests_JSON'
+            );
+            if (memberReqsRow && typeof memberReqsRow[1] === 'string' && memberReqsRow[1].trim().startsWith('[')) {
+              try {
+                const parsedReqs = JSON.parse(memberReqsRow[1]);
+                if (Array.isArray(parsedReqs)) this.memberRequests = parsedReqs;
+              } catch {
+                // ignore malformed JSON
+              }
+            }
             if (!parsedJsonOk) {
               const classesRow = schoolMastersRows.find(r => Array.isArray(r) && String(r[0] || '').trim() === 'Classes');
               if (classesRow && classesRow.length > 1) {
@@ -782,11 +816,11 @@ export class SheetsDatabaseManager {
         const recentlyWroteLocally =
           this.pendingRemoteSync ||
           this.isFlushingRemoteSync ||
-          (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 60000);
+          (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 180000);
         if (
           this.isGoogleConfigured &&
           (!this.hasHydratedFromSheets ||
-            (Boolean(process.env.VERCEL) && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 5000))
+            (Boolean(process.env.VERCEL) && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 45000))
         ) {
           await this.hydrateFromGoogleSheets(true);
         }
@@ -1057,7 +1091,10 @@ export class SheetsDatabaseManager {
     });
   }
 
-  private async internalSyncToGoogleSheets(waitForRemote = false): Promise<{ success: boolean; message: string }> {
+  private async internalSyncToGoogleSheets(
+    waitForRemote = false,
+    onlyTabs?: string[]
+  ): Promise<{ success: boolean; message: string }> {
     this.rebuildScheduledServices();
     this.saveLocalSnapshot();
     const now = Date.now();
@@ -1076,7 +1113,7 @@ export class SheetsDatabaseManager {
       };
     }
 
-    return this.flushToGoogleSheetsRemote();
+    return this.flushToGoogleSheetsRemote(onlyTabs);
   }
 
   private scheduleBackgroundGoogleSheetsFlush() {
@@ -1105,7 +1142,9 @@ export class SheetsDatabaseManager {
     }
   }
 
-  private async flushToGoogleSheetsRemote(): Promise<{ success: boolean; message: string }> {
+  private async flushToGoogleSheetsRemote(
+    onlyTabs?: string[]
+  ): Promise<{ success: boolean; message: string }> {
     if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) {
       return { success: false, message: 'Google Sheets credentials are not configured.' };
     }
@@ -1126,16 +1165,15 @@ export class SheetsDatabaseManager {
               this.config.currentFinancialYear || '2026-2027',
               this.config.timezone || 'Asia/Kolkata',
               stripLargeBase64ForSheetCell({
-                config: this.config,
+                config: { ...this.config, schoolLogoUrl: undefined },
                 campusesMaster: this.campusesMaster,
                 memberTypesMaster: this.memberTypesMaster,
                 classesMaster: this.classesMaster,
                 sectionsMaster: this.sectionsMaster,
                 tripsMaster: this.tripsMaster,
                 designationsMaster: this.designationsMaster,
-                memberRequests: this.memberRequests,
-                absenteeCalls: this.absenteeCalls,
-                complaints: this.complaints,
+                absenteeCalls: this.absenteeCalls.slice(0, 250),
+                complaints: this.complaints.slice(0, 150),
               }),
             ],
             [],
@@ -1146,6 +1184,17 @@ export class SheetsDatabaseManager {
             ['Sections', ...this.sectionsMaster],
             ['Trips', ...this.tripsMaster.map(t => `Trip ${t.tripNumber}: ${t.description}`)],
             ['Designations', ...this.designationsMaster.map(d => d.name)],
+            ['AbsenteeCalls_JSON', stripLargeBase64ForSheetCell(this.absenteeCalls.slice(0, 500))],
+            ['Complaints_JSON', stripLargeBase64ForSheetCell(this.complaints.slice(0, 300))],
+            [
+              'MemberRequests_JSON',
+              stripLargeBase64ForSheetCell(
+                this.memberRequests.slice(0, 200).map(r => ({
+                  ...r,
+                  memberPayload: r.memberPayload ? { ...r.memberPayload, profilePhoto: '' } : undefined,
+                }))
+              ),
+            ],
           ],
         },
         {
@@ -1736,8 +1785,13 @@ export class SheetsDatabaseManager {
         },
       ];
 
+      const targetPayload =
+        onlyTabs && onlyTabs.length > 0
+          ? dataPayload.filter(entry => onlyTabs.includes(entry.range.split('!')[0]))
+          : dataPayload;
+
       // 1. Write all current rows first with RAW valueInputOption (so +91 phone numbers never become #ERROR! formulas)
-      const trailingClearRanges = dataPayload.map(entry => {
+      const trailingClearRanges = targetPayload.map(entry => {
         const tabName = entry.range.split('!')[0];
         const writtenRows = Array.isArray(entry.values) ? entry.values.length : 1;
         return `${tabName}!A${writtenRows + 1}:Z2000`;
@@ -1753,7 +1807,7 @@ export class SheetsDatabaseManager {
             spreadsheetId: this.sheetId,
             requestBody: {
               valueInputOption: 'RAW',
-              data: dataPayload,
+              data: targetPayload,
             },
           });
 
@@ -3769,8 +3823,163 @@ export class SheetsDatabaseManager {
       if ((Number(st.previousDues) || 0) > 0) {
         this.syncPreviousDuesInvoiceForStudent(st, st.previousDues, st.previousDuesRemarks);
       }
-      const recalculatedDue = this.invoices
-        .filter(inv => inv.studentId === st.id && inv.status !== 'Paid')
+    }
+
+    // 4b. Automatically purge lag-induced duplicate receipts (where user clicked Save repeatedly and advanceLiabilityAmount >= feePortion)
+    if (this.receipts.length > 1) {
+      const chronological = [...this.receipts].reverse();
+      const seenKeys = new Set<string>();
+      const keptChronological: FeeReceipt[] = [];
+      for (const rec of chronological) {
+        const sig = `${rec.studentId}|${rec.date}|${Number(rec.amount) || 0}|${String(rec.feeBreakupDescription || '').trim().toLowerCase()}`;
+        const netPaid = Math.max(0, Number(rec.amount) || 0);
+        const lateFine = Math.max(0, Number(rec.lateFine ?? rec.lateFineAmount) || 0);
+        const feePortion = Math.max(0, netPaid - lateFine);
+        if (seenKeys.has(sig) && feePortion > 0) {
+          changed = true;
+          continue;
+        }
+        seenKeys.add(sig);
+        keptChronological.push(rec);
+      }
+      if (keptChronological.length !== this.receipts.length) {
+        // Ensure unique sequential receipt numbers in chronological order
+        const usedReceiptNos = new Set<string>();
+        for (let i = 0; i < keptChronological.length; i++) {
+          const r = keptChronological[i];
+          const ymPrefix = r.receiptNo && /^REC-\d{4}-/.test(r.receiptNo)
+            ? r.receiptNo.slice(0, 9)
+            : `REC-${String(r.date || '2026-11').slice(2, 7).replace('-', '')}-`;
+          const candidateNo = `${ymPrefix}${(i + 1).toString().padStart(4, '0')}`;
+          if (!r.receiptNo || usedReceiptNos.has(r.receiptNo) || r.receiptNo !== candidateNo) {
+            r.receiptNo = candidateNo;
+            changed = true;
+          }
+          usedReceiptNos.add(r.receiptNo);
+        }
+        this.receipts = keptChronological.reverse();
+      } else {
+        // Still fix any duplicate receiptNo (e.g. two REC-2611-0004)
+        const usedReceiptNos = new Set<string>();
+        for (let i = 0; i < keptChronological.length; i++) {
+          const r = keptChronological[i];
+          if (usedReceiptNos.has(r.receiptNo)) {
+            const ymPrefix = r.receiptNo && /^REC-\d{4}-/.test(r.receiptNo)
+              ? r.receiptNo.slice(0, 9)
+              : `REC-${String(r.date || '2026-11').slice(2, 7).replace('-', '')}-`;
+            r.receiptNo = `${ymPrefix}${(i + 1).toString().padStart(4, '0')}`;
+            changed = true;
+          }
+          usedReceiptNos.add(r.receiptNo);
+        }
+      }
+    }
+
+    // 4c. Deterministically replay each student's receipts against their invoices so student.balanceDue and invoice status never drift across days
+    for (const st of this.students) {
+      const studentInvoices = this.invoices.filter(inv => inv.studentId === st.id);
+      const studentReceiptsChron = this.receipts
+        .filter(
+          r =>
+            r.studentId === st.id ||
+            (st.admissionNo && r.admissionNo === st.admissionNo)
+        )
+        .slice()
+        .reverse();
+
+      if (
+        studentInvoices.length > 0 &&
+        (studentReceiptsChron.length > 0 ||
+          studentInvoices.some(inv => (Number(inv.paidAmount) || 0) > 0 || inv.status === 'Paid'))
+      ) {
+        // Reset student invoices to base state before replaying receipts
+        for (const inv of studentInvoices) {
+          const key = String(inv.idempotencyKey || '').trim();
+          const mStr = String(inv.month || '').trim();
+          const isPrevDues =
+            key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues');
+          const base = Math.max(0, Number(inv.baseFee) || 0);
+          const stdConc = isPrevDues
+            ? 0
+            : Math.min(base, Math.max(0, Number(st.concessionAmount) || 0));
+          const expectedNet = Math.max(0, base - stdConc);
+          if (
+            inv.concession !== stdConc ||
+            inv.netAmount !== expectedNet ||
+            (studentReceiptsChron.length === 0 &&
+              (inv.paidAmount !== 0 || inv.balanceDue !== expectedNet))
+          ) {
+            changed = true;
+          }
+          inv.concession = stdConc;
+          inv.netAmount = expectedNet;
+          inv.paidAmount = 0;
+          inv.balanceDue = inv.netAmount;
+          inv.status = inv.balanceDue <= 0 ? 'Paid' : 'Unpaid';
+        }
+
+        for (const rec of studentReceiptsChron) {
+          const currentStudentDue = studentInvoices
+            .filter(i => i.status !== 'Paid')
+            .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0);
+          if (rec.balanceDueBefore !== currentStudentDue) {
+            rec.balanceDueBefore = currentStudentDue;
+            changed = true;
+          }
+
+          const recDiscount = Math.max(0, Number(rec.discountAmount) || 0);
+          const recLateFine = Math.max(0, Number(rec.lateFine ?? rec.lateFineAmount) || 0);
+          const recNetPaid = Math.max(0, Number(rec.amount) || 0);
+          let recFeeRemaining = Math.max(0, recNetPaid - recLateFine);
+
+          const desc = String(rec.feeBreakupDescription || '').toLowerCase();
+          const orderedInvoices = [...studentInvoices].sort((a, b) => {
+            const aMentioned = desc.includes(String(a.month || '').toLowerCase()) ? 0 : 1;
+            const bMentioned = desc.includes(String(b.month || '').toLowerCase()) ? 0 : 1;
+            return aMentioned - bMentioned;
+          });
+
+          let discountLeft = recDiscount;
+          for (const inv of orderedInvoices) {
+            if (inv.balanceDue <= 0) continue;
+            if (discountLeft > 0) {
+              const applyDisc = Math.min(discountLeft, inv.balanceDue);
+              inv.concession += applyDisc;
+              inv.netAmount = Math.max(0, inv.baseFee - inv.concession);
+              inv.balanceDue = Math.max(0, inv.netAmount - inv.paidAmount);
+              discountLeft -= applyDisc;
+            }
+            if (recFeeRemaining > 0 && inv.balanceDue > 0) {
+              const pay = Math.min(recFeeRemaining, inv.balanceDue);
+              inv.paidAmount += pay;
+              inv.balanceDue = Math.max(0, inv.balanceDue - pay);
+              recFeeRemaining -= pay;
+            }
+            inv.status =
+              inv.balanceDue <= 0
+                ? 'Paid'
+                : inv.paidAmount > 0
+                ? 'Partially Paid'
+                : 'Unpaid';
+          }
+
+          const afterStudentDue = studentInvoices
+            .filter(i => i.status !== 'Paid')
+            .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0);
+          if (rec.balanceDueAfter !== afterStudentDue) {
+            rec.balanceDueAfter = afterStudentDue;
+            changed = true;
+          }
+          const expectedAdv = Math.max(0, recFeeRemaining);
+          if (Number(rec.advanceLiabilityAmount || 0) !== expectedAdv) {
+            rec.advanceLiabilityAmount = expectedAdv;
+            changed = true;
+          }
+        }
+      }
+
+      const recalculatedDue = studentInvoices
+        .filter(inv => inv.status !== 'Paid')
         .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
       if (Number(st.balanceDue) !== recalculatedDue) {
         st.balanceDue = recalculatedDue;
@@ -3778,7 +3987,44 @@ export class SheetsDatabaseManager {
       }
     }
 
-    // 5. Keep Student Transport Fee Receivables account (acc-103) aligned with total outstanding student balances
+    // 5. Keep Cash in Hand (acc-101), School Bank Account (acc-102), and Student Transport Fee Receivables (acc-103) aligned
+    const cashAcc = this.accounts.find(a => a.id === 'acc-101');
+    const bankAcc = this.accounts.find(a => a.id === 'acc-102');
+    const approvedExpenses = this.expenses.filter(
+      e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected'
+    );
+    if (cashAcc) {
+      const cashReceipts = this.receipts
+        .filter(r => r.paymentMode === 'Cash')
+        .reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      const cashIncomes = this.incomes
+        .filter(i => i.paymentMode === 'Cash')
+        .reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      const cashExp = approvedExpenses
+        .filter(e => e.paymentMode === 'Cash')
+        .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const expectedCash = cashReceipts + cashIncomes - cashExp;
+      if (Number(cashAcc.balance) !== expectedCash) {
+        cashAcc.balance = expectedCash;
+        changed = true;
+      }
+    }
+    if (bankAcc) {
+      const onlineReceipts = this.receipts
+        .filter(r => r.paymentMode !== 'Cash')
+        .reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      const onlineIncomes = this.incomes
+        .filter(i => i.paymentMode !== 'Cash')
+        .reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      const onlineExp = approvedExpenses
+        .filter(e => e.paymentMode !== 'Cash')
+        .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const expectedBank = onlineReceipts + onlineIncomes - onlineExp;
+      if (Number(bankAcc.balance) !== expectedBank) {
+        bankAcc.balance = expectedBank;
+        changed = true;
+      }
+    }
     const receivableAcc = this.accounts.find(a => a.id === 'acc-103' || a.code === '1100');
     if (receivableAcc) {
       const totalOutstanding = this.students.reduce((sum, s) => sum + (Number(s.balanceDue) || 0), 0);
@@ -9746,6 +9992,50 @@ export class SheetsDatabaseManager {
         throw new Error('Payment Mode (Cash / Bank / UPI) is mandatory.');
       }
       const feePortionPaid = Math.max(0, netPaid - lateFineCharged);
+      const receiptDate = data.date || new Date().toISOString().split('T')[0];
+
+      // Idempotency & Duplicate Prevention Guard:
+      // 1. If an identical receipt for this student + amount + breakup was just recorded within the last 45 seconds, return it directly
+      const recentDuplicate = this.receipts.find(r => {
+        if (r.studentId !== student.id) return false;
+        if (Number(r.amount) !== netPaid) return false;
+        if (
+          data.feeBreakupDescription &&
+          String(r.feeBreakupDescription || '').trim() !== String(data.feeBreakupDescription).trim()
+        ) {
+          return false;
+        }
+        const tsMatch = /^rec-(\d+)/.exec(String(r.id || ''));
+        if (tsMatch) {
+          const elapsedMs = Date.now() - Number(tsMatch[1]);
+          if (elapsedMs >= 0 && elapsedMs < 45000) return true;
+        }
+        return false;
+      });
+      if (recentDuplicate) {
+        return recentDuplicate;
+      }
+
+      // 2. If specific invoices were selected and ALL of them are already Paid, prevent creating a duplicate receipt
+      if (data.selectedInvoiceIds && data.selectedInvoiceIds.length > 0) {
+        const selectedInvs = this.invoices.filter(
+          i => data.selectedInvoiceIds!.includes(i.id) && i.studentId === student.id
+        );
+        if (
+          selectedInvs.length > 0 &&
+          selectedInvs.every(i => i.status === 'Paid' || Number(i.balanceDue) <= 0)
+        ) {
+          const matchingExisting = this.receipts.find(
+            r => r.studentId === student.id && Number(r.amount) === netPaid
+          );
+          if (matchingExisting) {
+            return matchingExisting;
+          }
+          throw new Error(
+            'The selected fee month(s) / dues are already marked as Paid for this member. Duplicate receipt prevented.'
+          );
+        }
+      }
 
       // Apply month-specific discounts if provided
       if (data.invoiceDiscounts) {
@@ -9762,16 +10052,42 @@ export class SheetsDatabaseManager {
         }
       }
 
-      const receiptNo = `REC-${new Date().toISOString().slice(2, 7).replace('-', '')}-${(this.receipts.length + 1).toString().padStart(4, '0')}`;
-      const balanceDueBefore = student.balanceDue;
-      student.balanceDue = Math.max(0, student.balanceDue - feePortionPaid - totalDiscount);
-      const balanceDueAfter = student.balanceDue;
+      // Collision-free sequential receipt number
+      const ymPrefix = `REC-${new Date().toISOString().slice(2, 7).replace('-', '')}-`;
+      const maxSeq = this.receipts.reduce((max, r) => {
+        const rNo = String(r.receiptNo || '');
+        if (rNo.startsWith(ymPrefix)) {
+          const num = parseInt(rNo.slice(ymPrefix.length), 10);
+          if (!isNaN(num) && num > max) return num;
+        }
+        return max;
+      }, 0);
+      const receiptNo = `${ymPrefix}${Math.max(this.receipts.length + 1, maxSeq + 1)
+        .toString()
+        .padStart(4, '0')}`;
+
+      const studentAllInvoices = this.invoices.filter(i => i.studentId === student.id);
+      const balanceDueBefore =
+        studentAllInvoices.length > 0
+          ? studentAllInvoices
+              .filter(i => i.status !== 'Paid')
+              .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0)
+          : Number(student.balanceDue) || 0;
 
       // Mark unpaid invoices as Paid/Partially Paid
       let remaining = feePortionPaid;
-      const targetInvoices = data.selectedInvoiceIds && data.selectedInvoiceIds.length > 0
-        ? this.invoices.filter(i => data.selectedInvoiceIds!.includes(i.id) && i.studentId === student.id)
-        : this.invoices.filter(i => i.studentId === student.id && i.status !== 'Paid');
+      const targetInvoices =
+        data.selectedInvoiceIds && data.selectedInvoiceIds.length > 0
+          ? this.invoices.filter(
+              i =>
+                data.selectedInvoiceIds!.includes(i.id) &&
+                i.studentId === student.id &&
+                i.status !== 'Paid' &&
+                Number(i.balanceDue) > 0
+            )
+          : this.invoices.filter(
+              i => i.studentId === student.id && i.status !== 'Paid' && Number(i.balanceDue) > 0
+            );
 
       const paidMonths: string[] = [];
       for (const inv of targetInvoices) {
@@ -9784,7 +10100,14 @@ export class SheetsDatabaseManager {
         paidMonths.push(inv.month);
       }
 
-      const receiptDate = data.date || new Date().toISOString().split('T')[0];
+      if (studentAllInvoices.length > 0) {
+        student.balanceDue = studentAllInvoices
+          .filter(i => i.status !== 'Paid')
+          .reduce((sum, i) => sum + (Number(i.balanceDue) || 0), 0);
+      } else {
+        student.balanceDue = Math.max(0, balanceDueBefore - feePortionPaid - totalDiscount);
+      }
+      const balanceDueAfter = student.balanceDue;
 
       const receipt: FeeReceipt = {
         id: `rec-${Date.now()}`,
@@ -9799,7 +10122,13 @@ export class SheetsDatabaseManager {
         lateFineAmount: lateFineCharged,
         balanceDueBefore,
         balanceDueAfter,
-        feeBreakupDescription: data.feeBreakupDescription || (paidMonths.length > 0 ? `Transport Fee (${paidMonths.join(', ')})${lateFineCharged > 0 ? ` + Late Fine ₹${lateFineCharged}` : ''}` : 'Transport Fee'),
+        feeBreakupDescription:
+          data.feeBreakupDescription ||
+          (paidMonths.length > 0
+            ? `Transport Fee (${paidMonths.join(', ')})${
+                lateFineCharged > 0 ? ` + Late Fine ₹${lateFineCharged}` : ''
+              }`
+            : 'Transport Fee'),
         advanceLiabilityAmount: Math.max(0, remaining),
         paymentMode: data.paymentMode,
         referenceNo: data.referenceNo,
@@ -9814,7 +10143,12 @@ export class SheetsDatabaseManager {
       if (debitAcc) debitAcc.balance += netPaid;
 
       this.receipts.unshift(receipt);
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, [
+        'Fee_Receipts',
+        'Fee_Invoices',
+        'Members_Transport',
+        'Chart_Of_Accounts',
+      ]);
       return receipt;
     });
   }
@@ -9829,7 +10163,16 @@ export class SheetsDatabaseManager {
         r => r.id === targetId || r.receiptNo === targetId
       );
       if (idx === -1) {
-        throw new Error('Fee receipt not found or already deleted.');
+        return {
+          success: true,
+          alreadyDeleted: true,
+          deletedReceiptId: targetId,
+          receiptNo: targetId,
+          studentId: '',
+          studentName: 'Member',
+          revertedAmount: 0,
+          updatedBalanceDue: 0,
+        };
       }
 
       const [deleted] = this.receipts.splice(idx, 1);
@@ -9945,7 +10288,12 @@ export class SheetsDatabaseManager {
       }
 
       this.purgeOctober2026AppliedFeesAndSyncBalances();
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, [
+        'Fee_Receipts',
+        'Fee_Invoices',
+        'Members_Transport',
+        'Chart_Of_Accounts',
+      ]);
       return {
         success: true,
         deletedReceiptId: deleted.id,
@@ -11393,10 +11741,29 @@ export class SheetsDatabaseManager {
   }
 
   public async saveAbsenteeCall(
-    payload: Partial<AbsenteeCallRecord> & { studentId: string; date: string; callerRole?: UserRole; callerName?: string; clearExpectedReturn?: boolean }
+    payload: Partial<AbsenteeCallRecord> & {
+      studentId: string;
+      date: string;
+      callerRole?: UserRole;
+      callerName?: string;
+      clearExpectedReturn?: boolean;
+    }
   ): Promise<AbsenteeCallRecord> {
     return this.enqueueWrite(async () => {
-      const student = this.students.find(s => s.id === payload.studentId);
+      const student =
+        this.students.find(s => s.id === payload.studentId) ||
+        (payload.admissionNo
+          ? this.students.find(
+              s =>
+                s.admissionNo &&
+                s.admissionNo.trim().toLowerCase() === String(payload.admissionNo).trim().toLowerCase()
+            )
+          : undefined) ||
+        (payload.studentName
+          ? this.students.find(
+              s => s.name.trim().toLowerCase() === String(payload.studentName).trim().toLowerCase()
+            )
+          : undefined);
       if (!student) throw new Error('Student member not found.');
 
       const routeObj = this.routes.find(r => r.id === student.routeId || r.code === student.routeCode);
@@ -11414,24 +11781,65 @@ export class SheetsDatabaseManager {
       );
       const existing = existingIdx >= 0 ? this.absenteeCalls[existingIdx] : undefined;
 
+      const effectiveRole: UserRole =
+        payload.callerRole || payload.calledByRole || 'Transport Coordinator';
+      const effectiveCallerName =
+        payload.callerName ||
+        payload.calledByName ||
+        payload.calledBy ||
+        (effectiveRole === 'Transport Coordinator'
+          ? 'Transport Coordinator'
+          : effectiveRole === 'Transport Assistant'
+          ? 'Transport Assistant'
+          : 'Transport Admin');
+
       const isCoordinatorOrAdmin =
-        payload.callerRole === 'Transport Coordinator' ||
-        payload.callerRole === 'Admin' ||
+        effectiveRole === 'Transport Coordinator' ||
+        effectiveRole === 'Admin' ||
+        Boolean(payload.calledByCoordinator) ||
         Boolean(payload.coordinatorRemarks !== undefined && payload.coordinatorRemarks.trim() !== '');
       const isAssistant =
-        payload.callerRole === 'Transport Assistant' ||
+        effectiveRole === 'Transport Assistant' ||
+        Boolean(payload.calledByAssistant) ||
         Boolean(payload.assistantRemarks !== undefined && payload.assistantRemarks.trim() !== '');
 
-      const nextAssistantRemarks =
-        payload.assistantRemarks !== undefined
-          ? payload.assistantRemarks.trim()
+      const effectiveCallStatus: AbsenteeCallRecord['callStatus'] =
+        payload.callStatus && payload.callStatus !== 'Pending'
+          ? payload.callStatus
+          : existing?.callStatus && existing.callStatus !== 'Pending'
+          ? existing.callStatus
+          : 'Answered - Will Return on Date';
+
+      const rawAssistantRemarks =
+        payload.assistantRemarks !== undefined ? payload.assistantRemarks.trim() : undefined;
+      const rawCoordinatorRemarks =
+        payload.coordinatorRemarks !== undefined ? payload.coordinatorRemarks.trim() : undefined;
+
+      let nextAssistantRemarks =
+        rawAssistantRemarks !== undefined && rawAssistantRemarks !== ''
+          ? rawAssistantRemarks
           : existing?.assistantRemarks || student.lastAbsentAssistantRemark || '';
-      const nextCoordinatorRemarks =
-        payload.coordinatorRemarks !== undefined
-          ? payload.coordinatorRemarks.trim()
+
+      let nextCoordinatorRemarks =
+        rawCoordinatorRemarks !== undefined && rawCoordinatorRemarks !== ''
+          ? rawCoordinatorRemarks
           : existing?.coordinatorRemarks || student.lastAbsentCoordinatorRemark || '';
 
-      let nextExpectedReturnDate =
+      // If Transport Coordinator (or Admin) calls directly and typed remarks in the Assistant/Parent box
+      // while leaving Coordinator box empty, or if Coordinator called directly without Assistant calling first:
+      if (isCoordinatorOrAdmin) {
+        if (!nextCoordinatorRemarks && rawAssistantRemarks) {
+          nextCoordinatorRemarks = rawAssistantRemarks;
+        }
+        if (!nextCoordinatorRemarks && effectiveCallStatus) {
+          nextCoordinatorRemarks = `Direct Call (${effectiveCallStatus})`;
+        }
+      }
+      if (isAssistant && !nextAssistantRemarks && effectiveCallStatus) {
+        nextAssistantRemarks = `Parent Call (${effectiveCallStatus})`;
+      }
+
+      const nextExpectedReturnDate =
         payload.clearExpectedReturn
           ? undefined
           : payload.expectedReturnDate !== undefined
@@ -11443,14 +11851,17 @@ export class SheetsDatabaseManager {
           ? undefined
           : payload.expectedReturnReason !== undefined
           ? payload.expectedReturnReason.trim() || undefined
-          : existing?.expectedReturnReason || student.expectedReturnReason || nextAssistantRemarks || nextCoordinatorRemarks;
+          : existing?.expectedReturnReason ||
+            student.expectedReturnReason ||
+            nextCoordinatorRemarks ||
+            nextAssistantRemarks;
 
       // Update student's persistent expectedReturnDate and latest absentee remarks
       student.expectedReturnDate = nextExpectedReturnDate;
       student.expectedReturnReason = nextExpectedReturnReason;
       if (nextExpectedReturnDate) {
         student.expectedReturnSetOn = dateStr;
-        student.expectedReturnSetBy = payload.callerName || payload.callerRole || 'Transport Staff';
+        student.expectedReturnSetBy = effectiveCallerName;
       } else if (payload.clearExpectedReturn) {
         student.expectedReturnSetOn = undefined;
         student.expectedReturnSetBy = undefined;
@@ -11458,11 +11869,22 @@ export class SheetsDatabaseManager {
       if (nextAssistantRemarks) student.lastAbsentAssistantRemark = nextAssistantRemarks;
       if (nextCoordinatorRemarks) student.lastAbsentCoordinatorRemark = nextCoordinatorRemarks;
 
+      const consecutiveDays = Number(
+        payload.consecutiveAbsentDays ??
+          payload.consecutiveDaysAbsent ??
+          existing?.consecutiveAbsentDays ??
+          existing?.consecutiveDaysAbsent ??
+          1
+      );
+
       const computedStatus: AbsenteeCallRecord['status'] = nextExpectedReturnDate
         ? nextExpectedReturnDate <= dateStr
           ? 'Overdue Return'
           : 'Scheduled Return'
-        : nextAssistantRemarks || nextCoordinatorRemarks || payload.calledByAssistant || payload.calledByCoordinator
+        : isCoordinatorOrAdmin ||
+          isAssistant ||
+          Boolean(effectiveCallStatus) ||
+          Boolean(nextAssistantRemarks || nextCoordinatorRemarks)
         ? 'Called'
         : 'Pending Call';
 
@@ -11473,18 +11895,27 @@ export class SheetsDatabaseManager {
         admissionNo: student.admissionNo,
         studentName: student.name,
         classSection: `${student.class}-${student.section}`,
+        className: student.class,
+        section: student.section,
         campus: student.campus || routeObj?.campus || 'Sr',
         routeId: student.routeId || routeObj?.id || '',
         routeCode: student.routeCode || routeObj?.code || '',
         stopName: student.pickupDropStopName || student.villageName || '',
         fatherName: student.fatherName,
+        parentName: student.fatherName,
         phone: payload.phone || student.mobile || student.emergencyContact || '',
-        consecutiveAbsentDays: Number(payload.consecutiveAbsentDays ?? existing?.consecutiveAbsentDays ?? 1),
+        consecutiveAbsentDays: consecutiveDays,
+        consecutiveDaysAbsent: consecutiveDays,
         absentSinceDate: payload.absentSinceDate || existing?.absentSinceDate || dateStr,
         attendanceRemarks: payload.attendanceRemarks ?? existing?.attendanceRemarks ?? '',
+        callStatus: effectiveCallStatus,
+        calledBy: effectiveCallerName,
+        calledByName: effectiveCallerName,
+        calledByRole: effectiveRole,
+        calledAt: nowTimeStr,
         calledByAssistant: isAssistant ? true : existing?.calledByAssistant || Boolean(nextAssistantRemarks),
         assistantName: isAssistant
-          ? payload.callerName || payload.assistantName || 'Transport Assistant'
+          ? effectiveCallerName
           : existing?.assistantName,
         assistantCalledAt: isAssistant ? nowTimeStr : existing?.assistantCalledAt,
         assistantRemarks: nextAssistantRemarks,
@@ -11492,7 +11923,7 @@ export class SheetsDatabaseManager {
           ? true
           : existing?.calledByCoordinator || Boolean(nextCoordinatorRemarks),
         coordinatorName: isCoordinatorOrAdmin
-          ? payload.callerName || payload.coordinatorName || payload.callerRole || 'Transport Coordinator'
+          ? effectiveCallerName
           : existing?.coordinatorName,
         coordinatorCalledAt: isCoordinatorOrAdmin ? nowTimeStr : existing?.coordinatorCalledAt,
         coordinatorRemarks: nextCoordinatorRemarks,

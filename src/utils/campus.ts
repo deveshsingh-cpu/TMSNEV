@@ -55,14 +55,16 @@ export function getStudentCampus(student?: Partial<Student> | null, routes?: Rou
   const fromRouteCode = normalizeCampus(student.routeCode);
   if (fromRouteCode) return fromRouteCode;
 
-  // Check class level fallback (Nursery/LKG/UKG/Class I-V -> Jr, VI-XII -> Sr)
+  // Check class level fallback (Playgroup/Nursery/LKG/UKG/Class I-IV -> Jr, V-XII -> Sr)
   const rawClass = student.class || (student as { className?: string }).className || '';
   const cls = String(rawClass).toUpperCase();
   if (
+    cls.includes('PLAY') ||
     cls.includes('NUR') ||
     cls.includes('LKG') ||
     cls.includes('UKG') ||
-    (/\b(I|II|III|IV|V|1|2|3|4|5)\b/.test(cls) && !/\b(VI|VII|VIII|IX|X|XI|XII)\b/.test(cls))
+    cls.includes('PREP') ||
+    (/\b(I|II|III|IV|1|2|3|4)\b/.test(cls) && !/\b(V|VI|VII|VIII|IX|X|XI|XII|5|6|7|8|9|10|11|12)\b/.test(cls))
   ) {
     return 'Jr';
   }
@@ -532,25 +534,29 @@ export function calculateCampusFinancials(
   const netOnlineBalance = totalInflowOnline - expenseOnline;
   const netTotalBalance = totalInflow - expenseTotal;
 
-  // Calculate total outstanding dues for scoped students
+  // Calculate total outstanding dues for scoped students without double-counting previousDues
+  // Every student's balanceDue is authoritatively synced from their unpaid invoices (both Previous Dues and monthly fee invoices)
   const scopedInvoices = invoices.filter(
-    (inv) => inv && matchesCampusFilter(getInvoiceCampus(inv, students, routes), resolvedFilter)
+    (inv) =>
+      inv &&
+      inv.status !== 'Paid' &&
+      matchesCampusFilter(getInvoiceCampus(inv, students, routes), resolvedFilter)
   );
   const invoicePending = scopedInvoices.reduce(
-    (sum, inv) => sum + (Number(inv.balanceDue ?? inv.balanceAmount ?? 0) || 0),
+    (sum, inv) => sum + Math.max(0, Number(inv.balanceDue ?? inv.balanceAmount ?? 0) || 0),
     0
   );
-  const prevDuesPending = scopedStudents.reduce((sum, s) => sum + (Number(s.previousDues) || 0), 0);
   const studentOutstandingSum = scopedStudents.reduce(
     (sum, s) =>
       sum +
       Math.max(
-        Number(s.balanceDue ?? (s as { outstandingAmount?: number }).outstandingAmount ?? 0) || 0,
-        Number(s.previousDues) || 0
+        0,
+        Number(s.balanceDue ?? (s as { outstandingAmount?: number }).outstandingAmount ?? 0) || 0
       ),
     0
   );
-  const outstandingDues = Math.max(invoicePending + prevDuesPending, studentOutstandingSum);
+  const outstandingDues =
+    scopedStudents.length > 0 ? studentOutstandingSum : invoicePending;
 
   return {
     campus: resolvedFilter,

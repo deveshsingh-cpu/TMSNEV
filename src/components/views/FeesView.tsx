@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   CreditCard, IndianRupee, Printer, CheckCircle,
   AlertTriangle, Phone, FileText,
@@ -98,6 +98,22 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'info' | 'warning'; text: string } | null>(null);
   const [receiptToDelete, setReceiptToDelete] = useState<FeeReceipt | null>(null);
   const [isDeletingReceipt, setIsDeletingReceipt] = useState<boolean>(false);
+  const [isSubmittingReceipt, setIsSubmittingReceipt] = useState<boolean>(false);
+  const submittingReceiptRef = useRef<boolean>(false);
+  const deletingReceiptRef = useRef<boolean>(false);
+  const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
+  const [actionAckModal, setActionAckModal] = useState<{
+    type: 'saved' | 'deleted' | 'error';
+    title: string;
+    receiptNo?: string;
+    memberName?: string;
+    admissionNo?: string;
+    amount?: number;
+    paymentMode?: string;
+    balanceAfter?: number;
+    message: string;
+    receiptObj?: FeeReceipt;
+  } | null>(null);
 
   useEffect(() => {
     if (initialSubTab === 'invoices') setActiveTab('billing');
@@ -151,7 +167,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const scopedInvoices = invoices.filter((inv) =>
     matchesCampusFilter(getInvoiceCampus(inv, students, routes), selectedCampus)
   );
-  const scopedReceipts = receipts.filter((rec) =>
+  const visibleReceipts = receipts.filter(
+    (rec) => !deletedReceiptIds.has(rec.id) && !deletedReceiptIds.has(rec.receiptNo)
+  );
+  const scopedReceipts = visibleReceipts.filter((rec) =>
     matchesCampusFilter(getReceiptCampus(rec, students, routes, invoices), selectedCampus)
   );
   const scopedFollowUps = followUps.filter((f) =>
@@ -167,21 +186,21 @@ export const FeesView: React.FC<FeesViewProps> = ({
     routes,
     vehicles,
     invoices,
-    receipts,
+    receipts: visibleReceipts,
   });
   const srCampusStats = calculateCampusFinancials('Sr', {
     students,
     routes,
     vehicles,
     invoices,
-    receipts,
+    receipts: visibleReceipts,
   });
   const jrCampusStats = calculateCampusFinancials('Jr', {
     students,
     routes,
     vehicles,
     invoices,
-    receipts,
+    receipts: visibleReceipts,
   });
 
   const [selectedMonth, setSelectedMonth] = useState('2026-11');
@@ -321,21 +340,75 @@ export const FeesView: React.FC<FeesViewProps> = ({
   };
 
   const handleConfirmDeleteReceipt = async () => {
-    if (!receiptToDelete || !onDeleteReceipt) return;
+    if (!receiptToDelete || !onDeleteReceipt || deletingReceiptRef.current) return;
+    const target = receiptToDelete;
+    deletingReceiptRef.current = true;
     setIsDeletingReceipt(true);
+
+    // Optimistically hide receipt and close the delete prompt immediately so user is never stuck
+    setDeletedReceiptIds((prev) => {
+      const next = new Set(prev);
+      if (target.id) next.add(target.id);
+      if (target.receiptNo) next.add(target.receiptNo);
+      return next;
+    });
+    setReceiptToDelete(null);
+
     try {
-      await onDeleteReceipt(receiptToDelete.id);
+      const res = await onDeleteReceipt(target.id);
+      const updatedBal =
+        res && res.updatedBalanceDue !== undefined
+          ? Number(res.updatedBalanceDue)
+          : undefined;
+      const msg = `Receipt ${target.receiptNo} (₹${target.amount.toLocaleString('en-IN')}) for ${target.studentName} has been deleted and member pending balance has been updated.`;
       setStatusMessage({
         type: 'success',
-        text: `Receipt ${receiptToDelete.receiptNo} (₹${receiptToDelete.amount.toLocaleString('en-IN')}) for ${receiptToDelete.studentName} deleted and balances updated.`,
+        text: msg,
       });
-      setReceiptToDelete(null);
+      setActionAckModal({
+        type: 'deleted',
+        title: 'Fee Receipt Deleted Successfully',
+        receiptNo: target.receiptNo,
+        memberName: target.studentName,
+        admissionNo: target.admissionNo,
+        amount: target.amount,
+        paymentMode: target.paymentMode,
+        balanceAfter: updatedBal,
+        message: msg,
+      });
     } catch (err: any) {
-      setStatusMessage({
-        type: 'warning',
-        text: err.message || 'Failed to delete fee receipt.',
-      });
+      // Restore visibility only if deletion genuinely failed for a reason other than "already deleted"
+      const errMsg = String(err?.message || 'Failed to delete fee receipt.');
+      if (!errMsg.toLowerCase().includes('already deleted') && !errMsg.toLowerCase().includes('not found')) {
+        setDeletedReceiptIds((prev) => {
+          const next = new Set(prev);
+          next.delete(target.id);
+          next.delete(target.receiptNo);
+          return next;
+        });
+        setStatusMessage({
+          type: 'warning',
+          text: errMsg,
+        });
+        setActionAckModal({
+          type: 'error',
+          title: 'Could Not Delete Receipt',
+          receiptNo: target.receiptNo,
+          memberName: target.studentName,
+          message: errMsg,
+        });
+      } else {
+        setActionAckModal({
+          type: 'deleted',
+          title: 'Fee Receipt Deleted',
+          receiptNo: target.receiptNo,
+          memberName: target.studentName,
+          amount: target.amount,
+          message: `Receipt ${target.receiptNo} was already removed and balances are synced.`,
+        });
+      }
     } finally {
+      deletingReceiptRef.current = false;
       setIsDeletingReceipt(false);
     }
   };
@@ -767,6 +840,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
   const handleReceiptSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingReceiptRef.current || isSubmittingReceipt) {
+      return;
+    }
     if (!selectedMember) {
       setStatusMessage({ type: 'warning', text: 'Please select a member.' });
       return;
@@ -775,6 +851,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
       setStatusMessage({ type: 'warning', text: 'Please select at least one pending month to collect fees.' });
       return;
     }
+
+    submittingReceiptRef.current = true;
+    setIsSubmittingReceipt(true);
 
     const lateFineDesc =
       lateFineApplicable > 0
@@ -785,33 +864,75 @@ export const FeesView: React.FC<FeesViewProps> = ({
     const descriptionStr = `Transport Fee (${selectedRows.map((r) => r.month).join(', ')})${lateFineDesc}`;
 
     const memberCampus = getStudentCampus(selectedMember, routes);
+    const paidAmountSnapshot = totalNetPayable;
+    const memberSnapshot = selectedMember;
+    const modeSnapshot = paymentMode;
 
-    await onRecordReceipt({
-      studentId: selectedMember.id,
-      campus: memberCampus,
-      amount: totalNetPayable,
-      discountAmount: totalSelectedDiscount,
-      lateFineAmount: netLateFine,
-      invoiceDiscounts: isAdmin ? monthDiscounts : {},
-      selectedInvoiceIds: selectedRows.filter((r) => !r.isSynthetic).map((r) => r.id),
-      feeBreakupDescription: descriptionStr,
-      date: isAdmin ? paymentDate : todayStr,
-      paymentMode,
-      referenceNo,
-      upiScreenshot: upiScreenshot || undefined,
-      receivedBy: `${currentRole} (${memberCampus} Campus)`,
-      remarks: remarks || descriptionStr,
-    });
+    try {
+      const createdReceipt = await onRecordReceipt({
+        studentId: selectedMember.id,
+        campus: memberCampus,
+        amount: totalNetPayable,
+        discountAmount: totalSelectedDiscount,
+        lateFineAmount: netLateFine,
+        invoiceDiscounts: isAdmin ? monthDiscounts : {},
+        selectedInvoiceIds: selectedRows.filter((r) => !r.isSynthetic).map((r) => r.id),
+        feeBreakupDescription: descriptionStr,
+        date: isAdmin ? paymentDate : todayStr,
+        paymentMode,
+        referenceNo,
+        upiScreenshot: upiScreenshot || undefined,
+        receivedBy: `${currentRole} (${memberCampus} Campus)`,
+        remarks: remarks || descriptionStr,
+      });
 
-    setIsReceiptModalOpen(false);
-    setReferenceNo('');
-    setRemarks('');
-    setUpiScreenshot('');
-    setUpiScreenshotName('');
-    setStatusMessage({
-      type: 'success',
-      text: `Fee receipt recorded for ${selectedMember.name} (${memberCampus} Campus) — Paid ₹${totalNetPayable.toLocaleString('en-IN')}.`,
-    });
+      setIsReceiptModalOpen(false);
+      setReferenceNo('');
+      setRemarks('');
+      setUpiScreenshot('');
+      setUpiScreenshotName('');
+
+      const savedReceiptNo = createdReceipt?.receiptNo || 'Generated';
+      const updatedBal =
+        createdReceipt?.balanceDueAfter !== undefined
+          ? Number(createdReceipt.balanceDueAfter)
+          : Math.max(0, (Number(memberSnapshot.balanceDue) || 0) - paidAmountSnapshot);
+      const successText = `Fee Receipt ${savedReceiptNo} saved for ${memberSnapshot.name} (${memberCampus} Campus) — Paid ₹${paidAmountSnapshot.toLocaleString('en-IN')}. Remaining Balance: ₹${updatedBal.toLocaleString('en-IN')}.`;
+
+      setStatusMessage({
+        type: 'success',
+        text: successText,
+      });
+      setActionAckModal({
+        type: 'saved',
+        title: 'Fee Receipt Saved Successfully!',
+        receiptNo: savedReceiptNo,
+        memberName: memberSnapshot.name,
+        admissionNo: memberSnapshot.admissionNo,
+        amount: paidAmountSnapshot,
+        paymentMode: modeSnapshot,
+        balanceAfter: updatedBal,
+        message: successText,
+        receiptObj: createdReceipt && createdReceipt.id ? createdReceipt : undefined,
+      });
+    } catch (err: any) {
+      const errMsg = err?.message || 'Failed to save fee receipt.';
+      setStatusMessage({
+        type: 'warning',
+        text: errMsg,
+      });
+      setActionAckModal({
+        type: 'error',
+        title: 'Duplicate / Invalid Fee Entry Prevented',
+        memberName: memberSnapshot.name,
+        admissionNo: memberSnapshot.admissionNo,
+        amount: paidAmountSnapshot,
+        message: errMsg,
+      });
+    } finally {
+      submittingReceiptRef.current = false;
+      setIsSubmittingReceipt(false);
+    }
   };
 
   const handleSaveFollowUpSubmit = async (e: React.FormEvent) => {
@@ -3241,7 +3362,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
                   {/* Existing Receipts for this Selected Member (Allows Admin to inspect & delete duplicate/wrong receipt directly) */}
                   {(() => {
-                    const memberExistingReceipts = receipts.filter(
+                    const memberExistingReceipts = visibleReceipts.filter(
                       (r) =>
                         r.studentId === selectedMember.id ||
                         (selectedMember.admissionNo && r.admissionNo === selectedMember.admissionNo)
@@ -3559,17 +3680,25 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
+                  disabled={isSubmittingReceipt}
                   onClick={() => setIsReceiptModalOpen(false)}
-                  className="px-4 py-2.5 border border-slate-200 rounded-xl font-semibold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2.5 border border-slate-200 rounded-xl font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={selectedRows.length === 0}
-                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold rounded-xl shadow-xs cursor-pointer"
+                  disabled={selectedRows.length === 0 || isSubmittingReceipt}
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-400 text-white font-bold rounded-xl shadow-xs cursor-pointer inline-flex items-center gap-2"
                 >
-                  Save &amp; Print Receipt (₹{totalNetPayable.toLocaleString('en-IN')})
+                  {isSubmittingReceipt ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Saving Receipt... Please wait</span>
+                    </>
+                  ) : (
+                    <span>Save &amp; Print Receipt (₹{totalNetPayable.toLocaleString('en-IN')})</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -4179,7 +4308,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       {/* MODAL: ADMIN CONFIRM DELETE FEE RECEIPT                             */}
       {/* =================================================================== */}
       {receiptToDelete && (
-        <div className="fixed inset-0 z-50 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[60] bg-slate-950/65 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-rose-200 space-y-4 text-xs">
             <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2.5">
@@ -4258,6 +4387,134 @@ export const FeesView: React.FC<FeesViewProps> = ({
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>{isDeletingReceipt ? 'Deleting Receipt...' : 'Yes, Delete Receipt'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {actionAckModal && (
+        <div className="fixed inset-0 z-[70] bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div
+            className={`bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border space-y-4 text-xs ${
+              actionAckModal.type === 'saved'
+                ? 'border-emerald-300'
+                : actionAckModal.type === 'deleted'
+                ? 'border-amber-300'
+                : 'border-rose-300'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
+                    actionAckModal.type === 'saved'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : actionAckModal.type === 'deleted'
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-rose-100 text-rose-700'
+                  }`}
+                >
+                  {actionAckModal.type === 'saved' ? (
+                    <CheckCircle className="w-6 h-6" />
+                  ) : actionAckModal.type === 'deleted' ? (
+                    <Trash2 className="w-6 h-6" />
+                  ) : (
+                    <AlertTriangle className="w-6 h-6" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">{actionAckModal.title}</h3>
+                  <p className="text-[11px] text-slate-500">
+                    {actionAckModal.type === 'saved'
+                      ? 'Fee entry is saved permanently — do not re-enter this payment'
+                      : actionAckModal.type === 'deleted'
+                      ? 'Receipt removed and student balance updated immediately'
+                      : 'Action notice'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActionAckModal(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div
+              className={`rounded-xl p-3.5 space-y-2 border ${
+                actionAckModal.type === 'saved'
+                  ? 'bg-emerald-50/80 border-emerald-200'
+                  : actionAckModal.type === 'deleted'
+                  ? 'bg-amber-50/80 border-amber-200'
+                  : 'bg-rose-50/80 border-rose-200'
+              }`}
+            >
+              {actionAckModal.receiptNo && (
+                <div className="flex justify-between">
+                  <span className="font-semibold text-slate-600">Receipt No:</span>
+                  <span className="font-mono font-black text-slate-900">{actionAckModal.receiptNo}</span>
+                </div>
+              )}
+              {actionAckModal.memberName && (
+                <div className="flex justify-between">
+                  <span className="font-semibold text-slate-600">Member Name:</span>
+                  <span className="font-bold text-slate-900">
+                    {actionAckModal.memberName}
+                    {actionAckModal.admissionNo ? ` (${actionAckModal.admissionNo})` : ''}
+                  </span>
+                </div>
+              )}
+              {actionAckModal.amount !== undefined && (
+                <div className="flex justify-between">
+                  <span className="font-semibold text-slate-600">
+                    {actionAckModal.type === 'deleted' ? 'Reverted Amount:' : 'Amount Received:'}
+                  </span>
+                  <span
+                    className={`font-black text-sm ${
+                      actionAckModal.type === 'deleted' ? 'text-rose-700' : 'text-emerald-700'
+                    }`}
+                  >
+                    ₹{actionAckModal.amount.toLocaleString('en-IN')}
+                    {actionAckModal.paymentMode ? ` (${actionAckModal.paymentMode})` : ''}
+                  </span>
+                </div>
+              )}
+              {actionAckModal.balanceAfter !== undefined && (
+                <div className="flex justify-between border-t border-slate-200/80 pt-1.5">
+                  <span className="font-semibold text-slate-700">Updated Pending Dues:</span>
+                  <span className="font-black text-slate-900 text-sm">
+                    ₹{actionAckModal.balanceAfter.toLocaleString('en-IN')}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <p className="text-slate-700 font-medium leading-relaxed">{actionAckModal.message}</p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              {actionAckModal.type === 'saved' && actionAckModal.receiptObj && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const rec = actionAckModal.receiptObj!;
+                    setActionAckModal(null);
+                    handlePrintSingleReceipt(rec);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Print Receipt</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setActionAckModal(null)}
+                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer shadow-xs"
+              >
+                OK / Done
               </button>
             </div>
           </div>

@@ -103,6 +103,7 @@ interface DashboardViewProps {
     id: string,
     payload: { action: 'Approve' | 'Reject'; remarks?: string; approvedBy?: string }
   ) => Promise<any>;
+  onSaveAbsenteeCall?: (payload: any) => Promise<any>;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -132,6 +133,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onReviewSuspensionRequest,
   onCoordinatorReviewMemberRequest,
   onAdminReviewMemberRequest,
+  onSaveAbsenteeCall,
 }) => {
   const today = new Date().toISOString().split('T')[0];
   const [transitGraphMode, setTransitGraphMode] = useState<'routes' | 'vehicles'>('routes');
@@ -245,11 +247,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         }
       }
 
-      if (consecutiveDays > 3 && !isPresentToday) {
+      if (
+        (needsCallToday || consecutiveDays > 3) &&
+        !isPresentToday
+      ) {
         over3DaysList.push({
           student: s,
           campus: stuCampus,
-          consecutiveDays,
+          consecutiveDays: Math.max(consecutiveDays, 1),
           isCalledToday: isCalled,
           assistantRemarks:
             callToday?.assistantRemarks ||
@@ -280,6 +285,94 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       over3DaysList,
     };
   }, [students, attendanceRecords, absenteeCalls, today]);
+
+  // Direct Absentee Calling Modal State inside Dashboard
+  const [dashCallModalTarget, setDashCallModalTarget] = useState<{
+    student: StudentMember;
+    campus: string;
+    consecutiveDays: number;
+    assistantRemarks: string;
+    coordinatorRemarks: string;
+    expectedReturnDate?: string;
+  } | null>(null);
+  const [dashCallStatus, setDashCallStatus] = useState<AbsenteeCallRecord['callStatus']>(
+    'Answered - Will Return on Date'
+  );
+  const [dashAssistantRemarks, setDashAssistantRemarks] = useState('');
+  const [dashCoordinatorRemarks, setDashCoordinatorRemarks] = useState('');
+  const [dashExpectedReturnDate, setDashExpectedReturnDate] = useState('');
+  const [dashExpectedReturnReason, setDashExpectedReturnReason] = useState('');
+  const [isSavingDashCall, setIsSavingDashCall] = useState(false);
+  const [dashCallFeedback, setDashCallFeedback] = useState<string | null>(null);
+
+  const openDashAbsenteeModal = (item: {
+    student: StudentMember;
+    campus: string;
+    consecutiveDays: number;
+    assistantRemarks: string;
+    coordinatorRemarks: string;
+    expectedReturnDate?: string;
+  }) => {
+    setDashCallModalTarget(item);
+    setDashCallStatus('Answered - Will Return on Date');
+    setDashAssistantRemarks(item.assistantRemarks || '');
+    setDashCoordinatorRemarks(item.coordinatorRemarks || '');
+    setDashExpectedReturnDate(item.expectedReturnDate || '');
+    setDashExpectedReturnReason(item.student.expectedReturnReason || '');
+  };
+
+  const handleSaveDashAbsenteeCall = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dashCallModalTarget || !onSaveAbsenteeCall) return;
+    setIsSavingDashCall(true);
+    try {
+      const s = dashCallModalTarget.student;
+      const stuCampus =
+        dashCallModalTarget.campus ||
+        s.campus ||
+        (s.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+      const isCoord = currentRoleName.toLowerCase().includes('coordinator');
+      const roleKey = isCoord ? 'Transport Coordinator' : isAdmin ? 'Admin' : 'Transport Assistant';
+      const trimmedCoord = dashCoordinatorRemarks.trim();
+      const trimmedAsst = dashAssistantRemarks.trim();
+
+      await onSaveAbsenteeCall({
+        studentId: s.id,
+        admissionNo: s.admissionNo,
+        studentName: s.name,
+        campus: stuCampus,
+        className: s.class,
+        section: s.section,
+        routeId: s.routeId,
+        routeCode: s.routeCode,
+        stopName: s.pickupDropStopName || s.villageName,
+        parentName: s.fatherName,
+        phone: s.mobile || s.whatsappNo,
+        date: today,
+        consecutiveDaysAbsent: dashCallModalTarget.consecutiveDays,
+        consecutiveAbsentDays: dashCallModalTarget.consecutiveDays,
+        callStatus: dashCallStatus,
+        calledByRole: roleKey,
+        callerRole: roleKey,
+        calledByName: currentRoleName,
+        callerName: currentRoleName,
+        calledBy: currentRoleName,
+        assistantRemarks: trimmedAsst,
+        coordinatorRemarks:
+          roleKey === 'Transport Coordinator' || roleKey === 'Admin'
+            ? trimmedCoord || trimmedAsst || dashCallStatus
+            : trimmedCoord,
+        expectedReturnDate: dashExpectedReturnDate,
+        expectedReturnReason: dashExpectedReturnReason.trim(),
+      });
+
+      setDashCallFeedback(`Saved calling remarks for ${s.name} (${stuCampus} Campus).`);
+      setDashCallModalTarget(null);
+      setTimeout(() => setDashCallFeedback(null), 4000);
+    } finally {
+      setIsSavingDashCall(false);
+    }
+  };
 
   // Overdue / Today Promise Date Follow-Up Recall Popup
   const overdueFollowUps = feeFollowUps.filter(
@@ -2705,14 +2798,27 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           </div>
 
-          {/* > 3 Consecutive Days Absent Table (Both Campuses) */}
+          {dashCallFeedback && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-bold flex items-center justify-between">
+              <span>{dashCallFeedback}</span>
+              <button
+                type="button"
+                onClick={() => setDashCallFeedback(null)}
+                className="text-emerald-700 hover:text-emerald-950 font-black cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* Absentees & > 3 Consecutive Days Absent Table (Both Campuses) */}
           {absenteeCallingDashboardStats.over3DaysList.length > 0 && (
             <div className="border border-rose-200 rounded-xl overflow-hidden">
               <div className="bg-rose-50 px-4 py-2.5 border-b border-rose-200 flex items-center justify-between">
                 <div className="text-xs font-black text-rose-950 flex items-center gap-1.5">
                   <AlertTriangle className="w-4 h-4 text-rose-600" />
                   <span>
-                    Students Absent &gt; 3 Consecutive Days (Both Campuses — Transport Coordinator Follow-up &amp; Remarks)
+                    Absentee Calling &amp; &gt;3 Consecutive Days Follow-up Queue (Both Sr &amp; Jr Campuses — Direct Coordinator Call &amp; Remarks)
                   </span>
                 </div>
                 <span className="text-[11px] font-bold text-rose-800">
@@ -2733,7 +2839,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {absenteeCallingDashboardStats.over3DaysList.slice(0, 6).map((item) => (
+                    {absenteeCallingDashboardStats.over3DaysList.slice(0, 10).map((item) => (
                       <tr key={item.student.id} className="hover:bg-slate-50">
                         <td className="py-2.5 px-3">
                           <div className="font-bold text-slate-900">
@@ -2749,13 +2855,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         </td>
                         <td className="py-2.5 px-3">
                           <div className="font-bold text-slate-800">{item.student.routeCode}</div>
-                          <div className="font-mono text-[11px] text-indigo-600">
-                            {item.student.mobile}
-                          </div>
+                          <a
+                            href={`tel:${item.student.mobile}`}
+                            className="font-mono text-[11px] text-indigo-600 hover:underline inline-flex items-center gap-1"
+                          >
+                            <Phone className="w-3 h-3" />
+                            <span>{item.student.mobile}</span>
+                          </a>
                         </td>
                         <td className="py-2.5 px-3 text-center">
-                          <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-300 font-black text-[11px]">
-                            {item.consecutiveDays} Days
+                          <span
+                            className={`px-2 py-0.5 rounded-full font-black text-[11px] ${
+                              item.consecutiveDays > 3
+                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                : 'bg-amber-100 text-amber-900 border border-amber-300'
+                            }`}
+                          >
+                            {item.consecutiveDays} Day{item.consecutiveDays > 1 ? 's' : ''}
                           </span>
                           {item.expectedReturnDate && (
                             <div className="text-[10px] font-mono text-indigo-700 mt-0.5">
@@ -2764,7 +2880,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-slate-700">
-                          {item.assistantRemarks || (
+                          {item.assistantRemarks ? (
+                            item.assistantRemarks
+                          ) : item.coordinatorRemarks ? (
+                            <span className="text-indigo-700 font-semibold text-[11px]">
+                              Direct Call by Coordinator
+                            </span>
+                          ) : (
                             <span className="text-slate-400 italic">No assistant remark</span>
                           )}
                         </td>
@@ -2793,10 +2915,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         <td className="py-2.5 px-3 text-right">
                           <button
                             type="button"
-                            onClick={() => onNavigate('operations', 'call_absentees')}
-                            className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                            onClick={() =>
+                              onSaveAbsenteeCall
+                                ? openDashAbsenteeModal(item)
+                                : onNavigate('operations', 'call_absentees')
+                            }
+                            className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-bold cursor-pointer inline-flex items-center gap-1"
                           >
-                            Call / Enter Remarks
+                            <Phone className="w-3 h-3 text-amber-400" />
+                            <span>Call / Enter Remarks</span>
                           </button>
                         </td>
                       </tr>
@@ -2808,6 +2935,147 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Direct Absentee Call & Save Remarks Modal on Dashboard */}
+      {dashCallModalTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-xl w-full overflow-hidden my-8">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Phone className="w-4 h-4 text-amber-400" />
+                  <h3 className="text-sm font-black">
+                    Direct Absentee Call &amp; Save Remarks ({dashCallModalTarget.campus} Campus)
+                  </h3>
+                </div>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  {dashCallModalTarget.student.name} ({dashCallModalTarget.student.admissionNo}) • Route{' '}
+                  {dashCallModalTarget.student.routeCode} • Phone: {dashCallModalTarget.student.mobile}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDashCallModalTarget(null)}
+                className="text-slate-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveDashAbsenteeCall} className="p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Call Outcome / Status *
+                </label>
+                <select
+                  value={dashCallStatus}
+                  onChange={(e) =>
+                    setDashCallStatus(e.target.value as AbsenteeCallRecord['callStatus'])
+                  }
+                  className="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-bold bg-white text-slate-900"
+                >
+                  <option value="Answered - Will Return on Date">
+                    Answered — Will Return on Tentative Date
+                  </option>
+                  <option value="Answered - Coming Tomorrow">Answered — Coming Tomorrow</option>
+                  <option value="Answered - Medical / Family Leave">
+                    Answered — Medical / Family Leave
+                  </option>
+                  <option value="No Answer / Switched Off">No Answer / Phone Switched Off</option>
+                  <option value="Busy / Call Back Later">Busy / Call Back Later</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-indigo-950 mb-1">
+                  Transport Coordinator / Caller Remarks *
+                </label>
+                <textarea
+                  rows={3}
+                  value={dashCoordinatorRemarks}
+                  onChange={(e) => setDashCoordinatorRemarks(e.target.value)}
+                  placeholder="Enter remarks after calling parent directly (e.g. Spoke to father, child has fever and will join on Monday)..."
+                  className="w-full p-2.5 border border-indigo-300 rounded-xl text-xs font-medium bg-indigo-50/40 text-slate-900"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {[
+                    'Called parent directly — Coming tomorrow',
+                    'Called parent directly — Medical / Fever leave',
+                    'Called parent directly — Out of station',
+                    'Called parent — Phone not answered',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setDashCoordinatorRemarks(preset)}
+                      className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded text-[10px] font-bold cursor-pointer"
+                    >
+                      + {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Assistant Remarks (Optional / Existing)
+                </label>
+                <input
+                  type="text"
+                  value={dashAssistantRemarks}
+                  onChange={(e) => setDashAssistantRemarks(e.target.value)}
+                  placeholder="Optional assistant note..."
+                  className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white text-slate-900"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-indigo-50/60 p-3 rounded-xl border border-indigo-200">
+                <div>
+                  <label className="block text-[11px] font-bold text-indigo-950 mb-1">
+                    Tentative Date of Arrival (Optional)
+                  </label>
+                  <input
+                    type="date"
+                    value={dashExpectedReturnDate}
+                    min={today}
+                    onChange={(e) => setDashExpectedReturnDate(e.target.value)}
+                    className="w-full p-2 border border-indigo-300 rounded-xl text-xs font-bold bg-white text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-indigo-950 mb-1">
+                    Informed Leave / Return Note
+                  </label>
+                  <input
+                    type="text"
+                    value={dashExpectedReturnReason}
+                    onChange={(e) => setDashExpectedReturnReason(e.target.value)}
+                    placeholder="e.g. Out of station for 4 days"
+                    className="w-full p-2 border border-indigo-300 rounded-xl text-xs bg-white text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setDashCallModalTarget(null)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingDashCall}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer"
+                >
+                  {isSavingDashCall ? 'Saving...' : 'Save Call & Remarks'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* =====================================================================
           FEEDBACK & COMPLAINTS ACTION CENTER (PENDING & RESOLVED FILTERS)
