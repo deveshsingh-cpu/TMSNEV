@@ -21,6 +21,7 @@ import {
   SheetsStatus,
   subscribeToBootstrapUpdates,
   getLastMutationBootstrapAt,
+  getCachedBootstrap,
 } from './services/api.js';
 import {
   SchoolConfig,
@@ -107,7 +108,7 @@ export function App() {
     currentUser?.role === 'Attendance Incharge' ? 'arrival' : ''
   );
   const [unauthScreen, setUnauthScreen] = useState<'public_website' | 'transport_login'>('public_website');
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(() => !getCachedBootstrap());
   const [error, setError] = useState<string | null>(null);
 
   // Android PWA / APK Installer State
@@ -186,60 +187,103 @@ export function App() {
   const [externalOpenMemberId, setExternalOpenMemberId] = useState<string | null>(null);
   const [preselectedFeeMemberId, setPreselectedFeeMemberId] = useState<string | null>(null);
 
-  // Core Masters & State
-  const [config, setConfig] = useState<SchoolConfig>({
-    schoolName: 'Narendra Edu Valley',
-    tagline: 'The Future Begins Here..',
-    academicYear: '2026-2027',
-    currentAcademicSession: '2026-2027',
-    address: 'Nayagaon , Chainpur , Siwan , Bihar -841203',
-    phone: '+91 7050421421',
-    email: 'narendra.eduvalley@gmail.com',
-    lateFeePerDay: 10,
-    autoSuspendAfterMonths: 2,
-  });
-  const [campuses, setCampuses] = useState<CampusMaster[]>([]);
-  const [memberTypes, setMemberTypes] = useState<MemberTypeMaster[]>([]);
-  const [classes, setClasses] = useState<string[]>([]);
-  const [sections, setSections] = useState<string[]>([]);
-  const [trips, setTrips] = useState<TripMaster[]>([]);
-  const [designations, setDesignations] = useState<DesignationMaster[]>([]);
-  const [users, setUsers] = useState<SystemUser[]>([]);
-  const [villages, setVillages] = useState<Village[]>([]);
-  const [stops, setStops] = useState<TransportStop[]>([]);
-  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [routes, setRoutes] = useState<Route[]>([]);
-  const [services, setServices] = useState<ScheduledService[]>([]);
+  // Core Masters & State (Hydrated immediately from localStorage cache if available)
+  const initialBoot = getCachedBootstrap();
+  const [config, setConfig] = useState<SchoolConfig>(
+    initialBoot?.masters?.config || {
+      schoolName: 'Narendra Edu Valley',
+      tagline: 'The Future Begins Here..',
+      academicYear: '2026-2027',
+      currentAcademicSession: '2026-2027',
+      address: 'Nayagaon , Chainpur , Siwan , Bihar -841203',
+      phone: '+91 7050421421',
+      email: 'narendra.eduvalley@gmail.com',
+      lateFeePerDay: 10,
+      autoSuspendAfterMonths: 2,
+    }
+  );
+  const [campuses, setCampuses] = useState<CampusMaster[]>(initialBoot?.masters?.campuses || []);
+  const [memberTypes, setMemberTypes] = useState<MemberTypeMaster[]>(
+    initialBoot?.masters?.memberTypes || []
+  );
+  const [classes, setClasses] = useState<string[]>(initialBoot?.masters?.classes || []);
+  const [sections, setSections] = useState<string[]>(initialBoot?.masters?.sections || []);
+  const [trips, setTrips] = useState<TripMaster[]>(initialBoot?.masters?.trips || []);
+  const [designations, setDesignations] = useState<DesignationMaster[]>(
+    initialBoot?.masters?.designations || []
+  );
+  const [users, setUsers] = useState<SystemUser[]>(initialBoot?.masters?.users || []);
+  const [villages, setVillages] = useState<Village[]>(initialBoot?.masters?.villages || []);
+  const [stops, setStops] = useState<TransportStop[]>(() =>
+    (initialBoot?.masters?.villages || []).flatMap((v: Village) =>
+      (v.stops || []).map((s: TransportStop) => ({ ...s, villageName: v.name }))
+    )
+  );
+  const [vehicles, setVehicles] = useState<Vehicle[]>(initialBoot?.masters?.vehicles || []);
+  const [routes, setRoutes] = useState<Route[]>(initialBoot?.masters?.routes || []);
+  const [services, setServices] = useState<ScheduledService[]>(initialBoot?.services || []);
 
   // Operational Entities
-  const [students, setStudents] = useState<StudentMember[]>([]);
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [resumes, setResumes] = useState<CandidateResume[]>([]);
-  const [dailyTrips, setDailyTrips] = useState<DailyTrip[]>([]);
-  const [attendanceRecords, setAttendanceRecords] = useState<TripAttendanceRecord[]>([]);
-  const [selectedTripId, setSelectedTripId] = useState<string>('');
-  const [invoices, setInvoices] = useState<FeeInvoice[]>([]);
-  const [receipts, setReceipts] = useState<FeeReceipt[]>([]);
-  const [warningLetters, setWarningLetters] = useState<WarningLetter[]>([]);
-  const [expenses, setExpenses] = useState<ExpenseRecord[]>([]);
-  const [expenseHeads, setExpenseHeads] = useState<ExpenseHead[]>([]);
-  const [incomeHeads, setIncomeHeads] = useState<IncomeHead[]>([]);
-  const [otherIncomes, setOtherIncomes] = useState<IncomeRecord[]>([]);
-  const [odometerLogs, setOdometerLogs] = useState<OdometerLog[]>([]);
-  const [fuelRecords, setFuelRecords] = useState<FuelAdvanceAndPurchase[]>([]);
-  const [maintenance, setMaintenance] = useState<MaintenanceRequest[]>([]);
-  const [accounts, setAccounts] = useState<AccountHead[]>([]);
-  const [vouchers, setVouchers] = useState<JournalVoucher[]>([]);
-  const [feeFollowUps, setFeeFollowUps] = useState<FeeFollowUpRecord[]>([]);
-  const [disciplineRecords, setDisciplineRecords] = useState<DisciplineRecord[]>([]);
-  const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignmentRecord[]>([]);
-  const [staffAttendance, setStaffAttendance] = useState<StaffAttendanceRecord[]>([]);
-  const [staffAdvances, setStaffAdvances] = useState<StaffAdvanceRecord[]>([]);
-  const [staffPayrolls, setStaffPayrolls] = useState<StaffPayrollRecord[]>([]);
-  const [holidays, setHolidays] = useState<HolidayRecord[]>([]);
-  const [memberRequests, setMemberRequests] = useState<MemberLifecycleRequest[]>([]);
-  const [absenteeCalls, setAbsenteeCalls] = useState<AbsenteeCallRecord[]>([]);
-  const [complaints, setComplaints] = useState<MemberComplaintRecord[]>([]);
+  const [students, setStudents] = useState<StudentMember[]>(initialBoot?.students || []);
+  const [employees, setEmployees] = useState<Employee[]>(initialBoot?.employees || []);
+  const [resumes, setResumes] = useState<CandidateResume[]>(initialBoot?.resumes || []);
+  const [dailyTrips, setDailyTrips] = useState<DailyTrip[]>(initialBoot?.trips || []);
+  const [attendanceRecords, setAttendanceRecords] = useState<TripAttendanceRecord[]>(
+    initialBoot?.attendance || []
+  );
+  const [selectedTripId, setSelectedTripId] = useState<string>(
+    initialBoot?.trips?.[0]?.id || ''
+  );
+  const [invoices, setInvoices] = useState<FeeInvoice[]>(initialBoot?.invoices || []);
+  const [receipts, setReceipts] = useState<FeeReceipt[]>(initialBoot?.receipts || []);
+  const [warningLetters, setWarningLetters] = useState<WarningLetter[]>(
+    initialBoot?.warningLetters || []
+  );
+  const [expenses, setExpenses] = useState<ExpenseRecord[]>(initialBoot?.expenses || []);
+  const [expenseHeads, setExpenseHeads] = useState<ExpenseHead[]>(
+    initialBoot?.expenseHeads || []
+  );
+  const [incomeHeads, setIncomeHeads] = useState<IncomeHead[]>(initialBoot?.incomeHeads || []);
+  const [otherIncomes, setOtherIncomes] = useState<IncomeRecord[]>(initialBoot?.incomes || []);
+  const [odometerLogs, setOdometerLogs] = useState<OdometerLog[]>(
+    initialBoot?.odometerLogs || []
+  );
+  const [fuelRecords, setFuelRecords] = useState<FuelAdvanceAndPurchase[]>(
+    initialBoot?.fuelAdvances || []
+  );
+  const [maintenance, setMaintenance] = useState<MaintenanceRequest[]>(
+    initialBoot?.maintenance || []
+  );
+  const [accounts, setAccounts] = useState<AccountHead[]>(initialBoot?.accounts || []);
+  const [vouchers, setVouchers] = useState<JournalVoucher[]>(initialBoot?.vouchers || []);
+  const [feeFollowUps, setFeeFollowUps] = useState<FeeFollowUpRecord[]>(
+    initialBoot?.followUps || []
+  );
+  const [disciplineRecords, setDisciplineRecords] = useState<DisciplineRecord[]>(
+    initialBoot?.disciplineRecords || []
+  );
+  const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignmentRecord[]>(
+    initialBoot?.vehicleAssignments || []
+  );
+  const [staffAttendance, setStaffAttendance] = useState<StaffAttendanceRecord[]>(
+    initialBoot?.staffAttendance || []
+  );
+  const [staffAdvances, setStaffAdvances] = useState<StaffAdvanceRecord[]>(
+    initialBoot?.staffAdvances || []
+  );
+  const [staffPayrolls, setStaffPayrolls] = useState<StaffPayrollRecord[]>(
+    initialBoot?.staffPayrolls || []
+  );
+  const [holidays, setHolidays] = useState<HolidayRecord[]>(initialBoot?.holidays || []);
+  const [memberRequests, setMemberRequests] = useState<MemberLifecycleRequest[]>(
+    initialBoot?.memberRequests || []
+  );
+  const [absenteeCalls, setAbsenteeCalls] = useState<AbsenteeCallRecord[]>(
+    initialBoot?.absenteeCalls || []
+  );
+  const [complaints, setComplaints] = useState<MemberComplaintRecord[]>(
+    initialBoot?.complaints || []
+  );
 
   // Analytics & Sync
   const [reportsSummary, setReportsSummary] = useState<ReportsSummary | null>(null);
@@ -351,8 +395,18 @@ export function App() {
   }, [applyBootstrapPayload]);
 
   useEffect(() => {
+    const cached = getCachedBootstrap();
+    if (cached) {
+      applyBootstrapPayload(cached);
+      setLoading(false);
+    }
     loadAllData();
-  }, [loadAllData]);
+    // Safety fallback: never block the UI on the loading spinner past 3.5 seconds even on 0.10 KB/s mobile networks
+    const maxLoadingTimer = setTimeout(() => {
+      setLoading(false);
+    }, 3500);
+    return () => clearTimeout(maxLoadingTimer);
+  }, [loadAllData, applyBootstrapPayload]);
 
   const handleSelectTrip = (tripId: string) => {
     setSelectedTripId(tripId);
@@ -1661,6 +1715,13 @@ export function App() {
             <div className="py-24 flex flex-col items-center justify-center gap-3 text-slate-500">
               <RefreshCw className="w-7 h-7 animate-spin text-amber-500" />
               <p className="text-sm font-medium">Loading Transport ERP Modules...</p>
+              <button
+                type="button"
+                onClick={() => setLoading(false)}
+                className="mt-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs cursor-pointer shadow-xs"
+              >
+                Open Dashboard Immediately
+              </button>
             </div>
           ) : (
             <>

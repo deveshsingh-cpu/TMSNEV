@@ -184,28 +184,36 @@ export class SheetsDatabaseManager {
   }
 
   public async ensureInitialized(forceFresh = false): Promise<void> {
-    try {
-      await this.initPromise;
-      await this.writeQueue;
-      if (this.isGoogleConfigured) {
-        const recentlyWroteLocally =
-          this.pendingRemoteSync ||
-          this.isFlushingRemoteSync ||
-          this.queueCount > 0 ||
-          (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 60000);
-        if (!this.hasHydratedFromSheets) {
-          await this.hydrateFromGoogleSheets(true);
-        } else if (forceFresh && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 30000) {
-          await this.hydrateFromGoogleSheets(true);
-        } else if (process.env.VERCEL && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 5000) {
-          await this.hydrateFromGoogleSheets(true);
-        } else if (this.lastHydratedAt === 0) {
-          await this.hydrateFromGoogleSheets(false);
+    const work = (async () => {
+      try {
+        await this.initPromise;
+        await this.writeQueue;
+        if (this.isGoogleConfigured) {
+          const recentlyWroteLocally =
+            this.pendingRemoteSync ||
+            this.isFlushingRemoteSync ||
+            this.queueCount > 0 ||
+            (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 120000);
+          if (!this.hasHydratedFromSheets) {
+            await this.hydrateFromGoogleSheets(true);
+          } else if (forceFresh && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 30000) {
+            await this.hydrateFromGoogleSheets(true);
+          } else if (process.env.VERCEL && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 30000) {
+            await this.hydrateFromGoogleSheets(true);
+          } else if (this.lastHydratedAt === 0) {
+            await this.hydrateFromGoogleSheets(false);
+          }
         }
+      } catch {
+        // Non-fatal: continue with in-memory / snapshot state
       }
-    } catch {
-      // Non-fatal: continue with in-memory / snapshot state
-    }
+    })();
+
+    // Never let a slow Google Sheets API call hang /api/bootstrap past 5.5s on mobile or Vercel
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => setTimeout(resolve, 5500)),
+    ]);
   }
 
   private loadLocalSnapshot() {
@@ -555,7 +563,7 @@ export class SheetsDatabaseManager {
           }
           const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
             spreadsheetId: this.sheetId,
-            ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z2000`),
+            ranges: ALL_ERP_SHEET_TABS.map(tab => `${tab}!A1:Z`),
           });
 
           const valueRanges: any[] = batchRes.data?.valueRanges || [];
@@ -742,7 +750,13 @@ export class SheetsDatabaseManager {
           this.lastHydratedAt = Date.now();
           this.lastError = null;
           if (seededNew) {
-            await this.internalSyncToGoogleSheets().catch(() => {});
+            // Fire-and-forget targeted sync so GET /api/bootstrap never blocks on writing 29 tabs
+            this.flushToGoogleSheetsRemote([
+              'Fee_Receipts',
+              'Fee_Invoices',
+              'Members_Transport',
+              'Chart_Of_Accounts',
+            ]).catch(() => {});
           }
           return;
         } catch (err: any) {
@@ -764,6 +778,14 @@ export class SheetsDatabaseManager {
     if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) return;
 
     try {
+      // Fast path: hydrate directly in 1 round-trip without calling spreadsheets.get() first
+      await this.hydrateFromGoogleSheets(true);
+      if (this.hasHydratedFromSheets) {
+        this.provisionedTabsList = [...ALL_ERP_SHEET_TABS];
+        this.lastSyncAt = new Date().toISOString();
+        return;
+      }
+
       const spreadsheet = await this.sheetsClient.spreadsheets.get({
         spreadsheetId: this.sheetId,
       });
@@ -800,7 +822,7 @@ export class SheetsDatabaseManager {
       this.lastSyncAt = new Date().toISOString();
 
       if (addSheetRequests.length > 0) {
-        await this.internalSyncToGoogleSheets();
+        this.flushToGoogleSheetsRemote().catch(() => {});
       }
     } catch (err: any) {
       this.lastError = err.message;
@@ -1111,6 +1133,19 @@ export class SheetsDatabaseManager {
         success: true,
         message: `Saved locally and queued background sync to Google Spreadsheet "${this.spreadsheetTitle}".`,
       };
+    }
+
+    if (!waitForRemote) {
+      try {
+        return await this.flushToGoogleSheetsRemote(onlyTabs);
+      } catch (err: any) {
+        this.lastError = err?.message || String(err);
+        console.error('Non-fatal Google Sheets Sync Error:', this.lastError);
+        return {
+          success: false,
+          message: this.lastError || 'Saved locally; Google Sheets sync will retry.',
+        };
+      }
     }
 
     return this.flushToGoogleSheetsRemote(onlyTabs);
@@ -1790,11 +1825,24 @@ export class SheetsDatabaseManager {
           ? dataPayload.filter(entry => onlyTabs.includes(entry.range.split('!')[0]))
           : dataPayload;
 
-      // 1. Write all current rows first with RAW valueInputOption (so +91 phone numbers never become #ERROR! formulas)
+      // 1. Append 3 blank buffer rows to each tab's values so:
+      //    a) Single/multi-row deletions are immediately overwritten with empty cells in batchUpdate
+      //    b) Every tab's grid maxRows is guaranteed to be >= writtenRows + 3, preventing
+      //       "Range exceeds grid limits" when batchClear clears A{writtenRows + 1}:Z
+      const paddedPayload = targetPayload.map(entry => {
+        const rows = Array.isArray(entry.values) ? entry.values : [];
+        const colCount = Array.isArray(rows[0]) ? Math.max(rows[0].length, 1) : 10;
+        const blankRow = new Array(colCount).fill('');
+        return {
+          range: entry.range,
+          values: [...rows, blankRow, blankRow, blankRow],
+        };
+      });
+
       const trailingClearRanges = targetPayload.map(entry => {
         const tabName = entry.range.split('!')[0];
         const writtenRows = Array.isArray(entry.values) ? entry.values.length : 1;
-        return `${tabName}!A${writtenRows + 1}:Z2000`;
+        return `${tabName}!A${writtenRows + 1}:Z`;
       });
 
       let syncErr: any = null;
@@ -1807,17 +1855,21 @@ export class SheetsDatabaseManager {
             spreadsheetId: this.sheetId,
             requestBody: {
               valueInputOption: 'RAW',
-              data: targetPayload,
+              data: paddedPayload,
             },
           });
 
-          // 2. Clear any trailing rows below each tab's current row count so deleted rows are permanently removed
-          await this.sheetsClient.spreadsheets.values.batchClear({
-            spreadsheetId: this.sheetId,
-            requestBody: {
-              ranges: trailingClearRanges,
-            },
-          });
+          // 2. Best-effort clear of any further trailing rows below each tab's current row count
+          try {
+            await this.sheetsClient.spreadsheets.values.batchClear({
+              spreadsheetId: this.sheetId,
+              requestBody: {
+                ranges: trailingClearRanges,
+              },
+            });
+          } catch {
+            // Ignore grid limit or range warnings on trailing clear since batchUpdate with blank buffer rows already succeeded
+          }
           syncErr = null;
           break;
         } catch (e: any) {
@@ -2198,25 +2250,31 @@ export class SheetsDatabaseManager {
   }
 
   public async authenticateUser(username: string, password: string): Promise<SystemUser> {
-    return this.enqueueWrite(async () => {
-      const cleanUser = (username || '').trim().toLowerCase();
-      const cleanPass = (password || '').trim();
-      if (!cleanUser || !cleanPass) {
-        throw new Error('Please enter both username and password.');
-      }
-      const found = this.systemUsers.find(
+    const cleanUser = (username || '').trim().toLowerCase();
+    const cleanPass = (password || '').trim();
+    if (!cleanUser || !cleanPass) {
+      throw new Error('Please enter both username and password.');
+    }
+    let found = this.systemUsers.find(
+      u => u.username.toLowerCase() === cleanUser && u.password === cleanPass
+    );
+    if (!found && !this.hasHydratedFromSheets) {
+      await this.ensureInitialized(false);
+      found = this.systemUsers.find(
         u => u.username.toLowerCase() === cleanUser && u.password === cleanPass
       );
-      if (!found) {
-        throw new Error('Invalid username or password. Please check your credentials and try again.');
-      }
-      if (found.status !== 'Active') {
-        throw new Error(`Account "${found.username}" is currently disabled. Please contact the Administrator.`);
-      }
-      found.lastLoginAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
-      await this.internalSyncToGoogleSheets();
-      return found;
-    });
+    }
+    if (!found) {
+      throw new Error('Invalid username or password. Please check your credentials and try again.');
+    }
+    if (found.status !== 'Active') {
+      throw new Error(`Account "${found.username}" is currently disabled. Please contact the Administrator.`);
+    }
+    found.lastLoginAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    this.saveLocalSnapshot();
+    // Sync only System_Users in the background so login is instant and never blocked by sheet sync
+    this.flushToGoogleSheetsRemote(['System_Users']).catch(() => {});
+    return found;
   }
 
   public async saveUser(data: Partial<SystemUser>): Promise<SystemUser> {

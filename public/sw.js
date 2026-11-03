@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nev-transport-erp-v5';
+const CACHE_NAME = 'nev-transport-erp-v6';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',

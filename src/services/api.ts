@@ -67,8 +67,38 @@ export interface MastersData {
   users?: SystemUser[];
 }
 
+const BOOTSTRAP_CACHE_KEY = 'nev_transport_bootstrap_cache_v2';
 let bootstrapUpdateListener: ((boot: any) => void) | null = null;
 let lastMutationBootstrapAt = 0;
+
+export function saveCachedBootstrap(boot: any) {
+  if (!boot || typeof boot !== 'object' || typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(BOOTSTRAP_CACHE_KEY, JSON.stringify(boot));
+  } catch {
+    // If quota exceeded due to large attachments, store a lightweight copy without base64 blobs
+    try {
+      const lite = JSON.stringify(boot, (_k, v) =>
+        typeof v === 'string' && v.length > 2000 && v.startsWith('data:') ? '' : v
+      );
+      localStorage.setItem(BOOTSTRAP_CACHE_KEY, lite);
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+}
+
+export function getCachedBootstrap(): any | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(BOOTSTRAP_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 export function subscribeToBootstrapUpdates(listener: ((boot: any) => void) | null) {
   bootstrapUpdateListener = listener;
@@ -80,9 +110,12 @@ export function getLastMutationBootstrapAt(): number {
 
 function unwrapMutationEnvelope(data: any): any {
   if (data && typeof data === 'object' && data.__erpEnvelope === true) {
-    if (data.bootstrap && bootstrapUpdateListener) {
-      lastMutationBootstrapAt = Date.now();
-      bootstrapUpdateListener(data.bootstrap);
+    if (data.bootstrap) {
+      saveCachedBootstrap(data.bootstrap);
+      if (bootstrapUpdateListener) {
+        lastMutationBootstrapAt = Date.now();
+        bootstrapUpdateListener(data.bootstrap);
+      }
     }
     return data.result;
   }
@@ -130,12 +163,40 @@ async function parseApiJson(res: Response, fallbackError: string) {
 }
 
 export const api = {
-  // Unified Single-Request Bootstrap
+  // Unified Single-Request Bootstrap with timeout and fast fallback
   getBootstrap: async (fresh = true): Promise<any> => {
-    const res = await fetch(`/api/bootstrap?fresh=${fresh ? '1' : '0'}&_t=${Date.now()}`, {
-      cache: 'no-store',
-    });
-    return parseApiJson(res, 'Failed to load application data');
+    const fetchWithTimeout = async (isFresh: boolean, timeoutMs: number) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(`/api/bootstrap?fresh=${isFresh ? '1' : '0'}&_t=${Date.now()}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        const boot = await parseApiJson(res, 'Failed to load application data');
+        saveCachedBootstrap(boot);
+        return boot;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    try {
+      return await fetchWithTimeout(fresh, 8500);
+    } catch (firstErr) {
+      if (fresh) {
+        try {
+          return await fetchWithTimeout(false, 6000);
+        } catch {
+          // Fall through to cached bootstrap if available
+        }
+      }
+      const cached = getCachedBootstrap();
+      if (cached) {
+        return cached;
+      }
+      throw firstErr;
+    }
   },
 
   // Authentication & System Users
