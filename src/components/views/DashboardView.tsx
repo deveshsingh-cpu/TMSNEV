@@ -54,6 +54,13 @@ import {
   getExpenseCampus,
   calculateCampusFinancials,
 } from '../../utils/campus.js';
+import {
+  AttendanceChangeRequest,
+  AttendanceAcknowledgement,
+  MemberAttendanceDiscrepancyItem,
+  analyzeAttendanceForDate,
+  getPreviousWorkingDate,
+} from '../../utils/attendanceAlerts.js';
 
 interface DashboardViewProps {
   summary: DashboardSummary | null;
@@ -75,6 +82,36 @@ interface DashboardViewProps {
   userCampus?: string;
   onNavigate: (tab: NavigationTab, subTab?: string) => void;
   onOpenMemberProfile?: (memberId: string) => void;
+  onSelectRouteForAttendance?: (target: {
+    routeId: string;
+    date: string;
+    mode: 'arrival' | 'departure';
+  }) => void;
+  onBatchSaveAttendance?: (
+    entries: Array<{
+      recordId: string;
+      source: 'driver' | 'assistant';
+      value: string;
+      reason?: string;
+    }>
+  ) => Promise<any>;
+  attendanceChangeRequests?: AttendanceChangeRequest[];
+  attendanceAcknowledgements?: AttendanceAcknowledgement[];
+  onSubmitAttendanceChangeRequest?: (
+    req: Omit<AttendanceChangeRequest, 'id' | 'requestedAt' | 'status'>
+  ) => void;
+  onReviewAttendanceChangeRequest?: (
+    id: string,
+    action: 'Approve' | 'Reject',
+    remarks?: string
+  ) => Promise<void>;
+  onAcknowledgeUnmarkedAttendance?: (payload: {
+    date: string;
+    routeId: string;
+    routeCode: string;
+    campus: string;
+    note: string;
+  }) => void;
   onResolveComplaint?: (
     id: string,
     payload: { status?: 'Pending' | 'Resolved'; actionTaken?: string; resolvedBy?: string }
@@ -126,6 +163,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   userCampus,
   onNavigate,
   onOpenMemberProfile,
+  onSelectRouteForAttendance,
+  onBatchSaveAttendance,
+  attendanceChangeRequests = [],
+  attendanceAcknowledgements = [],
+  onSubmitAttendanceChangeRequest,
+  onReviewAttendanceChangeRequest,
+  onAcknowledgeUnmarkedAttendance,
   onResolveComplaint,
   onUpdateExpenseApproval,
   onUpdateMaintenanceStatus,
@@ -395,12 +439,29 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [isSubmittingWo, setIsSubmittingWo] = useState(false);
 
   const isAssistant = currentRoleName === 'Transport Assistant';
+  const isAttendanceIncharge = currentRoleName === 'Attendance Incharge';
   const isCoordinator = currentRoleName === 'Transport Coordinator';
-  const lockedAssistantCampus = isAssistant ? normalizeCampus(userCampus) : null;
+  const lockedAssistantCampus =
+    isAssistant || isAttendanceIncharge ? normalizeCampus(userCampus) || 'Sr' : null;
   const [dashCampusScope, setDashCampusScope] = useState<CampusFilterValue>(
     lockedAssistantCampus || 'all'
   );
   const activeFinancialCampus: CampusFilterValue = lockedAssistantCampus || dashCampusScope;
+
+  // Dashboard Unmarked & Mismatched Attendance State
+  const yesterdayDate = React.useMemo(() => getPreviousWorkingDate(today), [today]);
+  const [dashAttDateMode, setDashAttDateMode] = useState<'today' | 'yesterday'>('today');
+  const activeDashAttDate = dashAttDateMode === 'today' ? today : yesterdayDate;
+  const [dashAttTab, setDashAttTab] = useState<'both_unmarked' | 'single_unmarked' | 'mismatch'>('both_unmarked');
+  const [dashAttRouteFilter, setDashAttRouteFilter] = useState<string>('all');
+  const [dashAttToast, setDashAttToast] = useState<string | null>(null);
+  const [isDashBatchMarking, setIsDashBatchMarking] = useState<boolean>(false);
+  const [dashChangeReqModalItem, setDashChangeReqModalItem] = useState<{
+    item: MemberAttendanceDiscrepancyItem;
+    shift: 'arrival' | 'departure';
+    requestedStatus: 'Present' | 'Absent' | 'Leave';
+    reason: string;
+  } | null>(null);
 
   const campusScopedStudents = React.useMemo(
     () =>
@@ -564,6 +625,822 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       setIsSubmittingWo(false);
     }
   };
+
+  // Helper to mark ONLY unmarked (Pending) shift(s) from Dashboard without altering already-marked shifts
+  const handleDashMarkOnlyUnmarked = async (
+    item: MemberAttendanceDiscrepancyItem,
+    shift: 'arrival' | 'departure' | 'both_pending',
+    status: 'Present' | 'Absent' | 'Leave'
+  ) => {
+    if (!onBatchSaveAttendance) return;
+    const entries: Array<{
+      recordId: string;
+      source: 'driver' | 'assistant';
+      value: string;
+      reason?: string;
+    }> = [];
+    if ((shift === 'arrival' || shift === 'both_pending') && item.arrivalStatus === 'Pending') {
+      entries.push({
+        recordId: item.recordId,
+        source: 'driver',
+        value: status,
+        reason: `Marked unmarked Arrival by ${currentRoleName}`,
+      });
+    }
+    if ((shift === 'departure' || shift === 'both_pending') && item.departureStatus === 'Pending') {
+      entries.push({
+        recordId: item.recordId,
+        source: 'assistant',
+        value: status,
+        reason: `Marked unmarked Departure by ${currentRoleName}`,
+      });
+    }
+    if (entries.length === 0) return;
+    setIsDashBatchMarking(true);
+    try {
+      await onBatchSaveAttendance(entries);
+      setDashAttToast(
+        `Saved unmarked attendance for ${item.student.name} (${item.student.admissionNo}) as ${status}.`
+      );
+      setTimeout(() => setDashAttToast(null), 3500);
+    } finally {
+      setIsDashBatchMarking(false);
+    }
+  };
+
+  // Reusable Dashboard Card: Unmarked & Mismatched Attendance List (Arrival, Departure, Both & Mismatch)
+  const renderUnmarkedAndMismatchDashboardCard = (scopedCampus: CampusFilterValue) => {
+    const effectiveCampus = lockedAssistantCampus || scopedCampus;
+    const analysis = analyzeAttendanceForDate({
+      date: activeDashAttDate,
+      students,
+      routes,
+      trips: dailyTrips,
+      attendanceRecords,
+      campusFilter: effectiveCampus,
+    });
+
+    const filterByRoute = (list: MemberAttendanceDiscrepancyItem[]) =>
+      dashAttRouteFilter === 'all'
+        ? list
+        : list.filter(
+            (i) => i.routeId === dashAttRouteFilter || i.routeCode === dashAttRouteFilter
+          );
+
+    const bothUnmarkedList = filterByRoute(analysis.bothNotMarked);
+    const singleUnmarkedList = filterByRoute(analysis.singleShiftNotMarked);
+    const mismatchList = filterByRoute(analysis.statusMismatches);
+
+    const activeList =
+      dashAttTab === 'both_unmarked'
+        ? bothUnmarkedList
+        : dashAttTab === 'single_unmarked'
+        ? singleUnmarkedList
+        : mismatchList;
+
+    const campusRoutes = routes.filter((r) => {
+      if (effectiveCampus === 'all') return true;
+      const rc = normalizeCampus(r.campus);
+      if (rc) return rc === effectiveCampus;
+      return r.code?.toLowerCase().startsWith('jr')
+        ? effectiveCampus === 'Jr'
+        : effectiveCampus === 'Sr';
+    });
+
+    const isDateAcked = attendanceAcknowledgements.some(
+      (a) =>
+        a.date === activeDashAttDate &&
+        (a.routeId === dashAttRouteFilter || a.routeId === 'all')
+    );
+
+    return (
+      <div className="bg-white rounded-2xl border-2 border-indigo-200/90 shadow-sm overflow-hidden">
+        <div className="bg-slate-900 text-white px-5 py-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2.5 py-0.5 rounded-md bg-amber-500 text-slate-950 text-[10px] font-extrabold uppercase tracking-wider">
+                Live Attendance Audit
+              </span>
+              <span className="px-2.5 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-mono">
+                Campus: {effectiveCampus === 'all' ? 'All Campuses (Sr + Jr)' : formatCampusLabel(effectiveCampus)}
+              </span>
+              {analysis.partiallyMarkedRoutes.length > 0 && (
+                <span className="px-2.5 py-0.5 rounded-md bg-rose-500/20 border border-rose-400/40 text-rose-200 text-[11px] font-bold">
+                  {analysis.partiallyMarkedRoutes.length} Route(s) Partially Marked
+                </span>
+              )}
+            </div>
+            <h3 className="text-base font-bold tracking-tight">
+              Unmarked &amp; Mismatched Attendance List (Arrival • Departure • Both • Mismatch)
+            </h3>
+            <p className="text-xs text-slate-300">
+              Separate lists for members with <strong>Both Arrival &amp; Departure Not Marked</strong>,{' '}
+              <strong>Single Shift Not Marked</strong>, and <strong>Present vs. Absent Mismatches</strong>.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="inline-flex rounded-xl bg-slate-800 p-1 border border-slate-700">
+              <button
+                type="button"
+                onClick={() => setDashAttDateMode('today')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                  dashAttDateMode === 'today'
+                    ? 'bg-amber-500 text-slate-950'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                Today ({today})
+              </button>
+              <button
+                type="button"
+                onClick={() => setDashAttDateMode('yesterday')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                  dashAttDateMode === 'yesterday'
+                    ? 'bg-amber-500 text-slate-950'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                Yesterday ({yesterdayDate})
+              </button>
+            </div>
+
+            <select
+              value={dashAttRouteFilter}
+              onChange={(e) => setDashAttRouteFilter(e.target.value)}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs font-semibold"
+            >
+              <option value="all">All Routes ({campusRoutes.length})</option>
+              {campusRoutes.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.code} — {r.name}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={() => onNavigate('operations' as any, 'unmarked_mismatch')}
+              className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <span>Open Detailed Sub-Module</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {dashAttToast && (
+          <div className="bg-emerald-50 border-b border-emerald-200 px-5 py-2.5 text-xs font-bold text-emerald-800 flex items-center justify-between">
+            <span>{dashAttToast}</span>
+            <button
+              type="button"
+              onClick={() => setDashAttToast(null)}
+              className="text-emerald-700 hover:underline cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Partially Marked Routes Alert Strip */}
+        {analysis.partiallyMarkedRoutes.length > 0 && (
+          <div className="bg-amber-50/90 border-b border-amber-200 px-5 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-amber-950 font-semibold">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                Partially Marked Routes on {activeDashAttDate}:{' '}
+                {analysis.partiallyMarkedRoutes
+                  .map(
+                    (pr) =>
+                      `${pr.routeCode} (Arr: ${pr.arrivalMarkedCount}/${pr.totalMembers}, Dep: ${pr.departureMarkedCount}/${pr.totalMembers})`
+                  )
+                  .join(' • ')}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {analysis.partiallyMarkedRoutes.slice(0, 3).map((pr) => (
+                <button
+                  key={pr.routeId}
+                  type="button"
+                  onClick={() => {
+                    if (onSelectRouteForAttendance) {
+                      onSelectRouteForAttendance({
+                        routeId: pr.routeId,
+                        date: activeDashAttDate,
+                        mode: pr.arrivalUnmarkedCount > 0 ? 'arrival' : 'departure',
+                      });
+                    } else {
+                      onNavigate('operations' as any, 'arrival');
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] cursor-pointer"
+                >
+                  Mark {pr.routeCode} ({pr.arrivalUnmarkedCount + pr.departureUnmarkedCount} left) &rarr;
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 3 Separate Category Tabs */}
+        <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 flex-1">
+            <button
+              type="button"
+              onClick={() => setDashAttTab('both_unmarked')}
+              className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                dashAttTab === 'both_unmarked'
+                  ? 'bg-rose-600 text-white border-rose-700 shadow-xs'
+                  : 'bg-white text-slate-800 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                  1. Both Arrival &amp; Departure Not Marked
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-md text-xs font-mono font-extrabold ${
+                    dashAttTab === 'both_unmarked'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-rose-100 text-rose-800'
+                  }`}
+                >
+                  {bothUnmarkedList.length}
+                </span>
+              </div>
+              <p
+                className={`text-[11px] mt-1 ${
+                  dashAttTab === 'both_unmarked' ? 'text-rose-100' : 'text-slate-500'
+                }`}
+              >
+                Neither morning arrival nor afternoon departure marked
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setDashAttTab('single_unmarked')}
+              className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                dashAttTab === 'single_unmarked'
+                  ? 'bg-amber-500 text-slate-950 border-amber-600 shadow-xs'
+                  : 'bg-white text-slate-800 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                  2. Single Shift Not Marked (Arr OR Dep)
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-md text-xs font-mono font-extrabold ${
+                    dashAttTab === 'single_unmarked'
+                      ? 'bg-slate-950/15 text-slate-950'
+                      : 'bg-amber-100 text-amber-900'
+                  }`}
+                >
+                  {singleUnmarkedList.length}
+                </span>
+              </div>
+              <p
+                className={`text-[11px] mt-1 ${
+                  dashAttTab === 'single_unmarked' ? 'text-slate-900' : 'text-slate-500'
+                }`}
+              >
+                Marked in one shift, left Pending in the other shift
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setDashAttTab('mismatch')}
+              className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                dashAttTab === 'mismatch'
+                  ? 'bg-violet-700 text-white border-violet-800 shadow-xs'
+                  : 'bg-white text-slate-800 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                  3. Arrival vs. Departure Status Mismatch
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-md text-xs font-mono font-extrabold ${
+                    dashAttTab === 'mismatch'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-violet-100 text-violet-900'
+                  }`}
+                >
+                  {mismatchList.length}
+                </span>
+              </div>
+              <p
+                className={`text-[11px] mt-1 ${
+                  dashAttTab === 'mismatch' ? 'text-violet-100' : 'text-slate-500'
+                }`}
+              >
+                Marked Present in one shift &amp; Absent/Leave in the other
+              </p>
+            </button>
+          </div>
+
+          {onAcknowledgeUnmarkedAttendance && (bothUnmarkedList.length > 0 || singleUnmarkedList.length > 0) && (
+            <button
+              type="button"
+              onClick={() =>
+                onAcknowledgeUnmarkedAttendance({
+                  date: activeDashAttDate,
+                  routeId: dashAttRouteFilter,
+                  routeCode:
+                    dashAttRouteFilter === 'all'
+                      ? 'All Routes'
+                      : routes.find((r) => r.id === dashAttRouteFilter)?.code || dashAttRouteFilter,
+                  campus: effectiveCampus === 'all' ? 'All' : effectiveCampus,
+                  note: `Acknowledged ${bothUnmarkedList.length + singleUnmarkedList.length} unmarked attendance records for ${activeDashAttDate} by ${currentRoleName}`,
+                })
+              }
+              className={`px-3.5 py-2.5 rounded-xl font-bold text-xs cursor-pointer shrink-0 border ${
+                isDateAcked
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                  : 'bg-slate-900 hover:bg-slate-800 text-white border-slate-900'
+              }`}
+            >
+              {isDateAcked ? '✓ Unmarked Attendance Acknowledged' : 'Acknowledge Unmarked Attendance'}
+            </button>
+          )}
+        </div>
+
+        {/* Table of Members */}
+        <div className="overflow-x-auto max-h-96 overflow-y-auto">
+          {activeList.length === 0 ? (
+            <div className="p-8 text-center text-xs text-slate-500">
+              No members in this category for {activeDashAttDate} (
+              {effectiveCampus === 'all' ? 'All Campuses' : formatCampusLabel(effectiveCampus)}).
+            </div>
+          ) : (
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-100 text-slate-600 border-b border-slate-200 text-[11px] uppercase">
+                  <th className="py-2.5 px-4">Member (ID &amp; Class)</th>
+                  <th className="py-2.5 px-3">Campus &amp; Route</th>
+                  <th className="py-2.5 px-3">Morning Arrival</th>
+                  <th className="py-2.5 px-3">Afternoon Departure</th>
+                  <th className="py-2.5 px-3">Discrepancy</th>
+                  <th className="py-2.5 px-4 text-right">
+                    Action (Mark Unmarked Only / Request Change)
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {activeList.slice(0, 25).map((item) => (
+                  <tr key={item.recordId} className="hover:bg-slate-50/90">
+                    <td className="py-2.5 px-4">
+                      <div className="font-bold text-slate-900">
+                        {item.student.name}{' '}
+                        <span className="font-mono text-[11px] text-slate-500">
+                          ({item.student.admissionNo})
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {item.student.class} {item.student.section} • Stop:{' '}
+                        {item.student.pickupDropStopName || item.student.villageName}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold mr-1.5 ${
+                          item.campus === 'Jr'
+                            ? 'bg-amber-100 text-amber-900'
+                            : 'bg-indigo-100 text-indigo-900'
+                        }`}
+                      >
+                        {item.campus}
+                      </span>
+                      <span className="font-mono font-bold text-slate-800">{item.routeCode}</span>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                          item.arrivalStatus === 'Present'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : item.arrivalStatus === 'Absent'
+                            ? 'bg-rose-100 text-rose-800'
+                            : item.arrivalStatus === 'Leave'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-amber-100 text-amber-900 border border-amber-300'
+                        }`}
+                      >
+                        {item.arrivalStatus === 'Pending' ? 'Not Marked' : item.arrivalStatus}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                          item.departureStatus === 'Present'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : item.departureStatus === 'Absent'
+                            ? 'bg-rose-100 text-rose-800'
+                            : item.departureStatus === 'Leave'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-amber-100 text-amber-900 border border-amber-300'
+                        }`}
+                      >
+                        {item.departureStatus === 'Pending' ? 'Not Marked' : item.departureStatus}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span className="text-[11px] font-semibold text-slate-700">
+                        {item.category === 'both_not_marked'
+                          ? 'Both Arrival & Departure Unmarked'
+                          : item.category === 'arrival_not_marked'
+                          ? `Arrival Unmarked (Dep: ${item.departureStatus})`
+                          : item.category === 'departure_not_marked'
+                          ? `Departure Unmarked (Arr: ${item.arrivalStatus})`
+                          : `Mismatch: Arr ${item.arrivalStatus} vs Dep ${item.departureStatus}`}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-4 text-right">
+                      <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                        {/* Mark ONLY unmarked shift(s) without altering already marked shift */}
+                        {(item.arrivalStatus === 'Pending' || item.departureStatus === 'Pending') &&
+                          onBatchSaveAttendance && (
+                            <div className="inline-flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-lg border border-slate-200">
+                              <span className="text-[10px] font-bold text-slate-600 mr-1">
+                                Mark Unmarked:
+                              </span>
+                              <button
+                                type="button"
+                                disabled={isDashBatchMarking}
+                                onClick={() =>
+                                  handleDashMarkOnlyUnmarked(item, 'both_pending', 'Present')
+                                }
+                                className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
+                              >
+                                P
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isDashBatchMarking}
+                                onClick={() =>
+                                  handleDashMarkOnlyUnmarked(item, 'both_pending', 'Absent')
+                                }
+                                className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] cursor-pointer"
+                              >
+                                A
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isDashBatchMarking}
+                                onClick={() =>
+                                  handleDashMarkOnlyUnmarked(item, 'both_pending', 'Leave')
+                                }
+                                className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold text-[10px] cursor-pointer"
+                              >
+                                L
+                              </button>
+                            </div>
+                          )}
+
+                        {/* For already-marked mismatch: non-Admin cannot alter directly, must request change to Admin */}
+                        {item.category === 'status_mismatch' && !isAdmin && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDashChangeReqModalItem({
+                                item,
+                                shift: 'departure',
+                                requestedStatus:
+                                  item.arrivalStatus === 'Present' ? 'Present' : 'Absent',
+                                reason: '',
+                              })
+                            }
+                            className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] cursor-pointer"
+                          >
+                            Request Change to Admin
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onSelectRouteForAttendance) {
+                              onSelectRouteForAttendance({
+                                routeId: item.routeId,
+                                date: activeDashAttDate,
+                                mode: item.arrivalStatus === 'Pending' ? 'arrival' : 'departure',
+                              });
+                            } else {
+                              onNavigate('operations' as any, 'unmarked_mismatch');
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] cursor-pointer"
+                        >
+                          Open Route
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Modal for sending Attendance Change Request to Admin from Dashboard */}
+        {dashChangeReqModalItem && (
+          <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">
+                    Send Request for Change in Attendance to Admin
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    Already-marked attendance cannot be altered directly. Submit a request to Admin.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDashChangeReqModalItem(null)}
+                  className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+                <div className="font-bold text-slate-900">
+                  {dashChangeReqModalItem.item.student.name} (
+                  {dashChangeReqModalItem.item.student.admissionNo})
+                </div>
+                <div className="text-slate-600">
+                  Date: <span className="font-mono">{activeDashAttDate}</span> • Route:{' '}
+                  <span className="font-mono">{dashChangeReqModalItem.item.routeCode}</span>
+                </div>
+                <div className="text-slate-600">
+                  Current Arrival: <strong>{dashChangeReqModalItem.item.arrivalStatus}</strong> | Current Departure:{' '}
+                  <strong>{dashChangeReqModalItem.item.departureStatus}</strong>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Shift to Change</label>
+                  <select
+                    value={dashChangeReqModalItem.shift}
+                    onChange={(e) =>
+                      setDashChangeReqModalItem((prev) =>
+                        prev ? { ...prev, shift: e.target.value as 'arrival' | 'departure' } : null
+                      )
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white font-semibold"
+                  >
+                    <option value="arrival">Morning Arrival</option>
+                    <option value="departure">Afternoon Departure</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Requested Status</label>
+                  <select
+                    value={dashChangeReqModalItem.requestedStatus}
+                    onChange={(e) =>
+                      setDashChangeReqModalItem((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              requestedStatus: e.target.value as 'Present' | 'Absent' | 'Leave',
+                            }
+                          : null
+                      )
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white font-semibold"
+                  >
+                    <option value="Present">Present</option>
+                    <option value="Absent">Absent</option>
+                    <option value="Leave">Leave</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="text-xs">
+                <label className="block font-bold text-slate-700 mb-1">
+                  Reason for Attendance Change Request *
+                </label>
+                <textarea
+                  rows={2}
+                  value={dashChangeReqModalItem.reason}
+                  onChange={(e) =>
+                    setDashChangeReqModalItem((prev) =>
+                      prev ? { ...prev, reason: e.target.value } : null
+                    )
+                  }
+                  placeholder="Explain why the marked status needs correction by Admin..."
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setDashChangeReqModalItem(null)}
+                  className="px-3.5 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold cursor-pointer"
+                >
+                  Skip / Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!onSubmitAttendanceChangeRequest) return;
+                    const { item, shift, requestedStatus, reason } = dashChangeReqModalItem;
+                    onSubmitAttendanceChangeRequest({
+                      recordId: item.recordId,
+                      tripId: item.tripId,
+                      date: item.date,
+                      routeId: item.routeId,
+                      routeCode: item.routeCode,
+                      routeName: item.routeName,
+                      campus: item.campus,
+                      studentId: item.student.id,
+                      admissionNo: item.student.admissionNo,
+                      studentName: item.student.name,
+                      className: `${item.student.class} ${item.student.section}`.trim(),
+                      shift,
+                      currentStatus:
+                        shift === 'arrival'
+                          ? (item.arrivalStatus as any)
+                          : (item.departureStatus as any),
+                      requestedStatus,
+                      reason:
+                        reason.trim() ||
+                        `Mismatch resolution requested by ${currentRoleName}`,
+                      requestedBy: currentRoleName,
+                      requestedByRole: currentRoleName,
+                    });
+                    setDashChangeReqModalItem(null);
+                    setDashAttToast(
+                      `Attendance change request sent to Admin for ${item.student.name}.`
+                    );
+                    setTimeout(() => setDashAttToast(null), 4000);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 text-xs font-bold cursor-pointer"
+                >
+                  Send Request to Admin
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // =========================================================================
+  // DEDICATED ATTENDANCE INCHARGE DASHBOARD (100% FINANCE-FREE, CAMPUS-SCOPED)
+  // =========================================================================
+  if (isAttendanceIncharge) {
+    const inchargeCampus = lockedAssistantCampus || 'Sr';
+    const inchargeAudit = analyzeAttendanceForDate({
+      date: today,
+      students,
+      routes,
+      trips: dailyTrips,
+      attendanceRecords,
+      campusFilter: inchargeCampus,
+    });
+
+    return (
+      <div className="space-y-6">
+        <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md border border-slate-800 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div className="space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-violet-500/20 border border-violet-400/30 text-violet-200 text-xs font-bold">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Role: Attendance Incharge (Attendance &amp; Verification Desk)</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/20 border border-amber-400/30 text-amber-300 text-xs font-bold">
+                <Building2 className="w-3.5 h-3.5" />
+                <span>Assigned Campus: {formatCampusLabel(inchargeCampus)}</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono">
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                <span>{today}</span>
+              </span>
+            </div>
+            <h2 className="text-2xl font-bold tracking-tight">
+              {inchargeCampus === 'Jr' ? 'Junior Campus (Jr)' : 'Senior Campus (Sr)'} Attendance Incharge Dashboard
+            </h2>
+            <p className="text-xs text-slate-400">
+              Monitor Arrival &amp; Departure marking, unmarked members, shift mismatches, and absentee calling exclusively for {formatCampusLabel(inchargeCampus)}.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onNavigate('operations' as any, 'arrival')}
+              className="px-3.5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs cursor-pointer"
+            >
+              1- Arrival Attendance
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('operations' as any, 'departure')}
+              className="px-3.5 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs cursor-pointer"
+            >
+              2- Departure Attendance
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('operations' as any, 'unmarked_mismatch')}
+              className="px-3.5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+            >
+              3- Unmarked &amp; Mismatch Report
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('operations' as any, 'summary')}
+              className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 font-bold text-xs cursor-pointer"
+            >
+              6- Attendance Summary
+            </button>
+          </div>
+        </div>
+
+        {/* 4 Attendance KPI Cards (Strictly Non-Financial) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div
+            onClick={() => onNavigate('operations' as any, 'arrival')}
+            className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-2xs hover:border-slate-300 cursor-pointer"
+          >
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Active Campus Members ({inchargeCampus})
+            </div>
+            <div className="mt-2 text-2xl font-bold font-mono text-slate-900">
+              {inchargeAudit.totalActiveMembers}
+            </div>
+            <div className="mt-1 text-xs text-emerald-700 font-semibold">
+              Fully Marked Today: {inchargeAudit.fullyMarkedCount}
+            </div>
+          </div>
+
+          <div
+            onClick={() => {
+              setDashAttTab('both_unmarked');
+              onNavigate('operations' as any, 'unmarked_mismatch');
+            }}
+            className="bg-white p-5 rounded-2xl border border-rose-200 shadow-2xs hover:border-rose-300 cursor-pointer"
+          >
+            <div className="text-xs font-semibold uppercase tracking-wider text-rose-700">
+              Both Arrival &amp; Departure Unmarked
+            </div>
+            <div className="mt-2 text-2xl font-bold font-mono text-rose-700">
+              {inchargeAudit.bothNotMarked.length}
+            </div>
+            <div className="mt-1 text-xs text-slate-500">
+              Neither shift marked today
+            </div>
+          </div>
+
+          <div
+            onClick={() => {
+              setDashAttTab('single_unmarked');
+              onNavigate('operations' as any, 'unmarked_mismatch');
+            }}
+            className="bg-white p-5 rounded-2xl border border-amber-200 shadow-2xs hover:border-amber-300 cursor-pointer"
+          >
+            <div className="text-xs font-semibold uppercase tracking-wider text-amber-800">
+              Single Shift Unmarked (Arr OR Dep)
+            </div>
+            <div className="mt-2 text-2xl font-bold font-mono text-amber-700">
+              {inchargeAudit.singleShiftNotMarked.length}
+            </div>
+            <div className="mt-1 text-xs text-slate-500">
+              Arrival Unmarked: {inchargeAudit.arrivalOnlyNotMarked.length} • Departure Unmarked: {inchargeAudit.departureOnlyNotMarked.length}
+            </div>
+          </div>
+
+          <div
+            onClick={() => {
+              setDashAttTab('mismatch');
+              onNavigate('operations' as any, 'unmarked_mismatch');
+            }}
+            className="bg-white p-5 rounded-2xl border border-violet-200 shadow-2xs hover:border-violet-300 cursor-pointer"
+          >
+            <div className="text-xs font-semibold uppercase tracking-wider text-violet-800">
+              Arrival vs. Departure Mismatch
+            </div>
+            <div className="mt-2 text-2xl font-bold font-mono text-violet-700">
+              {inchargeAudit.statusMismatches.length}
+            </div>
+            <div className="mt-1 text-xs text-slate-500">
+              Present in one shift &amp; Absent in the other
+            </div>
+          </div>
+        </div>
+
+        {/* Unmarked & Mismatched Attendance List Scoped to Incharge Campus */}
+        {renderUnmarkedAndMismatchDashboardCard(inchargeCampus)}
+      </div>
+    );
+  }
 
   // =========================================================================
   // DEDICATED TRANSPORT ASSISTANT DASHBOARD (GATE & FIELD OPERATIONS ONLY)
@@ -855,6 +1732,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Campus-Scoped Unmarked & Mismatched Attendance List for Transport Assistant */}
+        {renderUnmarkedAndMismatchDashboardCard(lockedAssistantCampus || 'Sr')}
 
         {/* Assistant Middle Section: Daily Transit Attendance + Maintenance Work Orders */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1314,7 +2194,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </button>
             ) : (
               <button
-                onClick={() => onNavigate('operations' as any, 'pack')}
+                onClick={() => onNavigate('routes' as any, 'pack')}
                 className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <span>Print Route List</span>
@@ -1565,6 +2445,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* UNMARKED & MISMATCHED ATTENDANCE LIST (ARRIVAL, DEPARTURE, BOTH & MISMATCH) */}
+      {renderUnmarkedAndMismatchDashboardCard(activeFinancialCampus)}
 
       {/* =====================================================================
           INCOME, EXPENSE, DUES AMOUNT & ATTENDANCE GRAPHS + UPCOMING VEHICLE RENEWALS

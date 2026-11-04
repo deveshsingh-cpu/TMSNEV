@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { MapPin, Bus, Filter, Search, X, ChevronDown, ChevronUp, Users, Clock, Edit2, Check } from 'lucide-react';
+import { MapPin, Bus, Filter, Search, X, ChevronDown, ChevronUp, Users, Clock, Edit2, Check, Printer, FileSpreadsheet } from 'lucide-react';
 import { Route, ScheduledService, Village, TransportStop, Vehicle, CampusMaster, StudentMember } from '../../types/index.js';
-import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
+import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview, exportToCsv } from '../../utils/exportPrint.js';
 import { api } from '../../services/api.js';
 
 interface RoutesViewProps {
@@ -14,6 +14,12 @@ interface RoutesViewProps {
   vehicles: Vehicle[];
   students?: StudentMember[];
   initialSubTab?: string;
+  onOpenPrintPack?: (
+    routeId: string,
+    shiftName: string,
+    weekStartDate: string,
+    weekEndDate?: string
+  ) => Promise<void>;
 }
 
 export const RoutesView: React.FC<RoutesViewProps> = ({
@@ -26,18 +32,22 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
   vehicles,
   students = [],
   initialSubTab = 'routes',
+  onOpenPrintPack,
 }) => {
-  const [activeTab, setActiveTab] = useState<'routes' | 'multi_trips' | 'villages_stops'>(
+  const [activeTab, setActiveTab] = useState<'routes' | 'multi_trips' | 'villages_stops' | 'pack'>(
     initialSubTab === 'services'
       ? 'multi_trips'
       : initialSubTab === 'villages_stops'
       ? 'villages_stops'
+      : initialSubTab === 'pack'
+      ? 'pack'
       : 'routes'
   );
 
   useEffect(() => {
     if (initialSubTab === 'services') setActiveTab('multi_trips');
     else if (initialSubTab === 'villages_stops') setActiveTab('villages_stops');
+    else if (initialSubTab === 'pack') setActiveTab('pack');
     else if (initialSubTab === 'routes') setActiveTab('routes');
   }, [initialSubTab]);
 
@@ -164,16 +174,345 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
     vehicleSchedules[s.vehicleNumber].push(s);
   }
 
+  // --- Print Route List ('pack') State & Helpers ---
+  const todayIso = new Date().toISOString().split('T')[0];
+  const [packVehicleFilter, setPackVehicleFilter] = useState<string>('all');
+  const [packRouteId, setPackRouteId] = useState<string>(routes[0]?.id || '');
+  const [packWeekStart, setPackWeekStart] = useState<string>(todayIso);
+  const [packWeekEnd, setPackWeekEnd] = useState<string>(() => {
+    const endD = new Date();
+    endD.setDate(endD.getDate() + 5);
+    return endD.toISOString().split('T')[0];
+  });
+
+  const filteredPackRoutes = routes.filter((r) => {
+    if (packVehicleFilter === 'all') return true;
+    return r.vehicleId === packVehicleFilter || r.vehicleNumber === packVehicleFilter;
+  });
+
+  useEffect(() => {
+    if (
+      filteredPackRoutes.length > 0 &&
+      !filteredPackRoutes.some((r) => r.id === packRouteId)
+    ) {
+      setPackRouteId(filteredPackRoutes[0].id);
+    }
+  }, [packVehicleFilter, routes]);
+
+  const handleStartCalendarChange = (val: string) => {
+    setPackWeekStart(val);
+    if (val) {
+      const endD = new Date(val);
+      endD.setDate(endD.getDate() + 5);
+      setPackWeekEnd(endD.toISOString().split('T')[0]);
+    }
+  };
+
+  const getSelectedWeekDates = (): string[] => {
+    const result: string[] = [];
+    if (!packWeekStart) return result;
+    const cur = new Date(packWeekStart);
+    const end = packWeekEnd ? new Date(packWeekEnd) : new Date(packWeekStart);
+    let count = 0;
+    while (cur <= end && count < 7) {
+      result.push(cur.toISOString().split('T')[0]);
+      cur.setDate(cur.getDate() + 1);
+      count++;
+    }
+    if (result.length === 0) result.push(packWeekStart);
+    return result;
+  };
+
+  const weekDates = getSelectedWeekDates();
+  const selectedPackRoute =
+    filteredPackRoutes.find((r) => r.id === packRouteId) ||
+    routes.find((r) => r.id === packRouteId) ||
+    filteredPackRoutes[0] ||
+    routes[0];
+
+  const routeRosterMembers = selectedPackRoute
+    ? students.filter(
+        (s) =>
+          s.transportStatus !== 'Left' &&
+          (s.routeId === selectedPackRoute.id ||
+            (s.routeCode &&
+              selectedPackRoute.code &&
+              s.routeCode.trim().toLowerCase() === selectedPackRoute.code.trim().toLowerCase()))
+      )
+    : [];
+
+  const handlePrintRouteList = () => {
+    if (selectedPackRoute && onOpenPrintPack) {
+      onOpenPrintPack(
+        selectedPackRoute.id,
+        `Trip ${selectedPackRoute.tripNumber || 1}`,
+        packWeekStart,
+        packWeekEnd
+      ).catch(() => {});
+    }
+
+    const escapeHtml = (val: string | number | undefined | null): string => {
+      if (val === undefined || val === null) return '';
+      return String(val)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    };
+
+    const routeTitle = selectedPackRoute
+      ? `Route Member List: ${selectedPackRoute.code} — ${selectedPackRoute.name}`
+      : 'Route Member List';
+
+    const subtitleText = selectedPackRoute
+      ? `Vehicle: ${selectedPackRoute.vehicleNumber || '—'} • Trip ${selectedPackRoute.tripNumber || 1} • Campus: ${getCampusLabel(selectedPackRoute.campus || '')}`
+      : '';
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(routeTitle)}</title>
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #0f172a;
+      margin: 0;
+      padding: 14px;
+      font-size: 11px;
+      background: #fff;
+    }
+    .header {
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .school-name {
+      font-size: 16px;
+      font-weight: 800;
+      text-transform: uppercase;
+      color: #334155;
+      margin-bottom: 2px;
+    }
+    .report-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: #0f172a;
+      margin: 0 0 4px 0;
+    }
+    .sub-meta {
+      font-size: 11px;
+      color: #475569;
+    }
+    .right-meta {
+      text-align: right;
+      font-size: 11px;
+      color: #334155;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      border: 1px solid #cbd5e1;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: middle;
+    }
+    th {
+      background-color: #f1f5f9;
+      font-weight: 700;
+      font-size: 10px;
+      color: #334155;
+    }
+    .suspended-row td {
+      background-color: #fff1f2;
+      color: #dc2626;
+    }
+    .dp-img {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      border: 1px solid #cbd5e1;
+      display: block;
+      margin: 0 auto;
+    }
+    .dp-fallback {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: #e2e8f0;
+      color: #334155;
+      font-weight: 700;
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto;
+      text-align: center;
+      line-height: 28px;
+    }
+    .badge-active {
+      background: #d1fae5;
+      color: #065f46;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 700;
+      font-size: 9px;
+      display: inline-block;
+    }
+    .badge-suspended {
+      background: #fee2e2;
+      color: #b91c1c;
+      border: 1px solid #fca5a5;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 700;
+      font-size: 9px;
+      display: inline-block;
+    }
+    .footer {
+      margin-top: 18px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #475569;
+      border-top: 1px solid #cbd5e1;
+      padding-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      ${schoolName ? `<div class="school-name">${escapeHtml(schoolName)}</div>` : ''}
+      <div class="report-title">${escapeHtml(routeTitle)}</div>
+      <div class="sub-meta">
+        Vehicle: <strong>${escapeHtml(selectedPackRoute?.vehicleNumber || '—')}</strong> •
+        Trip: <strong>Trip ${escapeHtml(selectedPackRoute?.tripNumber || 1)}</strong> •
+        Campus: <strong>${escapeHtml(getCampusLabel(selectedPackRoute?.campus || ''))}</strong>
+        ${selectedPackRoute?.driverName ? ` • Driver: <strong>${escapeHtml(selectedPackRoute.driverName)}</strong>` : ''}
+        ${selectedPackRoute?.assistantName ? ` • Assistant: <strong>${escapeHtml(selectedPackRoute.assistantName)}</strong>` : ''}
+      </div>
+    </div>
+    <div class="right-meta">
+      <div>Period: <strong>${escapeHtml(packWeekStart)}</strong> to <strong>${escapeHtml(packWeekEnd)}</strong></div>
+      <div style="margin-top:3px;font-weight:700;">Total Members: ${routeRosterMembers.length}</div>
+      <div style="font-size:9px;color:#64748b;margin-top:2px;">Printed: ${new Date().toLocaleString()}</div>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:28px;text-align:center;">#</th>
+        <th style="width:38px;text-align:center;">DP</th>
+        <th>Member Name &amp; ID</th>
+        <th>Type / Class</th>
+        <th>Pickup &amp; Drop Stop</th>
+        <th>Status</th>
+        ${weekDates
+          .map(
+            (dt) =>
+              `<th style="text-align:center;font-family:monospace;font-size:10px;">
+                <div>${escapeHtml(dt)}</div>
+                <div style="font-size:8px;color:#64748b;font-weight:normal;">IN / OUT</div>
+              </th>`
+          )
+          .join('')}
+      </tr>
+    </thead>
+    <tbody>
+      ${
+        routeRosterMembers.length === 0
+          ? `<tr><td colspan="${6 + weekDates.length}" style="text-align:center;padding:24px;color:#94a3b8;">No active or suspended members on this route.</td></tr>`
+          : routeRosterMembers
+              .map((m, idx) => {
+                const isSuspended = m.transportStatus === 'Suspended';
+                const dpCell = m.profilePhoto
+                  ? `<img src="${escapeHtml(m.profilePhoto)}" alt="${escapeHtml(m.name)}" class="dp-img" />`
+                  : `<div class="dp-fallback">${escapeHtml(m.name.slice(0, 2).toUpperCase())}</div>`;
+                return `<tr class="${isSuspended ? 'suspended-row' : ''}">
+                  <td style="text-align:center;font-family:monospace;">${idx + 1}</td>
+                  <td style="text-align:center;">${dpCell}</td>
+                  <td>
+                    <div style="font-weight:700;">${escapeHtml(m.name)}</div>
+                    <div style="font-size:9px;font-family:monospace;color:${isSuspended ? '#ef4444' : '#64748b'};">${escapeHtml(m.admissionNo)}</div>
+                  </td>
+                  <td>${escapeHtml(m.memberType)} (${escapeHtml(m.class)}-${escapeHtml(m.section)})</td>
+                  <td>${escapeHtml(m.pickupDropStopName)} (${escapeHtml(m.villageName)})</td>
+                  <td>
+                    <span class="${isSuspended ? 'badge-suspended' : 'badge-active'}">${escapeHtml(m.transportStatus)}</span>
+                  </td>
+                  ${weekDates
+                    .map(
+                      () =>
+                        `<td style="text-align:center;font-size:11px;color:${isSuspended ? '#dc2626' : '#64748b'};font-weight:${isSuspended ? '700' : '400'};">
+                          ${isSuspended ? 'SUSPENDED' : '☐ / ☐'}
+                        </td>`
+                    )
+                    .join('')}
+                </tr>`;
+              })
+              .join('')
+      }
+    </tbody>
+  </table>
+  <div class="footer">
+    <div>Driver Signature: _______________________</div>
+    <div>Bus Assistant Signature: _______________________</div>
+    <div>Transport Incharge: _______________________</div>
+  </div>
+</body>
+</html>`;
+
+    openHtmlPrintPreview({
+      title: routeTitle,
+      subtitle: `${subtitleText} • Period: ${packWeekStart} to ${packWeekEnd} (${routeRosterMembers.length} members)`,
+      html,
+      filename: `route_list_${selectedPackRoute?.code || 'route'}_${packWeekStart}`,
+    });
+  };
+
+  const handleExportRouteListCsv = () => {
+    const cols = [
+      { header: 'S.No', accessor: (_: StudentMember, i: number) => i + 1 },
+      { header: 'Member Name', accessor: (m: StudentMember) => m.name },
+      { header: 'Admission / Staff ID', accessor: (m: StudentMember) => m.admissionNo },
+      { header: 'Gender', accessor: (m: StudentMember) => m.gender },
+      { header: 'Type / Class', accessor: (m: StudentMember) => `${m.memberType} (${m.class}-${m.section})` },
+      { header: 'Pickup & Drop Stop', accessor: (m: StudentMember) => `${m.pickupDropStopName} (${m.villageName})` },
+      { header: 'Mobile', accessor: (m: StudentMember) => m.mobile },
+      { header: 'Status', accessor: (m: StudentMember) => m.transportStatus },
+      ...weekDates.map((dt) => ({
+        header: `${dt} (IN / OUT)`,
+        accessor: (m: StudentMember) => (m.transportStatus === 'Suspended' ? 'SUSPENDED' : '[ ] / [ ]'),
+      })),
+    ];
+    exportToCsv(
+      `route_member_list_${selectedPackRoute?.code || 'route'}_${packWeekStart}`,
+      cols,
+      routeRosterMembers
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* Unified Header & Toolbar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
             {activeTab === 'multi_trips'
               ? 'Vehicle Schedule & Trip Assignments'
               : activeTab === 'villages_stops'
               ? 'Villages & Transport Stops'
+              : activeTab === 'pack'
+              ? 'Print Route List (Driver & Bus Assistant Sheet)'
               : 'Active Routes & Stop Sequences'}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
@@ -181,8 +520,34 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
               ? `${filteredServices.length} Services`
               : activeTab === 'villages_stops'
               ? `${dependentStops.length} Stops`
+              : activeTab === 'pack'
+              ? `${routeRosterMembers.length} Members`
               : `${filteredRoutes.length} Routes`}
           </span>
+
+          <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+            {(
+              [
+                { id: 'routes', label: '1- Active Routes & Stops' },
+                { id: 'multi_trips', label: '2- Vehicle Schedule' },
+                { id: 'pack', label: '3- Print Route List' },
+                { id: 'villages_stops', label: 'Villages & Stops' },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setActiveTab(t.id)}
+                className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                  activeTab === t.id
+                    ? 'bg-slate-900 text-amber-400 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -1131,6 +1496,236 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
               );
             })
           )}
+        </div>
+      )}
+
+      {/* Tab 4: Print Route List (Shifted from Attendance Module to Routes and Trips) */}
+      {activeTab === 'pack' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Filter by Vehicle
+                </label>
+                <select
+                  value={packVehicleFilter}
+                  onChange={(e) => setPackVehicleFilter(e.target.value)}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50"
+                >
+                  <option value="all">All Vehicles ({routes.length} Routes)</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.registrationNumber}>
+                      {v.registrationNumber} {v.nickname ? `— ${v.nickname}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Select Route ({filteredPackRoutes.length})
+                </label>
+                <select
+                  value={packRouteId}
+                  onChange={(e) => setPackRouteId(e.target.value)}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50"
+                >
+                  {filteredPackRoutes.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.code} — {r.name || r.villageNames.join(', ')} ({r.vehicleNumber})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Week Start Date
+                </label>
+                <input
+                  type="date"
+                  value={packWeekStart}
+                  onChange={(e) => handleStartCalendarChange(e.target.value)}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Week End Date
+                </label>
+                <input
+                  type="date"
+                  value={packWeekEnd}
+                  min={packWeekStart}
+                  onChange={(e) => setPackWeekEnd(e.target.value)}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintRouteList}
+                  className="flex-1 py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print Route List</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportRouteListCsv}
+                  className="py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                  title="Export Route Member List to CSV"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-amber-400" />
+                  <span>CSV</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4">
+              <div>
+                {schoolName && (
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    {schoolName}
+                  </div>
+                )}
+                <h3 className="text-base font-bold text-slate-900">
+                  Route Member List: {selectedPackRoute?.code} — {selectedPackRoute?.name}
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Vehicle: <strong>{selectedPackRoute?.vehicleNumber}</strong> • Trip:{' '}
+                  <strong>Trip {selectedPackRoute?.tripNumber}</strong> • Campus:{' '}
+                  <strong>{getCampusLabel(selectedPackRoute?.campus || '')}</strong>
+                </p>
+              </div>
+              <div className="text-right text-xs text-slate-600">
+                <div>
+                  Period: <strong>{packWeekStart}</strong> to <strong>{packWeekEnd}</strong>
+                </div>
+                <div className="font-semibold text-slate-700 mt-0.5">
+                  Total Members: {routeRosterMembers.length}
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs border border-slate-200">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-700 font-bold">
+                    <th className="border border-slate-200 p-2 w-10 text-center">#</th>
+                    <th className="border border-slate-200 p-2 w-14 text-center">DP</th>
+                    <th className="border border-slate-200 p-2">Member Name &amp; ID</th>
+                    <th className="border border-slate-200 p-2">Type / Class</th>
+                    <th className="border border-slate-200 p-2">Pickup &amp; Drop Stop</th>
+                    <th className="border border-slate-200 p-2">Status</th>
+                    {weekDates.map((dt) => (
+                      <th key={dt} className="border border-slate-200 p-2 text-center font-mono text-[11px]">
+                        <div>{dt}</div>
+                        <div className="text-[9px] text-slate-500 font-normal">IN / OUT</div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {routeRosterMembers.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={6 + weekDates.length}
+                        className="p-8 text-center text-slate-400"
+                      >
+                        No active or suspended members on this route.
+                      </td>
+                    </tr>
+                  ) : (
+                    routeRosterMembers.map((m, idx) => {
+                      const isSuspended = m.transportStatus === 'Suspended';
+                      return (
+                        <tr
+                          key={m.id}
+                          className={isSuspended ? 'bg-rose-50/60' : 'hover:bg-slate-50'}
+                        >
+                          <td className="border border-slate-200 p-2 text-center font-mono">
+                            {idx + 1}
+                          </td>
+                          <td className="border border-slate-200 p-2 text-center">
+                            {m.profilePhoto ? (
+                              <img
+                                src={m.profilePhoto}
+                                alt={m.name}
+                                className="w-8 h-8 rounded-md object-cover mx-auto border border-slate-300"
+                              />
+                            ) : (
+                              <div className="w-8 h-8 rounded-md bg-slate-200 flex items-center justify-center font-bold text-[10px] mx-auto">
+                                {m.name.slice(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                          </td>
+                          <td className="border border-slate-200 p-2">
+                            <div
+                              className={`font-bold ${
+                                isSuspended ? 'text-red-600' : 'text-slate-900'
+                              }`}
+                            >
+                              {m.name}
+                            </div>
+                            <div
+                              className={`text-[10px] font-mono ${
+                                isSuspended ? 'text-red-500' : 'text-slate-500'
+                              }`}
+                            >
+                              {m.admissionNo}
+                            </div>
+                          </td>
+                          <td
+                            className={`border border-slate-200 p-2 ${
+                              isSuspended ? 'text-red-600 font-semibold' : 'text-slate-700'
+                            }`}
+                          >
+                            {m.memberType} ({m.class}-{m.section})
+                          </td>
+                          <td
+                            className={`border border-slate-200 p-2 ${
+                              isSuspended ? 'text-red-600' : 'text-slate-700'
+                            }`}
+                          >
+                            {m.pickupDropStopName} ({m.villageName})
+                          </td>
+                          <td className="border border-slate-200 p-2">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                isSuspended
+                                  ? 'bg-red-100 text-red-700 border border-red-300'
+                                  : 'bg-emerald-100 text-emerald-800'
+                              }`}
+                            >
+                              {m.transportStatus}
+                            </span>
+                          </td>
+                          {weekDates.map((dt) => (
+                            <td
+                              key={dt}
+                              className="border border-slate-200 p-2 text-center text-[10px] text-slate-300"
+                            >
+                              {isSuspended ? (
+                                <span className="text-red-600 font-bold">SUSPENDED</span>
+                              ) : (
+                                '☐ / ☐'
+                              )}
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -217,23 +217,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ],
     },
     {
+      key: 'routes_group',
+      label: '4- Routes and Trips',
+      icon: <RouteIcon className="w-5 h-5" />,
+      defaultNavKey: 'routes',
+      defaultSubTab: 'routes',
+      subItems: [
+        { id: 'as-rt-routes', label: '1- Active Routes & Stops', navKey: 'routes', subTab: 'routes' },
+        { id: 'as-rt-services', label: '2- Vehicle Schedule', navKey: 'routes', subTab: 'services' },
+        { id: 'as-rt-pack', label: '3- Print Route List', navKey: 'routes', subTab: 'pack' },
+      ],
+    },
+    {
       key: 'operations_group',
-      label: '4- Route Attendance & List',
+      label: '5- Attendance Module',
       icon: <Clock className="w-5 h-5" />,
       defaultNavKey: 'operations',
       defaultSubTab: 'arrival',
       subItems: [
         { id: 'op-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
         { id: 'op-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
-        { id: 'op-absentees', label: '3- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
-        { id: 'op-calendar', label: '4- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
-        { id: 'op-summary', label: '5- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
-        { id: 'op-pack', label: '6- Print Route List', navKey: 'operations', subTab: 'pack' },
+        { id: 'op-unmarked', label: '3- Unmarked & Mismatch Report', navKey: 'operations', subTab: 'unmarked_mismatch' },
+        { id: 'op-absentees', label: '4- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
+        { id: 'op-calendar', label: '5- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
+        { id: 'op-summary', label: '6- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
       ],
     },
     {
       key: 'fees_group',
-      label: '5- Receive Fees & Financial',
+      label: '6- Receive Fees & Financial',
       icon: <CreditCard className="w-5 h-5" />,
       defaultNavKey: 'fees',
       defaultSubTab: 'collect',
@@ -247,7 +259,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'expenses_group',
-      label: '6- Expense Bills & Day Book',
+      label: '7- Expense Bills & Day Book',
       icon: <BookOpenCheck className="w-5 h-5" />,
       defaultNavKey: 'expenses',
       defaultSubTab: 'expenses',
@@ -261,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'accounts_group',
-      label: '7- Day Book & Ledgers (View)',
+      label: '8- Day Book & Ledgers (View)',
       icon: <Landmark className="w-5 h-5" />,
       defaultNavKey: 'accounts',
       defaultSubTab: 'day_book',
@@ -274,7 +286,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'assistant_vehicles_group',
-      label: '8- Log Book & Work Orders',
+      label: '9- Log Book & Work Orders',
       icon: <Truck className="w-5 h-5" />,
       defaultNavKey: 'vehicles',
       defaultSubTab: 'odometer',
@@ -381,12 +393,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'rt-routes', label: '1- Active Routes & Stops', navKey: 'routes', subTab: 'routes' },
         { id: 'rt-services', label: '2- Vehicle Schedule', navKey: 'routes', subTab: 'services' },
-        { id: 'rt-maint', label: '3- Work Orders & Maintenance', navKey: 'vehicles', subTab: 'maintenance' },
+        { id: 'rt-pack', label: '3- Print Route List', navKey: 'routes', subTab: 'pack' },
+        { id: 'rt-maint', label: '4- Work Orders & Maintenance', navKey: 'vehicles', subTab: 'maintenance' },
       ],
     },
     {
       key: 'operations_group',
-      label: '5- Attendance & Route List',
+      label: '5- Attendance Module',
       icon: <Clock className="w-5 h-5" />,
       defaultNavKey: 'operations',
       defaultSubTab: 'arrival',
@@ -394,10 +407,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'op-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
         { id: 'op-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
-        { id: 'op-absentees', label: '3- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
-        { id: 'op-calendar', label: '4- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
-        { id: 'op-summary', label: '5- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
-        { id: 'op-pack', label: '6- Print Route List', navKey: 'operations', subTab: 'pack' },
+        { id: 'op-unmarked', label: '3- Unmarked & Mismatch Report', navKey: 'operations', subTab: 'unmarked_mismatch' },
+        { id: 'op-absentees', label: '4- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
+        { id: 'op-calendar', label: '5- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
+        { id: 'op-summary', label: '6- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
       ],
     },
     {
@@ -561,18 +574,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
   ];
 
-  // Dedicated strict sidebar for Attendance Incharge (Sr & Jr): ONLY Arrival Attendance, Departure Attendance & Attendance Summary Sheet
+  // Dedicated strict sidebar for Attendance Incharge (Sr & Jr): Zero finance modules; ONLY Attendance Dashboard & Attendance Module
   const attendanceInchargeGroups: SidebarGroupItem[] = [
     {
+      key: 'dashboard',
+      label: '1- Attendance Dashboard',
+      icon: <LayoutDashboard className="w-5 h-5" />,
+      defaultNavKey: 'dashboard',
+    },
+    {
       key: 'incharge_operations_group',
-      label: 'Campus Attendance & Summary',
+      label: '2- Attendance Module',
       icon: <Clock className="w-5 h-5" />,
       defaultNavKey: 'operations',
       defaultSubTab: 'arrival',
       subItems: [
         { id: 'inc-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
         { id: 'inc-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
-        { id: 'inc-summary', label: '3- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
+        { id: 'inc-unmarked', label: '3- Unmarked & Mismatch Report', navKey: 'operations', subTab: 'unmarked_mismatch' },
+        { id: 'inc-absentees', label: '4- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
+        { id: 'inc-calendar', label: '5- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
+        { id: 'inc-summary', label: '6- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
       ],
     },
   ];

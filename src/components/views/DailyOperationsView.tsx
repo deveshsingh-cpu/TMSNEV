@@ -2,12 +2,19 @@ import React, { useState, useEffect } from 'react';
 import {
   CheckCircle, Printer, Calendar, Check, X,
   ArrowDownLeft, ArrowUpRight, FileSpreadsheet,
-  Phone, AlertTriangle, Clock, UserCheck, MessageSquare
+  Phone, AlertTriangle, Clock, UserCheck, MessageSquare, ShieldAlert, Send
 } from 'lucide-react';
 import {
   DailyTrip, TripAttendanceRecord, Route, StudentMember, CampusMaster, Vehicle, UserRole, AbsenteeCallRecord
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview, exportToCsv } from '../../utils/exportPrint.js';
+import {
+  analyzeAttendanceForDate,
+  getPreviousWorkingDate,
+  AttendanceChangeRequest,
+  AttendanceAcknowledgement,
+  MemberAttendanceDiscrepancyItem,
+} from '../../utils/attendanceAlerts.js';
 
 interface DailyOperationsViewProps {
   schoolName?: string;
@@ -22,6 +29,29 @@ interface DailyOperationsViewProps {
   students?: StudentMember[];
   absenteeCalls?: AbsenteeCallRecord[];
   initialSubTab?: string;
+  externalTargetRoute?: {
+    routeId: string;
+    date: string;
+    mode: 'arrival' | 'departure';
+  } | null;
+  onClearExternalTargetRoute?: () => void;
+  attendanceChangeRequests?: AttendanceChangeRequest[];
+  attendanceAcknowledgements?: AttendanceAcknowledgement[];
+  onSubmitAttendanceChangeRequest?: (
+    req: Omit<AttendanceChangeRequest, 'id' | 'requestedAt' | 'status'>
+  ) => void;
+  onReviewAttendanceChangeRequest?: (
+    id: string,
+    action: 'Approve' | 'Reject',
+    remarks?: string
+  ) => Promise<void>;
+  onAcknowledgeUnmarkedAttendance?: (payload: {
+    date: string;
+    routeId: string;
+    routeCode: string;
+    campus: string;
+    note: string;
+  }) => void;
   onSelectTrip: (tripId: string) => void;
   onSelectRouteForDate?: (date: string, routeId: string) => Promise<void>;
   onMarkAttendance: (recordId: string, source: 'driver' | 'assistant', value: string, reason?: string) => Promise<any>;
@@ -115,6 +145,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   students = [],
   absenteeCalls = [],
   initialSubTab,
+  externalTargetRoute,
+  onClearExternalTargetRoute,
+  attendanceChangeRequests = [],
+  attendanceAcknowledgements = [],
+  onSubmitAttendanceChangeRequest,
+  onReviewAttendanceChangeRequest,
+  onAcknowledgeUnmarkedAttendance,
   onSelectTrip,
   onMarkAttendance,
   onBatchSaveAttendance,
@@ -131,19 +168,17 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   const resolveAllowedSubView = (
     tab?: string
-  ): 'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees' => {
-    if (isAttendanceIncharge) {
-      return tab === 'summary' ? 'summary' : 'board';
-    }
-    if (tab === 'pack') return 'pack';
+  ): 'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees' | 'unmarked_mismatch' => {
+    if (tab === 'unmarked_mismatch') return 'unmarked_mismatch';
     if (tab === 'summary') return 'summary';
     if (tab === 'calendar') return 'calendar';
     if (tab === 'call_absentees') return 'call_absentees';
+    if (tab === 'pack') return 'pack';
     return 'board';
   };
 
   const [activeSubView, setActiveSubView] = useState<
-    'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees'
+    'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees' | 'unmarked_mismatch'
   >(() => resolveAllowedSubView(initialSubTab));
 
   // Separate mode for 1- Arrival Attendance vs 2- Departure Attendance
@@ -172,19 +207,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const [isConfirmingEarlyArrival, setIsConfirmingEarlyArrival] = useState(false);
 
   useEffect(() => {
-    if (isAttendanceIncharge) {
-      if (initialSubTab === 'summary') {
-        setActiveSubView('summary');
-      } else if (initialSubTab === 'departure') {
-        setActiveSubView('board');
-        setBoardMode('departure');
-      } else {
-        setActiveSubView('board');
-        setBoardMode('arrival');
-      }
-      return;
-    }
-    if (initialSubTab === 'pack') setActiveSubView('pack');
+    if (initialSubTab === 'unmarked_mismatch') setActiveSubView('unmarked_mismatch');
+    else if (initialSubTab === 'pack') setActiveSubView('pack');
     else if (initialSubTab === 'summary') setActiveSubView('summary');
     else if (initialSubTab === 'calendar') setActiveSubView('calendar');
     else if (initialSubTab === 'call_absentees') setActiveSubView('call_absentees');
@@ -195,9 +219,10 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       setActiveSubView('board');
       setBoardMode('arrival');
     }
-  }, [initialSubTab, isAttendanceIncharge]);
+  }, [initialSubTab]);
 
   const todayStr = getTodayLocalStr();
+  const yesterdayStr = getPreviousWorkingDate(todayStr);
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
   const [selectedCampus, setSelectedCampus] = useState<string>(lockedCampus || 'all');
   const [selectedVehicleFilter, setSelectedVehicleFilter] = useState<string>('all');
@@ -210,6 +235,50 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const [selectedTripId, setSelectedTripId] = useState<string>(trips[0]?.id || '');
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
   const [isLoadingRouteTrip] = useState(false);
+
+  // Deep-link from Startup Popup or Dashboard ("Proceed to Mark Attendance of that Route Directly")
+  useEffect(() => {
+    if (externalTargetRoute && externalTargetRoute.routeId) {
+      setActiveSubView('board');
+      setBoardMode(externalTargetRoute.mode || 'arrival');
+      if (externalTargetRoute.date) {
+        setSelectedDate(externalTargetRoute.date);
+      }
+      setSelectedVehicleFilter('all');
+      setSelectedRouteId(externalTargetRoute.routeId);
+      setSelectedTripId(`dt-${externalTargetRoute.routeId}-${externalTargetRoute.date || todayStr}`);
+      if (onClearExternalTargetRoute) {
+        onClearExternalTargetRoute();
+      }
+    }
+  }, [externalTargetRoute, onClearExternalTargetRoute, todayStr]);
+
+  // --- Unmarked & Mismatch Sub-Module State ---
+  const [discrepancyDate, setDiscrepancyDate] = useState<string>(todayStr);
+  const [discrepancyCampus, setDiscrepancyCampus] = useState<'all' | 'Sr' | 'Jr'>(
+    (lockedCampus as 'Sr' | 'Jr') || 'all'
+  );
+  const [discrepancyRouteId, setDiscrepancyRouteId] = useState<string>('all');
+  const [discrepancyCategoryTab, setDiscrepancyCategoryTab] = useState<
+    'both_not_marked' | 'single_shift_not_marked' | 'status_mismatch' | 'requests_acks'
+  >('both_not_marked');
+  const [changeRequestModalTarget, setChangeRequestModalTarget] = useState<{
+    studentId: string;
+    studentName: string;
+    admissionNo: string;
+    classSection: string;
+    routeId: string;
+    routeCode: string;
+    campus: 'Sr' | 'Jr';
+    date: string;
+    tripId: string;
+    recordId: string;
+    currentArrivalStatus: TripAttendanceRecord['driverStatus'];
+    currentDepartureStatus: TripAttendanceRecord['assistantStatus'];
+    proposedArrivalStatus: TripAttendanceRecord['driverStatus'];
+    proposedDepartureStatus: TripAttendanceRecord['assistantStatus'];
+    reason: string;
+  } | null>(null);
 
   // Optimistic local state for marked Arrival (In) and Departure (Out) times per route+date so the UI updates in 0ms
   const [localMarkedTripTimings, setLocalMarkedTripTimings] = useState<
@@ -283,6 +352,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     admissionNo: string;
     savedStatus: string;
     mode: 'arrival' | 'departure';
+    rec?: TripAttendanceRecord;
+    attemptedNewStatus?: string;
   } | null>(null);
 
   // Strength mismatch remark input in Attendance window
@@ -1046,6 +1117,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           admissionNo: rec.admissionNo,
           savedStatus,
           mode,
+          rec,
+          attemptedNewStatus: newStatus,
         });
         return;
       }
@@ -2252,20 +2325,23 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3 print:hidden">
         <div className="flex items-center gap-3 flex-wrap">
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
-            {activeSubView === 'pack'
+            {activeSubView === 'unmarked_mismatch'
+              ? '3- Unmarked & Mismatch Attendance Report'
+              : activeSubView === 'pack'
               ? 'Print Route List'
               : activeSubView === 'summary'
-              ? 'Attendance Summary Sheet'
+              ? '6- Attendance Summary Sheet'
               : activeSubView === 'calendar'
-              ? 'Monthly Calendar (P/A/L/H)'
+              ? '5- Monthly Calendar (P/A/L/H)'
               : activeSubView === 'call_absentees'
-              ? 'Call Absentees — Parent Follow-up & Scheduled Return'
+              ? '4- Call Absentees — Parent Follow-up & Scheduled Return'
               : boardMode === 'departure'
               ? '2- Departure Attendance (School Dispersal)'
               : '1- Arrival Attendance (Morning Pickup)'}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeSubView === 'board' && `${tripAttendanceList.length} Members`}
+            {activeSubView === 'unmarked_mismatch' && `Attendance Audit`}
             {activeSubView === 'calendar' && `${routes.length} Routes`}
             {activeSubView === 'summary' && `${summaryRows.length} Vehicles`}
             {activeSubView === 'pack' && `Route Sheet`}
@@ -2471,7 +2547,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         : 'bg-amber-50 text-amber-800 border border-amber-200'
                     }`}
                   >
-                    {isAdmin ? 'Admin: Back-Date Allowed' : `${currentRole}: Today Only`}
+                    {isAdmin ? 'Admin: Full Edit' : `${currentRole}: Mark Unmarked Only`}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
@@ -2479,11 +2555,9 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   <input
                     type="date"
                     value={selectedDate}
-                    min={isAdmin ? undefined : todayStr}
                     max={todayStr}
                     onChange={(e) => {
                       const nextDate = e.target.value;
-                      if (!isAdmin && nextDate !== todayStr) return;
                       handleDateChange(nextDate);
                     }}
                     className="text-xs font-bold bg-transparent text-slate-800 focus:outline-hidden w-full"
@@ -3264,7 +3338,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             </div>
           )}
 
-          {/* Non-Admin Locked Record Modal */}
+          {/* Non-Admin Locked Record Modal (With Option to Send Change Request to Admin) */}
           {lockedRecordModal && (
             <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
               <div className="bg-white rounded-2xl border border-rose-200 shadow-2xl max-w-md w-full overflow-hidden">
@@ -3272,7 +3346,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   <div className="flex items-center gap-2">
                     <AlertTriangle className="w-5 h-5 text-white shrink-0" />
                     <h3 className="text-sm font-black uppercase tracking-wide">
-                      Saved Record Locked — Admin Only
+                      Saved Record Locked — Request Admin Change
                     </h3>
                   </div>
                   <button
@@ -3287,22 +3361,68 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 <div className="p-5 space-y-4 text-xs">
                   <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 space-y-1.5 text-rose-950">
                     <p className="font-bold text-sm">
-                      Saved attendance record can be changed by Admin only.
+                      Already-marked attendance cannot be changed directly by {currentRole}.
                     </p>
                     <p className="text-rose-900">
                       Attendance for <strong>{lockedRecordModal.studentName}</strong> (
-                      {lockedRecordModal.admissionNo}) is already saved and finalized as{' '}
-                      <strong>{lockedRecordModal.savedStatus}</strong>.
+                      {lockedRecordModal.admissionNo}) is already marked and saved as{' '}
+                      <strong>{lockedRecordModal.savedStatus}</strong>. You can only mark unmarked
+                      (Pending) members directly, or send a <strong>Change Request to Admin</strong>.
                     </p>
                   </div>
-                  <div className="flex justify-end">
+                  <div className="flex flex-wrap items-center justify-end gap-2">
                     <button
                       type="button"
                       onClick={() => setLockedRecordModal(null)}
-                      className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs cursor-pointer"
+                      className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs cursor-pointer hover:bg-slate-50"
                     >
-                      Back
+                      Skip / Back
                     </button>
+                    {lockedRecordModal.rec && onSubmitAttendanceChangeRequest && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const r = lockedRecordModal.rec!;
+                          const stu = students.find((s) => s.id === r.studentId);
+                          const stuCampus: 'Sr' | 'Jr' =
+                            getStudentCampusCode(stu || ({} as StudentMember)) === 'Jr'
+                              ? 'Jr'
+                              : 'Sr';
+                          setChangeRequestModalTarget({
+                            studentId: r.studentId,
+                            studentName: r.studentName,
+                            admissionNo: r.admissionNo,
+                            classSection: r.classSection,
+                            routeId: selectedRouteObj?.id || '',
+                            routeCode: selectedRouteObj?.code || currentTrip?.routeName || '',
+                            campus: stuCampus,
+                            date: selectedDate,
+                            tripId: r.tripId,
+                            recordId: r.id,
+                            currentArrivalStatus: r.driverStatus || 'Pending',
+                            currentDepartureStatus: r.assistantStatus || 'Pending',
+                            proposedArrivalStatus:
+                              lockedRecordModal.mode === 'arrival'
+                                ? ((lockedRecordModal.attemptedNewStatus as any) ||
+                                    r.driverStatus ||
+                                    'Present')
+                                : r.driverStatus || 'Present',
+                            proposedDepartureStatus:
+                              lockedRecordModal.mode === 'departure'
+                                ? ((lockedRecordModal.attemptedNewStatus as any) ||
+                                    r.assistantStatus ||
+                                    'Present')
+                                : r.assistantStatus || 'Present',
+                            reason: '',
+                          });
+                          setLockedRecordModal(null);
+                        }}
+                        className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs cursor-pointer flex items-center gap-1.5 shadow-xs"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Send Request for Change to Admin</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -5142,6 +5262,1089 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   {isConfirmingEarlyArrival
                     ? 'Confirming...'
                     : 'Confirm Early Arrival & Mark Present'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SUB-VIEW 6: UNMARKED & MISMATCH ATTENDANCE REPORT                     */}
+      {/* ===================================================================== */}
+      {activeSubView === 'unmarked_mismatch' &&
+        (() => {
+          const effectiveCampusScope: 'all' | 'Sr' | 'Jr' = lockedCampus
+            ? (lockedCampus as 'Sr' | 'Jr')
+            : discrepancyCampus;
+
+          const auditData = analyzeAttendanceForDate({
+            date: discrepancyDate,
+            students,
+            routes,
+            attendanceRecords,
+            campusScope: effectiveCampusScope,
+            acknowledgements: attendanceAcknowledgements,
+            changeRequests: attendanceChangeRequests,
+          });
+
+          const filterByRoute = (list: MemberAttendanceDiscrepancyItem[]) =>
+            discrepancyRouteId === 'all'
+              ? list
+              : list.filter((item) => item.route.id === discrepancyRouteId);
+
+          const filteredBothNotMarked = filterByRoute(auditData.bothNotMarked);
+          const filteredSingleShift = filterByRoute(auditData.singleShiftNotMarked);
+          const filteredMismatches = filterByRoute(auditData.statusMismatches);
+
+          const scopedChangeRequests = attendanceChangeRequests.filter((r) =>
+            effectiveCampusScope === 'all' ? true : r.campus === effectiveCampusScope
+          );
+          const scopedAcknowledgements = attendanceAcknowledgements.filter((a) =>
+            effectiveCampusScope === 'all'
+              ? true
+              : a.campus.toLowerCase() === effectiveCampusScope.toLowerCase()
+          );
+
+          const handleQuickMarkUnmarkedOnly = async (
+            item: MemberAttendanceDiscrepancyItem,
+            shift: 'arrival' | 'departure' | 'both',
+            statusValue: 'Present' | 'Absent' | 'Leave'
+          ) => {
+            const entries: Array<{
+              recordId: string;
+              source: 'driver' | 'assistant';
+              value: string;
+              reason?: string;
+            }> = [];
+
+            if (
+              (shift === 'arrival' || shift === 'both') &&
+              item.arrivalStatus === 'Pending'
+            ) {
+              entries.push({
+                recordId: item.recordId,
+                source: 'driver',
+                value: statusValue,
+                reason: `Marked unmarked Arrival by ${currentRole}`,
+              });
+            }
+            if (
+              (shift === 'departure' || shift === 'both') &&
+              item.departureStatus === 'Pending'
+            ) {
+              entries.push({
+                recordId: item.recordId,
+                source: 'assistant',
+                value: statusValue,
+                reason: `Marked unmarked Departure by ${currentRole}`,
+              });
+            }
+
+            if (entries.length === 0) return;
+
+            if (onBatchSaveAttendance) {
+              await onBatchSaveAttendance(entries);
+            } else {
+              for (const entry of entries) {
+                await onMarkAttendance(entry.recordId, entry.source, entry.value, entry.reason);
+              }
+            }
+            setStatusFeedback(
+              `✓ Marked unmarked ${shift} attendance as ${statusValue} for ${item.student.name} (${item.route.code}) without altering already-marked records.`
+            );
+            setTimeout(() => setStatusFeedback(null), 4000);
+          };
+
+          const handleBulkMarkRouteUnmarkedAsPresent = async (
+            routeIdFilter?: string,
+            shiftMode: 'arrival' | 'departure' | 'both' = 'both'
+          ) => {
+            const targetItems = auditData.allItems.filter(
+              (item) =>
+                item.category !== 'status_mismatch' &&
+                (!routeIdFilter || routeIdFilter === 'all' || item.route.id === routeIdFilter)
+            );
+            const entries: Array<{
+              recordId: string;
+              source: 'driver' | 'assistant';
+              value: string;
+              reason?: string;
+            }> = [];
+
+            for (const item of targetItems) {
+              if (
+                (shiftMode === 'arrival' || shiftMode === 'both') &&
+                item.arrivalStatus === 'Pending'
+              ) {
+                entries.push({
+                  recordId: item.recordId,
+                  source: 'driver',
+                  value: 'Present',
+                  reason: `Bulk marked unmarked Arrival as Present by ${currentRole}`,
+                });
+              }
+              if (
+                (shiftMode === 'departure' || shiftMode === 'both') &&
+                item.departureStatus === 'Pending'
+              ) {
+                entries.push({
+                  recordId: item.recordId,
+                  source: 'assistant',
+                  value: 'Present',
+                  reason: `Bulk marked unmarked Departure as Present by ${currentRole}`,
+                });
+              }
+            }
+
+            if (entries.length === 0) {
+              setStatusFeedback('No unmarked (Pending) attendance records found for selection.');
+              setTimeout(() => setStatusFeedback(null), 3500);
+              return;
+            }
+
+            if (onBatchSaveAttendance) {
+              await onBatchSaveAttendance(entries);
+            } else {
+              for (const entry of entries) {
+                await onMarkAttendance(entry.recordId, entry.source, entry.value, entry.reason);
+              }
+            }
+            setStatusFeedback(
+              `✓ Marked ${entries.length} unmarked attendance entry/entries as Present without altering any already-marked records.`
+            );
+            setTimeout(() => setStatusFeedback(null), 4500);
+          };
+
+          return (
+            <div className="space-y-5">
+              {statusFeedback && (
+                <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-3 rounded-xl text-xs font-bold flex items-center justify-between shadow-2xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{statusFeedback}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStatusFeedback(null)}
+                    className="text-emerald-700 hover:text-emerald-950 font-black cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Top Filter & Date Control Card */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-md bg-amber-100 text-amber-900 font-bold text-[11px]">
+                        Role: {currentRole}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-md bg-indigo-50 text-indigo-800 font-bold text-[11px]">
+                        Campus Scope:{' '}
+                        {effectiveCampusScope === 'all'
+                          ? 'All Campuses (Sr & Jr)'
+                          : `${effectiveCampusScope} Campus Only`}
+                      </span>
+                    </div>
+                    <h3 className="text-base font-bold text-slate-900 mt-1">
+                      Unmarked Attendance (Arrival / Departure / Both) &amp; Status Mismatch Audit
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Separately inspect members with <strong>Both Arrival &amp; Departure Not Marked</strong>,{' '}
+                      <strong>Single Shift Not Marked</strong>, and <strong>Arrival vs. Departure Mismatch (Present vs. Absent)</strong>.{' '}
+                      Coordinator, Assistant &amp; Attendance Incharge can mark <strong>only unmarked</strong> entries without altering already-marked records, acknowledge yesterday&apos;s unmarked records, or send a <strong>Change Request to Admin</strong>.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setDiscrepancyDate(todayStr)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
+                        discrepancyDate === todayStr
+                          ? 'bg-slate-900 text-amber-400 border-slate-900'
+                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      Today ({todayStr})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDiscrepancyDate(yesterdayStr)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
+                        discrepancyDate === yesterdayStr
+                          ? 'bg-slate-900 text-amber-400 border-slate-900'
+                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      Yesterday ({yesterdayStr})
+                    </button>
+                    <input
+                      type="date"
+                      value={discrepancyDate}
+                      max={todayStr}
+                      onChange={(e) => setDiscrepancyDate(e.target.value)}
+                      className="px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-bold text-slate-800"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                      Campus Filter
+                    </label>
+                    <select
+                      value={effectiveCampusScope}
+                      disabled={Boolean(lockedCampus)}
+                      onChange={(e) =>
+                        setDiscrepancyCampus(e.target.value as 'all' | 'Sr' | 'Jr')
+                      }
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800 disabled:opacity-70"
+                    >
+                      {!lockedCampus && <option value="all">All Campuses (Sr &amp; Jr)</option>}
+                      {(!lockedCampus || lockedCampus === 'Sr') && (
+                        <option value="Sr">Senior Campus (Sr)</option>
+                      )}
+                      {(!lockedCampus || lockedCampus === 'Jr') && (
+                        <option value="Jr">Junior Campus (Jr)</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                      Filter by Route
+                    </label>
+                    <select
+                      value={discrepancyRouteId}
+                      onChange={(e) => setDiscrepancyRouteId(e.target.value)}
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-900"
+                    >
+                      <option value="all">All Routes ({auditData.routeSummaries.length})</option>
+                      {auditData.routeSummaries.map((rs) => (
+                        <option key={rs.route.id} value={rs.route.id}>
+                          {rs.route.code} — {rs.route.vehicleNumber} (Both Unmarked: {rs.bothNotMarkedCount}, Single Unmarked: {rs.singleShiftNotMarkedCount}, Mismatch: {rs.statusMismatchCount})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleBulkMarkRouteUnmarkedAsPresent(discrepancyRouteId, 'both')}
+                      className="flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl cursor-pointer shadow-2xs"
+                      title="Marks only Pending entries as Present; already-marked members are untouched"
+                    >
+                      Mark Only Unmarked as Present
+                    </button>
+                    {onAcknowledgeUnmarkedAttendance && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onAcknowledgeUnmarkedAttendance({
+                            date: discrepancyDate,
+                            routeId: discrepancyRouteId === 'all' ? 'ALL' : discrepancyRouteId,
+                            routeCode:
+                              discrepancyRouteId === 'all'
+                                ? 'All Routes'
+                                : routes.find((r) => r.id === discrepancyRouteId)?.code || 'Route',
+                            campus: effectiveCampusScope === 'all' ? 'All' : effectiveCampusScope,
+                            note: `Acknowledged that ${discrepancyDate} unmarked/mismatched attendances were reviewed by ${currentRole}.`,
+                          });
+                          setStatusFeedback(
+                            `✓ Acknowledged unmarked/mismatched attendance for ${discrepancyDate}.`
+                          );
+                          setTimeout(() => setStatusFeedback(null), 3500);
+                        }}
+                        className="py-2.5 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl cursor-pointer shadow-2xs"
+                      >
+                        Acknowledge ({discrepancyDate})
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 4 Separate Category Tabs */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyCategoryTab('both_not_marked')}
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      discrepancyCategoryTab === 'both_not_marked'
+                        ? 'bg-rose-950 text-white border-rose-900 shadow-sm'
+                        : 'bg-rose-50/70 text-rose-950 border-rose-200 hover:bg-rose-100/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
+                        1. Both Not Marked
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-xs font-black bg-rose-600 text-white">
+                        {filteredBothNotMarked.length}
+                      </span>
+                    </div>
+                    <div className="text-xs font-semibold mt-1 opacity-90">
+                      Arrival &amp; Departure Both Pending
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyCategoryTab('single_shift_not_marked')}
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      discrepancyCategoryTab === 'single_shift_not_marked'
+                        ? 'bg-amber-950 text-white border-amber-900 shadow-sm'
+                        : 'bg-amber-50/80 text-amber-950 border-amber-200 hover:bg-amber-100/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
+                        2. Arrival OR Departure Unmarked
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-xs font-black bg-amber-500 text-slate-950">
+                        {filteredSingleShift.length}
+                      </span>
+                    </div>
+                    <div className="text-xs font-semibold mt-1 opacity-90">
+                      One Shift Marked, Other Not Marked
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyCategoryTab('status_mismatch')}
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      discrepancyCategoryTab === 'status_mismatch'
+                        ? 'bg-indigo-950 text-white border-indigo-900 shadow-sm'
+                        : 'bg-indigo-50/80 text-indigo-950 border-indigo-200 hover:bg-indigo-100/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
+                        3. Present vs. Absent Mismatch
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-xs font-black bg-indigo-600 text-white">
+                        {filteredMismatches.length}
+                      </span>
+                    </div>
+                    <div className="text-xs font-semibold mt-1 opacity-90">
+                      Arrival &ne; Departure Status
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyCategoryTab('requests_acks')}
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      discrepancyCategoryTab === 'requests_acks'
+                        ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                        : 'bg-slate-50 text-slate-900 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
+                        4. Admin Change Requests &amp; Acks
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-xs font-black bg-emerald-600 text-white">
+                        {
+                          scopedChangeRequests.filter(
+                            (r) => r.status === 'Pending Admin Approval'
+                          ).length
+                        }
+                      </span>
+                    </div>
+                    <div className="text-xs font-semibold mt-1 opacity-90">
+                      {scopedChangeRequests.length} Requests • {scopedAcknowledgements.length} Acks
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Partially Marked Routes Quick Strip */}
+              {auditData.partiallyMarkedRoutes.length > 0 && (
+                <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                      <h4 className="text-xs font-black uppercase tracking-wide text-amber-950">
+                        Partially Marked Routes on {discrepancyDate} ({auditData.partiallyMarkedRoutes.length} Route(s) have a few members marked &amp; others left unmarked)
+                      </h4>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                    {auditData.partiallyMarkedRoutes.map((pm) => (
+                      <div
+                        key={pm.route.id}
+                        className="bg-white rounded-xl border border-amber-200 p-3 flex flex-col justify-between gap-2 text-xs"
+                      >
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono font-bold text-slate-900">
+                              {pm.route.code} ({pm.route.vehicleNumber})
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px]">
+                              {pm.campus} Campus
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-600 mt-1">
+                            Arrival: <strong>{pm.arrivalMarkedCount}/{pm.totalMembers}</strong> marked (
+                            <span className="text-rose-600 font-bold">{pm.arrivalPendingCount} left</span>) • Departure:{' '}
+                            <strong>{pm.departureMarkedCount}/{pm.totalMembers}</strong> marked (
+                            <span className="text-rose-600 font-bold">{pm.departurePendingCount} left</span>)
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-100">
+                          {pm.arrivalPendingCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveSubView('board');
+                                setBoardMode('arrival');
+                                setSelectedDate(discrepancyDate);
+                                setSelectedRouteId(pm.route.id);
+                                setSelectedTripId(`dt-${pm.route.id}-${discrepancyDate}`);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] cursor-pointer"
+                            >
+                              Mark Remaining Arrival ({pm.arrivalPendingCount})
+                            </button>
+                          )}
+                          {pm.departurePendingCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveSubView('board');
+                                setBoardMode('departure');
+                                setSelectedDate(discrepancyDate);
+                                setSelectedRouteId(pm.route.id);
+                                setSelectedTripId(`dt-${pm.route.id}-${discrepancyDate}`);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] cursor-pointer"
+                            >
+                              Mark Remaining Departure ({pm.departurePendingCount})
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Category 1, 2, 3 Table */}
+              {discrepancyCategoryTab !== 'requests_acks' && (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                  <div className="px-5 py-3.5 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-sm font-bold">
+                        {discrepancyCategoryTab === 'both_not_marked'
+                          ? `1. Members with BOTH Arrival & Departure Attendance Not Marked (${filteredBothNotMarked.length})`
+                          : discrepancyCategoryTab === 'single_shift_not_marked'
+                          ? `2. Members with Single Shift Not Marked — Arrival OR Departure Pending (${filteredSingleShift.length})`
+                          : `3. Members with Arrival vs. Departure Status Mismatch — Present vs. Absent (${filteredMismatches.length})`}
+                      </h4>
+                      <p className="text-[11px] text-slate-300">
+                        Date: {discrepancyDate} •{' '}
+                        {discrepancyCategoryTab === 'status_mismatch'
+                          ? isAdmin
+                            ? 'Admin can directly update status or approve change requests.'
+                            : `${currentRole} cannot alter already-marked attendance directly — click "Request Change to Admin" or "Skip".`
+                          : 'Click P / A / L to mark ONLY the unmarked shift without altering any already-marked attendance.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const activeRows =
+                      discrepancyCategoryTab === 'both_not_marked'
+                        ? filteredBothNotMarked
+                        : discrepancyCategoryTab === 'single_shift_not_marked'
+                        ? filteredSingleShift
+                        : filteredMismatches;
+
+                    if (activeRows.length === 0) {
+                      return (
+                        <div className="p-10 text-center text-xs text-slate-400">
+                          No members found in this category for {discrepancyDate}.
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase text-[10px]">
+                              <th className="py-2.5 px-3">#</th>
+                              <th className="py-2.5 px-3">Member Name &amp; ID</th>
+                              <th className="py-2.5 px-3">Campus &amp; Class</th>
+                              <th className="py-2.5 px-3">Route &amp; Stop</th>
+                              <th className="py-2.5 px-3 text-center">Arrival (In)</th>
+                              <th className="py-2.5 px-3 text-center">Departure (Out)</th>
+                              <th className="py-2.5 px-3">Discrepancy / Remark</th>
+                              <th className="py-2.5 px-3 text-right">
+                                Action (Mark Unmarked Only / Request Admin Change)
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {activeRows.map((item, idx) => {
+                              const arrPending = item.arrivalStatus === 'Pending';
+                              const depPending = item.departureStatus === 'Pending';
+                              return (
+                                <tr key={`${item.recordId}-${idx}`} className="hover:bg-slate-50">
+                                  <td className="py-2.5 px-3 font-mono text-slate-400">
+                                    {idx + 1}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <div className="font-bold text-slate-900">
+                                      {item.student.name}
+                                    </div>
+                                    <div className="font-mono text-[10px] text-slate-500">
+                                      {item.student.admissionNo} • {item.student.mobile}
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <span
+                                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                        item.campus === 'Jr'
+                                          ? 'bg-amber-100 text-amber-900'
+                                          : 'bg-indigo-100 text-indigo-900'
+                                      }`}
+                                    >
+                                      {item.campus} Campus
+                                    </span>
+                                    <div className="text-[11px] text-slate-600 mt-0.5">
+                                      Class {item.student.class}-{item.student.section}
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <div className="font-mono font-bold text-slate-800">
+                                      {item.route.code} ({item.route.vehicleNumber})
+                                    </div>
+                                    <div className="text-[11px] text-slate-500">
+                                      {item.student.pickupDropStopName || item.student.villageName}
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-center">
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                        arrPending
+                                          ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                          : item.arrivalStatus === 'Present'
+                                          ? 'bg-emerald-100 text-emerald-800'
+                                          : 'bg-amber-100 text-amber-900'
+                                      }`}
+                                    >
+                                      {arrPending ? 'NOT MARKED' : item.arrivalStatus}
+                                    </span>
+                                    {arrPending && (
+                                      <div className="flex items-center justify-center gap-1 mt-1">
+                                        {(['Present', 'Absent', 'Leave'] as const).map((st) => (
+                                          <button
+                                            key={st}
+                                            type="button"
+                                            onClick={() =>
+                                              handleQuickMarkUnmarkedOnly(item, 'arrival', st)
+                                            }
+                                            className={`px-1.5 py-0.5 rounded text-[10px] font-black cursor-pointer ${
+                                              st === 'Present'
+                                                ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                                : st === 'Absent'
+                                                ? 'bg-rose-600 text-white hover:bg-rose-700'
+                                                : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                                            }`}
+                                            title={`Mark Unmarked Arrival as ${st}`}
+                                          >
+                                            {st[0]}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-center">
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                        depPending
+                                          ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                          : item.departureStatus === 'Present'
+                                          ? 'bg-emerald-100 text-emerald-800'
+                                          : 'bg-amber-100 text-amber-900'
+                                      }`}
+                                    >
+                                      {depPending ? 'NOT MARKED' : item.departureStatus}
+                                    </span>
+                                    {depPending && (
+                                      <div className="flex items-center justify-center gap-1 mt-1">
+                                        {(['Present', 'Absent', 'Leave'] as const).map((st) => (
+                                          <button
+                                            key={st}
+                                            type="button"
+                                            onClick={() =>
+                                              handleQuickMarkUnmarkedOnly(item, 'departure', st)
+                                            }
+                                            className={`px-1.5 py-0.5 rounded text-[10px] font-black cursor-pointer ${
+                                              st === 'Present'
+                                                ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                                : st === 'Absent'
+                                                ? 'bg-rose-600 text-white hover:bg-rose-700'
+                                                : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                                            }`}
+                                            title={`Mark Unmarked Departure as ${st}`}
+                                          >
+                                            {st[0]}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    {item.category === 'both_not_marked' && (
+                                      <span className="text-rose-700 font-semibold">
+                                        Both Arrival &amp; Departure Not Marked
+                                      </span>
+                                    )}
+                                    {item.category === 'arrival_not_marked' && (
+                                      <span className="text-amber-800 font-semibold">
+                                        Arrival Not Marked (Departure: {item.departureStatus})
+                                      </span>
+                                    )}
+                                    {item.category === 'departure_not_marked' && (
+                                      <span className="text-amber-800 font-semibold">
+                                        Departure Not Marked (Arrival: {item.arrivalStatus})
+                                      </span>
+                                    )}
+                                    {item.category === 'status_mismatch' && (
+                                      <div>
+                                        <span className="text-indigo-800 font-bold">
+                                          Mismatch: In ({item.arrivalStatus}) vs Out ({item.departureStatus})
+                                        </span>
+                                        {item.mismatchReason && (
+                                          <div className="text-[10px] text-slate-500">
+                                            Note: {item.mismatchReason}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                    {item.isAcknowledged && (
+                                      <div className="text-[10px] font-bold text-emerald-700 mt-0.5">
+                                        ✓ Acknowledged
+                                      </div>
+                                    )}
+                                    {item.pendingChangeRequest && (
+                                      <div className="text-[10px] font-bold text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 mt-0.5">
+                                        Pending Admin Change Request ({item.pendingChangeRequest.proposedArrivalStatus} / {item.pendingChangeRequest.proposedDepartureStatus})
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                      {(arrPending || depPending) && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveSubView('board');
+                                            setBoardMode(arrPending ? 'arrival' : 'departure');
+                                            setSelectedDate(item.date);
+                                            setSelectedRouteId(item.route.id);
+                                            setSelectedTripId(item.tripId);
+                                          }}
+                                          className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] cursor-pointer"
+                                        >
+                                          Open Route Board
+                                        </button>
+                                      )}
+
+                                      {(!arrPending || !depPending) && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setChangeRequestModalTarget({
+                                              studentId: item.student.id,
+                                              studentName: item.student.name,
+                                              admissionNo: item.student.admissionNo,
+                                              classSection: `${item.student.class}-${item.student.section}`,
+                                              routeId: item.route.id,
+                                              routeCode: item.route.code,
+                                              campus: item.campus,
+                                              date: item.date,
+                                              tripId: item.tripId,
+                                              recordId: item.recordId,
+                                              currentArrivalStatus: item.arrivalStatus,
+                                              currentDepartureStatus: item.departureStatus,
+                                              proposedArrivalStatus:
+                                                item.arrivalStatus === 'Pending'
+                                                  ? 'Present'
+                                                  : item.arrivalStatus,
+                                              proposedDepartureStatus:
+                                                item.departureStatus === 'Pending'
+                                                  ? 'Present'
+                                                  : item.arrivalStatus !== 'Pending'
+                                                  ? item.arrivalStatus
+                                                  : item.departureStatus,
+                                              reason: '',
+                                            })
+                                          }
+                                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] cursor-pointer inline-flex items-center gap-1"
+                                        >
+                                          <Send className="w-3 h-3" />
+                                          <span>
+                                            {isAdmin
+                                              ? 'Direct Change / Override'
+                                              : 'Request Change to Admin'}
+                                          </span>
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Category 4: Admin Change Requests & Yesterday Acknowledgements */}
+              {discrepancyCategoryTab === 'requests_acks' && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                    <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+                      <h4 className="text-sm font-bold">
+                        Attendance Change Requests Sent to Admin ({scopedChangeRequests.length})
+                      </h4>
+                    </div>
+                    <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                      {scopedChangeRequests.length === 0 ? (
+                        <div className="p-8 text-center text-xs text-slate-400">
+                          No attendance change requests submitted yet.
+                        </div>
+                      ) : (
+                        scopedChangeRequests.map((req) => (
+                          <div key={req.id} className="p-4 space-y-2 text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <span className="font-bold text-slate-900">
+                                  {req.studentName} ({req.admissionNo})
+                                </span>
+                                <span className="ml-2 px-2 py-0.5 rounded bg-indigo-50 text-indigo-800 font-bold text-[10px]">
+                                  {req.campus} Campus • Route {req.routeCode}
+                                </span>
+                              </div>
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  req.status === 'Approved'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : req.status === 'Rejected'
+                                    ? 'bg-rose-100 text-rose-800'
+                                    : 'bg-amber-100 text-amber-900'
+                                }`}
+                              >
+                                {req.status}
+                              </span>
+                            </div>
+                            <div className="text-slate-600">
+                              Date: <strong className="font-mono">{req.date}</strong> • Current:{' '}
+                              <strong>
+                                In: {req.currentArrivalStatus} / Out: {req.currentDepartureStatus}
+                              </strong>{' '}
+                              &rarr; Proposed:{' '}
+                              <strong className="text-indigo-700">
+                                In: {req.proposedArrivalStatus} / Out: {req.proposedDepartureStatus}
+                              </strong>
+                            </div>
+                            <div className="text-slate-700 italic">Reason: &ldquo;{req.reason}&rdquo;</div>
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-slate-500">
+                              <span>
+                                Requested by <strong>{req.requestedBy}</strong> ({req.requestedByRole})
+                              </span>
+                              {isAdmin &&
+                                req.status === 'Pending Admin Approval' &&
+                                onReviewAttendanceChangeRequest && (
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        onReviewAttendanceChangeRequest(req.id, 'Approve')
+                                      }
+                                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] cursor-pointer"
+                                    >
+                                      Approve &amp; Apply
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        onReviewAttendanceChangeRequest(req.id, 'Reject')
+                                      }
+                                      className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] cursor-pointer"
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                    <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+                      <h4 className="text-sm font-bold">
+                        Unmarked / Mismatched Attendance Acknowledgements ({scopedAcknowledgements.length})
+                      </h4>
+                    </div>
+                    <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                      {scopedAcknowledgements.length === 0 ? (
+                        <div className="p-8 text-center text-xs text-slate-400">
+                          No acknowledgements recorded yet.
+                        </div>
+                      ) : (
+                        scopedAcknowledgements.map((ack) => (
+                          <div key={ack.id} className="p-4 space-y-1 text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-mono font-bold text-slate-900">
+                                Date: {ack.date} • Route: {ack.routeCode} ({ack.campus})
+                              </span>
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
+                                Acknowledged
+                              </span>
+                            </div>
+                            <p className="text-slate-700">{ack.note}</p>
+                            <div className="text-[11px] text-slate-500">
+                              By <strong>{ack.acknowledgedBy}</strong> ({ack.acknowledgedByRole}) at{' '}
+                              {new Date(ack.acknowledgedAt).toLocaleString()}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+      {/* ===================================================================== */}
+      {/* MODAL: SEND REQUEST FOR CHANGE IN ATTENDANCE TO ADMIN                 */}
+      {/* ===================================================================== */}
+      {changeRequestModalTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-indigo-200 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Send className="w-4 h-4 text-amber-400" />
+                <h3 className="text-sm font-black">
+                  {isAdmin
+                    ? 'Admin Direct Attendance Change'
+                    : 'Send Attendance Change Request to Admin'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChangeRequestModalTarget(null)}
+                className="text-slate-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!changeRequestModalTarget.reason.trim()) return;
+                if (isAdmin) {
+                  // Admin applies change directly
+                  const entries: Array<{
+                    recordId: string;
+                    source: 'driver' | 'assistant';
+                    value: string;
+                    reason?: string;
+                  }> = [];
+                  if (
+                    changeRequestModalTarget.proposedArrivalStatus &&
+                    changeRequestModalTarget.proposedArrivalStatus !== 'Pending'
+                  ) {
+                    entries.push({
+                      recordId: changeRequestModalTarget.recordId,
+                      source: 'driver',
+                      value: changeRequestModalTarget.proposedArrivalStatus,
+                      reason: changeRequestModalTarget.reason.trim(),
+                    });
+                  }
+                  if (
+                    changeRequestModalTarget.proposedDepartureStatus &&
+                    changeRequestModalTarget.proposedDepartureStatus !== 'Pending'
+                  ) {
+                    entries.push({
+                      recordId: changeRequestModalTarget.recordId,
+                      source: 'assistant',
+                      value: changeRequestModalTarget.proposedDepartureStatus,
+                      reason: changeRequestModalTarget.reason.trim(),
+                    });
+                  }
+                  if (entries.length > 0) {
+                    if (onBatchSaveAttendance) {
+                      await onBatchSaveAttendance(entries);
+                    } else {
+                      for (const ent of entries) {
+                        await onMarkAttendance(ent.recordId, ent.source, ent.value, ent.reason);
+                      }
+                    }
+                  }
+                  setStatusFeedback(
+                    `✓ Updated attendance for ${changeRequestModalTarget.studentName}.`
+                  );
+                  setTimeout(() => setStatusFeedback(null), 4000);
+                  setChangeRequestModalTarget(null);
+                  return;
+                }
+
+                if (onSubmitAttendanceChangeRequest) {
+                  onSubmitAttendanceChangeRequest({
+                    recordId: changeRequestModalTarget.recordId,
+                    tripId: changeRequestModalTarget.tripId,
+                    date: changeRequestModalTarget.date,
+                    routeId: changeRequestModalTarget.routeId,
+                    routeCode: changeRequestModalTarget.routeCode,
+                    campus: changeRequestModalTarget.campus,
+                    studentId: changeRequestModalTarget.studentId,
+                    studentName: changeRequestModalTarget.studentName,
+                    admissionNo: changeRequestModalTarget.admissionNo,
+                    classSection: changeRequestModalTarget.classSection,
+                    currentArrivalStatus: changeRequestModalTarget.currentArrivalStatus,
+                    currentDepartureStatus: changeRequestModalTarget.currentDepartureStatus,
+                    proposedArrivalStatus: changeRequestModalTarget.proposedArrivalStatus,
+                    proposedDepartureStatus: changeRequestModalTarget.proposedDepartureStatus,
+                    reason: changeRequestModalTarget.reason.trim(),
+                    requestedBy: currentRole,
+                    requestedByRole: currentRole,
+                  });
+                  setStatusFeedback(
+                    `✓ Sent attendance change request for ${changeRequestModalTarget.studentName} to Admin for approval.`
+                  );
+                  setTimeout(() => setStatusFeedback(null), 4000);
+                }
+                setChangeRequestModalTarget(null);
+              }}
+              className="p-5 space-y-4 text-xs"
+            >
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="font-bold text-slate-900 text-sm">
+                  {changeRequestModalTarget.studentName} ({changeRequestModalTarget.admissionNo})
+                </div>
+                <div className="text-slate-600">
+                  Route: <strong>{changeRequestModalTarget.routeCode}</strong> • Campus:{' '}
+                  <strong>{changeRequestModalTarget.campus}</strong> • Date:{' '}
+                  <strong className="font-mono">{changeRequestModalTarget.date}</strong>
+                </div>
+                <div className="text-slate-600 pt-1">
+                  Current Saved Attendance: Arrival:{' '}
+                  <strong className="text-slate-900">
+                    {changeRequestModalTarget.currentArrivalStatus}
+                  </strong>{' '}
+                  • Departure:{' '}
+                  <strong className="text-slate-900">
+                    {changeRequestModalTarget.currentDepartureStatus}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Proposed Arrival Status
+                  </label>
+                  <select
+                    value={changeRequestModalTarget.proposedArrivalStatus}
+                    onChange={(e) =>
+                      setChangeRequestModalTarget((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              proposedArrivalStatus: e.target
+                                .value as TripAttendanceRecord['driverStatus'],
+                            }
+                          : null
+                      )
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-bold bg-white"
+                  >
+                    <option value="Present">Present (P)</option>
+                    <option value="Absent">Absent (A)</option>
+                    <option value="Leave">Leave (L)</option>
+                    <option value="Holiday">Holiday (H)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Proposed Departure Status
+                  </label>
+                  <select
+                    value={changeRequestModalTarget.proposedDepartureStatus}
+                    onChange={(e) =>
+                      setChangeRequestModalTarget((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              proposedDepartureStatus: e.target
+                                .value as TripAttendanceRecord['assistantStatus'],
+                            }
+                          : null
+                      )
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-bold bg-white"
+                  >
+                    <option value="Present">Present (P)</option>
+                    <option value="Absent">Absent (A)</option>
+                    <option value="Leave">Leave (L)</option>
+                    <option value="Holiday">Holiday (H)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Reason for Attendance Change / Mismatch Explanation *
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={changeRequestModalTarget.reason}
+                  onChange={(e) =>
+                    setChangeRequestModalTarget((prev) =>
+                      prev ? { ...prev, reason: e.target.value } : null
+                    )
+                  }
+                  placeholder="Enter reason why attendance needs to be changed by Admin (e.g. Marked absent by mistake, or picked up by parent at dispersal)..."
+                  className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setChangeRequestModalTarget(null)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 font-bold rounded-xl hover:bg-slate-50 cursor-pointer"
+                >
+                  Skip / Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold rounded-xl cursor-pointer shadow-xs"
+                >
+                  {isAdmin ? 'Apply Attendance Change' : 'Submit Request to Admin'}
                 </button>
               </div>
             </form>

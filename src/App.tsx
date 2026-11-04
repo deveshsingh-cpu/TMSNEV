@@ -83,7 +83,22 @@ import {
   ExternalLink,
   X,
   QrCode,
+  AlertTriangle,
+  BellRing,
+  ArrowRight,
 } from 'lucide-react';
+import {
+  AttendanceChangeRequest,
+  AttendanceAcknowledgement,
+  MemberAttendanceDiscrepancyItem,
+  analyzeAttendanceForDate,
+  getPreviousWorkingDate,
+  loadAttendanceChangeRequests,
+  saveAttendanceChangeRequests,
+  loadAttendanceAcknowledgements,
+  saveAttendanceAcknowledgements,
+} from './utils/attendanceAlerts.js';
+import { normalizeCampus } from './utils/campus.js';
 
 const AUTH_STORAGE_KEY = 'tms_authenticated_user_v2';
 
@@ -101,12 +116,8 @@ export function App() {
     return null;
   });
 
-  const [activeNav, setActiveNav] = useState<NavItemKey>(() =>
-    currentUser?.role === 'Attendance Incharge' ? 'operations' : 'dashboard'
-  );
-  const [activeSubTab, setActiveSubTab] = useState<string>(() =>
-    currentUser?.role === 'Attendance Incharge' ? 'arrival' : ''
-  );
+  const [activeNav, setActiveNav] = useState<NavItemKey>('dashboard');
+  const [activeSubTab, setActiveSubTab] = useState<string>('');
   const [unauthScreen, setUnauthScreen] = useState<'public_website' | 'transport_login'>('public_website');
   const [loading, setLoading] = useState<boolean>(() => !getCachedBootstrap());
   const [error, setError] = useState<string | null>(null);
@@ -186,6 +197,31 @@ export function App() {
   // Cross-view deep links
   const [externalOpenMemberId, setExternalOpenMemberId] = useState<string | null>(null);
   const [preselectedFeeMemberId, setPreselectedFeeMemberId] = useState<string | null>(null);
+  const [externalTargetRoute, setExternalTargetRoute] = useState<{
+    routeId: string;
+    date: string;
+    mode: 'arrival' | 'departure';
+  } | null>(null);
+
+  // Attendance Change Requests & Acknowledgements (persisted in localStorage + state)
+  const [attendanceChangeRequests, setAttendanceChangeRequests] = useState<
+    AttendanceChangeRequest[]
+  >(() => loadAttendanceChangeRequests());
+  const [attendanceAcknowledgements, setAttendanceAcknowledgements] = useState<
+    AttendanceAcknowledgement[]
+  >(() => loadAttendanceAcknowledgements());
+  const [isStartupAttendancePopupDismissed, setIsStartupAttendancePopupDismissed] =
+    useState<boolean>(false);
+  const [startupPopupTab, setStartupPopupTab] = useState<'today_partial' | 'yesterday_audit'>(
+    'today_partial'
+  );
+  const [startupChangeReqModal, setStartupChangeReqModal] = useState<{
+    item: MemberAttendanceDiscrepancyItem;
+    shift: 'arrival' | 'departure';
+    requestedStatus: 'Present' | 'Absent' | 'Leave';
+    reason: string;
+  } | null>(null);
+  const [isStartupBatchSaving, setIsStartupBatchSaving] = useState<boolean>(false);
 
   // Core Masters & State (Hydrated immediately from localStorage cache if available)
   const initialBoot = getCachedBootstrap();
@@ -429,18 +465,14 @@ export function App() {
   const handleLogin = async (username: string, password: string) => {
     const authenticatedUser = await api.login(username, password);
     setCurrentUser(authenticatedUser);
+    setIsStartupAttendancePopupDismissed(false);
     try {
       localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authenticatedUser));
     } catch {
       // ignore storage errors
     }
-    if (authenticatedUser.role === 'Attendance Incharge') {
-      setActiveNav('operations');
-      setActiveSubTab('arrival');
-    } else {
-      setActiveNav('dashboard');
-      setActiveSubTab('');
-    }
+    setActiveNav('dashboard');
+    setActiveSubTab('');
     await loadAllData();
   };
 
@@ -470,10 +502,20 @@ export function App() {
     let targetSubTab = subTab !== undefined ? subTab : '';
 
     // Enforce role-based access boundaries:
-    // 0. Attendance Incharge is strictly restricted to Arrival Attendance, Departure Attendance, and Attendance Summary Sheet
+    // 0. Attendance Incharge is strictly restricted to Non-Financial Attendance Dashboard & Attendance Module
     if (activeRole === 'Attendance Incharge') {
-      normalizedKey = 'operations';
-      if (targetSubTab !== 'arrival' && targetSubTab !== 'departure' && targetSubTab !== 'summary') {
+      if (normalizedKey !== 'dashboard' && normalizedKey !== 'operations') {
+        normalizedKey = 'operations';
+      }
+      if (
+        normalizedKey === 'operations' &&
+        targetSubTab !== 'arrival' &&
+        targetSubTab !== 'departure' &&
+        targetSubTab !== 'unmarked_mismatch' &&
+        targetSubTab !== 'call_absentees' &&
+        targetSubTab !== 'calendar' &&
+        targetSubTab !== 'summary'
+      ) {
         targetSubTab = 'arrival';
       }
       setActiveNav(normalizedKey);
@@ -491,6 +533,7 @@ export function App() {
         'members',
         'resumes',
         'staff',
+        'routes',
         'operations',
         'fees',
         'expenses',
@@ -500,6 +543,8 @@ export function App() {
       if (!allowedAssistantNavs.includes(normalizedKey)) {
         normalizedKey = 'dashboard';
         targetSubTab = '';
+      } else if (normalizedKey === 'routes') {
+        targetSubTab = 'pack';
       } else if (normalizedKey === 'staff') {
         targetSubTab = 'attendance';
       } else if (normalizedKey === 'expenses') {
@@ -1112,6 +1157,135 @@ export function App() {
   const handleResolveMismatch = async (recordId: string, value: string, reason: string) => {
     await api.resolveAttendanceMismatch(recordId, value, activeRole, reason);
     await loadAllData();
+  };
+
+  // --- Attendance Change Requests, Acknowledgements & Direct Route Jump Handlers ---
+  const handleSelectRouteForAttendance = (target: {
+    routeId: string;
+    date: string;
+    mode: 'arrival' | 'departure';
+  }) => {
+    setExternalTargetRoute(target);
+    setActiveNav('operations');
+    setActiveSubTab(target.mode);
+  };
+
+  const handleSubmitAttendanceChangeRequest = (
+    req: Omit<AttendanceChangeRequest, 'id' | 'requestedAt' | 'status'>
+  ) => {
+    const newReq: AttendanceChangeRequest = {
+      ...req,
+      classSection: req.classSection || req.className || '',
+      currentArrivalStatus:
+        req.currentArrivalStatus || (req.shift === 'arrival' ? req.currentStatus : 'Present') || 'Pending',
+      currentDepartureStatus:
+        req.currentDepartureStatus || (req.shift === 'departure' ? req.currentStatus : 'Present') || 'Pending',
+      proposedArrivalStatus:
+        req.proposedArrivalStatus ||
+        (req.shift === 'arrival' ? req.requestedStatus : req.currentArrivalStatus || 'Present'),
+      proposedDepartureStatus:
+        req.proposedDepartureStatus ||
+        (req.shift === 'departure' ? req.requestedStatus : req.currentDepartureStatus || 'Present'),
+      id: `acr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      requestedAt: new Date().toISOString(),
+      status: 'Pending Admin Approval',
+    };
+    setAttendanceChangeRequests((prev) => {
+      const next = [newReq, ...prev];
+      saveAttendanceChangeRequests(next);
+      return next;
+    });
+  };
+
+  const handleReviewAttendanceChangeRequest = async (
+    id: string,
+    action: 'Approve' | 'Reject',
+    remarks?: string
+  ) => {
+    const targetReq = attendanceChangeRequests.find((r) => r.id === id);
+    if (!targetReq) return;
+
+    if (action === 'Approve') {
+      const entries: Array<{
+        recordId: string;
+        source: 'driver' | 'assistant';
+        value: string;
+        reason?: string;
+      }> = [];
+      const reasonStr = `Admin Approved Change Request: ${targetReq.reason}${
+        remarks ? ` (${remarks})` : ''
+      }`;
+      if (targetReq.shift && targetReq.requestedStatus) {
+        entries.push({
+          recordId: targetReq.recordId,
+          source: targetReq.shift === 'arrival' ? 'driver' : 'assistant',
+          value: targetReq.requestedStatus,
+          reason: reasonStr,
+        });
+      } else {
+        if (targetReq.proposedArrivalStatus && targetReq.proposedArrivalStatus !== 'Pending') {
+          entries.push({
+            recordId: targetReq.recordId,
+            source: 'driver',
+            value: targetReq.proposedArrivalStatus,
+            reason: reasonStr,
+          });
+        }
+        if (targetReq.proposedDepartureStatus && targetReq.proposedDepartureStatus !== 'Pending') {
+          entries.push({
+            recordId: targetReq.recordId,
+            source: 'assistant',
+            value: targetReq.proposedDepartureStatus,
+            reason: reasonStr,
+          });
+        }
+      }
+      if (entries.length > 0) {
+        await handleBatchSaveAttendance(entries);
+      }
+    }
+
+    setAttendanceChangeRequests((prev) => {
+      const next = prev.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              status: (action === 'Approve' ? 'Approved' : 'Rejected') as 'Approved' | 'Rejected',
+              reviewedBy: currentUser?.fullName || 'Admin',
+              reviewedAt: new Date().toISOString(),
+              reviewRemarks: remarks,
+              adminRemarks: remarks,
+            }
+          : r
+      );
+      saveAttendanceChangeRequests(next);
+      return next;
+    });
+  };
+
+  const handleAcknowledgeUnmarkedAttendance = (payload: {
+    date: string;
+    routeId: string;
+    routeCode: string;
+    campus: string;
+    note: string;
+  }) => {
+    const newAck: AttendanceAcknowledgement = {
+      id: `ack-${Date.now()}`,
+      date: payload.date,
+      routeId: payload.routeId,
+      routeCode: payload.routeCode,
+      campus: payload.campus,
+      acknowledgedBy: currentUser?.fullName || activeRole,
+      acknowledgedByRole: activeRole,
+      acknowledgedAt: new Date().toISOString(),
+      note: payload.note,
+    };
+    setAttendanceAcknowledgements((prev) => {
+      const next = [newAck, ...prev];
+      saveAttendanceAcknowledgements(next);
+      return next;
+    });
   };
 
   const handleVerifyTrip = async (
@@ -1746,6 +1920,13 @@ export function App() {
                   userCampus={currentUser?.campus}
                   onNavigate={handleNavigate as any}
                   onOpenMemberProfile={handleOpenMemberProfileFromAnywhere}
+                  onSelectRouteForAttendance={handleSelectRouteForAttendance}
+                  onBatchSaveAttendance={handleBatchSaveAttendance}
+                  attendanceChangeRequests={attendanceChangeRequests}
+                  attendanceAcknowledgements={attendanceAcknowledgements}
+                  onSubmitAttendanceChangeRequest={handleSubmitAttendanceChangeRequest}
+                  onReviewAttendanceChangeRequest={handleReviewAttendanceChangeRequest}
+                  onAcknowledgeUnmarkedAttendance={handleAcknowledgeUnmarkedAttendance}
                   onUpdateExpenseApproval={handleUpdateExpenseApproval}
                   onUpdateMaintenanceStatus={handleUpdateMaintenanceStatus}
                   onAddMaintenance={handleAddMaintenance}
@@ -1919,6 +2100,7 @@ export function App() {
                   vehicles={vehicles}
                   students={students}
                   initialSubTab={activeSubTab || 'routes'}
+                  onOpenPrintPack={handleOpenPrintPack}
                 />
               )}
 
@@ -1953,6 +2135,13 @@ export function App() {
                   routes={routes}
                   students={students}
                   initialSubTab={activeSubTab || 'board'}
+                  externalTargetRoute={externalTargetRoute}
+                  onClearExternalTargetRoute={() => setExternalTargetRoute(null)}
+                  attendanceChangeRequests={attendanceChangeRequests}
+                  attendanceAcknowledgements={attendanceAcknowledgements}
+                  onSubmitAttendanceChangeRequest={handleSubmitAttendanceChangeRequest}
+                  onReviewAttendanceChangeRequest={handleReviewAttendanceChangeRequest}
+                  onAcknowledgeUnmarkedAttendance={handleAcknowledgeUnmarkedAttendance}
                   onSelectTrip={handleSelectTrip}
                   onSelectRouteForDate={handleSelectRouteForDate}
                   onMarkAttendance={handleMarkAttendance}
@@ -2100,6 +2289,517 @@ export function App() {
           )}
         </main>
       </div>
+
+      {/* App Startup Popup: Partially Marked Routes & Yesterday Unmarked/Mismatched Attendance */}
+      {!loading &&
+        !isStartupAttendancePopupDismissed &&
+        (() => {
+          const todayStr = new Date().toISOString().split('T')[0];
+          const yesterdayStr = getPreviousWorkingDate(todayStr);
+          const roleCampusFilter: 'all' | 'Sr' | 'Jr' =
+            activeRole === 'Transport Assistant' || activeRole === 'Attendance Incharge'
+              ? normalizeCampus(currentUser?.campus) || 'Sr'
+              : 'all';
+
+          const todayAnalysis = analyzeAttendanceForDate({
+            date: todayStr,
+            students,
+            routes,
+            trips: dailyTrips,
+            attendanceRecords,
+            campusFilter: roleCampusFilter,
+          });
+
+          const yesterdayAnalysis = analyzeAttendanceForDate({
+            date: yesterdayStr,
+            students,
+            routes,
+            trips: dailyTrips,
+            attendanceRecords,
+            campusFilter: roleCampusFilter,
+          });
+
+          const isYesterdayAcked = attendanceAcknowledgements.some(
+            (a) =>
+              a.date === yesterdayStr &&
+              (a.campus === 'All' || roleCampusFilter === 'all' || a.campus === roleCampusFilter)
+          );
+
+          const hasTodayPartial = todayAnalysis.partiallyMarkedRoutes.length > 0;
+          const hasYesterdayIssues =
+            !isYesterdayAcked &&
+            (yesterdayAnalysis.partiallyMarkedRoutes.length > 0 ||
+              yesterdayAnalysis.singleShiftNotMarked.length > 0 ||
+              yesterdayAnalysis.statusMismatches.length > 0);
+
+          if (!hasTodayPartial && !hasYesterdayIssues) return null;
+
+          const effectiveTab =
+            startupPopupTab === 'today_partial' && !hasTodayPartial
+              ? 'yesterday_audit'
+              : startupPopupTab === 'yesterday_audit' && !hasYesterdayIssues
+              ? 'today_partial'
+              : startupPopupTab;
+
+          return (
+            <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-3xl w-full shadow-2xl border-2 border-amber-400 overflow-hidden flex flex-col max-h-[88vh]">
+                <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-400 shrink-0">
+                      <BellRing className="w-5 h-5 animate-bounce" />
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-base font-bold">
+                          Pending Route Attendance &amp; Shift Mismatch Alert
+                        </h3>
+                        <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 text-[10px] font-extrabold uppercase">
+                          {roleCampusFilter === 'all'
+                            ? 'All Campuses (Sr + Jr)'
+                            : `${roleCampusFilter} Campus`}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300">
+                        Proceed directly to mark remaining unmarked members, acknowledge yesterday&apos;s unmarked records, or request an Admin change for mismatches.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsStartupAttendancePopupDismissed(true)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Popup Mode Switcher */}
+                <div className="px-6 py-3 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setStartupPopupTab('today_partial')}
+                      className={`px-3.5 py-1.5 rounded-xl text-xs font-bold cursor-pointer ${
+                        effectiveTab === 'today_partial'
+                          ? 'bg-slate-900 text-amber-400'
+                          : 'bg-white text-slate-700 border border-slate-300'
+                      }`}
+                    >
+                      Today&apos;s Partially Marked Routes ({todayAnalysis.partiallyMarkedRoutes.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStartupPopupTab('yesterday_audit')}
+                      className={`px-3.5 py-1.5 rounded-xl text-xs font-bold cursor-pointer ${
+                        effectiveTab === 'yesterday_audit'
+                          ? 'bg-slate-900 text-amber-400'
+                          : 'bg-white text-slate-700 border border-slate-300'
+                      }`}
+                    >
+                      Yesterday ({yesterdayStr}) Unmarked &amp; Mismatches (
+                      {yesterdayAnalysis.singleShiftNotMarked.length +
+                        yesterdayAnalysis.statusMismatches.length +
+                        yesterdayAnalysis.bothNotMarked.length}
+                      )
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsStartupAttendancePopupDismissed(true);
+                      handleNavigate('operations', 'unmarked_mismatch');
+                    }}
+                    className="text-xs font-bold text-indigo-700 hover:underline cursor-pointer"
+                  >
+                    Open Full Unmarked &amp; Mismatch Module &rarr;
+                  </button>
+                </div>
+
+                <div className="p-5 overflow-y-auto space-y-4 flex-1 text-xs">
+                  {effectiveTab === 'today_partial' ? (
+                    todayAnalysis.partiallyMarkedRoutes.length === 0 ? (
+                      <div className="p-6 text-center text-slate-500">
+                        No partially marked routes pending right now for today ({todayStr}).
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <p className="text-slate-700 font-medium">
+                          The following route(s) have a few members marked today ({todayStr}) while other members on the same route are still left unmarked:
+                        </p>
+                        {todayAnalysis.partiallyMarkedRoutes.map((pr) => (
+                          <div
+                            key={pr.routeId}
+                            className="p-4 rounded-xl bg-amber-50/70 border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                          >
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="px-2 py-0.5 rounded bg-slate-900 text-amber-400 font-mono font-bold text-xs">
+                                  {pr.routeCode}
+                                </span>
+                                <span className="font-bold text-slate-900 text-sm">
+                                  {pr.routeName}
+                                </span>
+                                <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-900 font-bold text-[10px]">
+                                  {pr.campus} Campus
+                                </span>
+                              </div>
+                              <div className="text-slate-700">
+                                Morning Arrival: <strong>{pr.arrivalMarkedCount} marked</strong>,{' '}
+                                <strong className="text-rose-700">
+                                  {pr.arrivalUnmarkedCount} left unmarked
+                                </strong>{' '}
+                                • Afternoon Departure:{' '}
+                                <strong>{pr.departureMarkedCount} marked</strong>,{' '}
+                                <strong className="text-rose-700">
+                                  {pr.departureUnmarkedCount} left unmarked
+                                </strong>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isStartupBatchSaving}
+                                onClick={async () => {
+                                  const unmarkedEntries: Array<{
+                                    recordId: string;
+                                    source: 'driver' | 'assistant';
+                                    value: string;
+                                    reason?: string;
+                                  }> = [];
+                                  [
+                                    ...todayAnalysis.bothNotMarked,
+                                    ...todayAnalysis.singleShiftNotMarked,
+                                  ]
+                                    .filter((i) => i.routeId === pr.routeId)
+                                    .forEach((item) => {
+                                      if (item.arrivalStatus === 'Pending' && pr.arrivalMarkedCount > 0) {
+                                        unmarkedEntries.push({
+                                          recordId: item.recordId,
+                                          source: 'driver',
+                                          value: 'Present',
+                                          reason: `Marked remaining unmarked Arrival from Startup Popup by ${activeRole}`,
+                                        });
+                                      }
+                                      if (
+                                        item.departureStatus === 'Pending' &&
+                                        pr.departureMarkedCount > 0
+                                      ) {
+                                        unmarkedEntries.push({
+                                          recordId: item.recordId,
+                                          source: 'assistant',
+                                          value: 'Present',
+                                          reason: `Marked remaining unmarked Departure from Startup Popup by ${activeRole}`,
+                                        });
+                                      }
+                                    });
+                                  if (unmarkedEntries.length === 0) return;
+                                  setIsStartupBatchSaving(true);
+                                  try {
+                                    await handleBatchSaveAttendance(unmarkedEntries);
+                                  } finally {
+                                    setIsStartupBatchSaving(false);
+                                  }
+                                }}
+                                className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs cursor-pointer"
+                              >
+                                Mark Only Unmarked as Present
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsStartupAttendancePopupDismissed(true);
+                                  handleSelectRouteForAttendance({
+                                    routeId: pr.routeId,
+                                    date: todayStr,
+                                    mode: pr.arrivalUnmarkedCount > 0 ? 'arrival' : 'departure',
+                                  });
+                                }}
+                                className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                              >
+                                <span>Proceed to Mark Route</span>
+                                <ArrowRight className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Yesterday's Unmarked Attendance Section */}
+                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h4 className="font-bold text-slate-900 text-sm">
+                              Yesterday ({yesterdayStr}) Unmarked Attendance
+                            </h4>
+                            <p className="text-slate-600 text-[11px]">
+                              Both Unmarked: <strong>{yesterdayAnalysis.bothNotMarked.length}</strong> • Single Shift Unmarked:{' '}
+                              <strong>{yesterdayAnalysis.singleShiftNotMarked.length}</strong>. You can acknowledge that yesterday&apos;s unmarked records were not marked, or mark ONLY those left unmarked without altering already-marked members.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleAcknowledgeUnmarkedAttendance({
+                                  date: yesterdayStr,
+                                  routeId: 'all',
+                                  routeCode: 'All Routes',
+                                  campus: roleCampusFilter === 'all' ? 'All' : roleCampusFilter,
+                                  note: `Acknowledged yesterday (${yesterdayStr}) unmarked attendance from startup popup by ${activeRole}`,
+                                });
+                              }}
+                              className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+                            >
+                              Acknowledge Yesterday&apos;s Unmarked
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isStartupBatchSaving}
+                              onClick={async () => {
+                                const entries: Array<{
+                                  recordId: string;
+                                  source: 'driver' | 'assistant';
+                                  value: string;
+                                  reason?: string;
+                                }> = [];
+                                [
+                                  ...yesterdayAnalysis.bothNotMarked,
+                                  ...yesterdayAnalysis.singleShiftNotMarked,
+                                ].forEach((item) => {
+                                  if (item.arrivalStatus === 'Pending') {
+                                    entries.push({
+                                      recordId: item.recordId,
+                                      source: 'driver',
+                                      value: 'Present',
+                                      reason: `Marked yesterday unmarked Arrival only by ${activeRole}`,
+                                    });
+                                  }
+                                  if (item.departureStatus === 'Pending') {
+                                    entries.push({
+                                      recordId: item.recordId,
+                                      source: 'assistant',
+                                      value: 'Present',
+                                      reason: `Marked yesterday unmarked Departure only by ${activeRole}`,
+                                    });
+                                  }
+                                });
+                                if (entries.length === 0) return;
+                                setIsStartupBatchSaving(true);
+                                try {
+                                  await handleBatchSaveAttendance(entries);
+                                } finally {
+                                  setIsStartupBatchSaving(false);
+                                }
+                              }}
+                              className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs cursor-pointer"
+                            >
+                              Mark Only Unmarked (Keep Marked Unchanged)
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Yesterday's Mismatched Attendance Section */}
+                      {yesterdayAnalysis.statusMismatches.length > 0 && (
+                        <div className="p-4 rounded-xl bg-violet-50/70 border border-violet-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <h4 className="font-bold text-violet-950 text-sm">
+                                Yesterday ({yesterdayStr}) Arrival vs. Departure Mismatches (
+                                {yesterdayAnalysis.statusMismatches.length})
+                              </h4>
+                              <p className="text-[11px] text-violet-800">
+                                Already-marked attendance cannot be changed directly by Coordinator, Assistant, or Attendance Incharge. Send a change request to Admin or Skip.
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="divide-y divide-violet-200/60 max-h-48 overflow-y-auto">
+                            {yesterdayAnalysis.statusMismatches.slice(0, 10).map((m) => (
+                              <div
+                                key={m.recordId}
+                                className="py-2 flex flex-wrap items-center justify-between gap-2"
+                              >
+                                <div>
+                                  <span className="font-bold text-slate-900">
+                                    {m.student.name} ({m.student.admissionNo})
+                                  </span>{' '}
+                                  <span className="font-mono text-slate-600">• {m.routeCode}</span>
+                                  <div className="text-[11px] text-slate-600">
+                                    Arrival: <strong>{m.arrivalStatus}</strong> vs Departure:{' '}
+                                    <strong>{m.departureStatus}</strong>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  {!isAdmin ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setStartupChangeReqModal({
+                                          item: m,
+                                          shift: 'departure',
+                                          requestedStatus:
+                                            m.arrivalStatus === 'Present' ? 'Present' : 'Absent',
+                                          reason: '',
+                                        })
+                                      }
+                                      className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs cursor-pointer"
+                                    >
+                                      Send Request for Change to Admin
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setIsStartupAttendancePopupDismissed(true);
+                                        handleNavigate('operations', 'unmarked_mismatch');
+                                      }}
+                                      className="px-3 py-1.5 rounded-xl bg-violet-700 hover:bg-violet-800 text-white font-bold text-xs cursor-pointer"
+                                    >
+                                      Resolve as Admin
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Inline Change Request Form inside Startup Popup */}
+                {startupChangeReqModal && (
+                  <div className="px-6 py-4 bg-amber-50 border-t border-amber-300 space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900">
+                        Request Change to Admin for {startupChangeReqModal.item.student.name} (
+                        {startupChangeReqModal.item.student.admissionNo})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStartupChangeReqModal(null)}
+                        className="text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <select
+                        value={startupChangeReqModal.shift}
+                        onChange={(e) =>
+                          setStartupChangeReqModal((prev) =>
+                            prev ? { ...prev, shift: e.target.value as 'arrival' | 'departure' } : null
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white font-semibold"
+                      >
+                        <option value="arrival">Morning Arrival</option>
+                        <option value="departure">Afternoon Departure</option>
+                      </select>
+                      <select
+                        value={startupChangeReqModal.requestedStatus}
+                        onChange={(e) =>
+                          setStartupChangeReqModal((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  requestedStatus: e.target.value as 'Present' | 'Absent' | 'Leave',
+                                }
+                              : null
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white font-semibold"
+                      >
+                        <option value="Present">Change to Present</option>
+                        <option value="Absent">Change to Absent</option>
+                        <option value="Leave">Change to Leave</option>
+                      </select>
+                      <input
+                        type="text"
+                        value={startupChangeReqModal.reason}
+                        onChange={(e) =>
+                          setStartupChangeReqModal((prev) =>
+                            prev ? { ...prev, reason: e.target.value } : null
+                          )
+                        }
+                        placeholder="Reason for Admin approval..."
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white"
+                      />
+                    </div>
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const { item, shift, requestedStatus, reason } = startupChangeReqModal;
+                          handleSubmitAttendanceChangeRequest({
+                            recordId: item.recordId,
+                            tripId: item.tripId,
+                            date: item.date,
+                            routeId: item.routeId,
+                            routeCode: item.routeCode,
+                            routeName: item.routeName,
+                            campus: item.campus,
+                            studentId: item.student.id,
+                            admissionNo: item.student.admissionNo,
+                            studentName: item.student.name,
+                            className: `${item.student.class} ${item.student.section}`.trim(),
+                            shift,
+                            currentStatus:
+                              shift === 'arrival'
+                                ? (item.arrivalStatus as any)
+                                : (item.departureStatus as any),
+                            requestedStatus,
+                            reason:
+                              reason.trim() ||
+                              `Mismatch change requested from startup popup by ${activeRole}`,
+                            requestedBy: currentUser?.fullName || activeRole,
+                            requestedByRole: activeRole,
+                          });
+                          setStartupChangeReqModal(null);
+                        }}
+                        className="px-4 py-1.5 rounded-xl bg-slate-900 text-amber-400 font-bold cursor-pointer"
+                      >
+                        Submit Change Request to Admin
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+                  <span className="text-xs text-slate-500">
+                    You can skip this popup now or proceed directly to the route attendance sheet.
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsStartupAttendancePopupDismissed(true);
+                        handleNavigate('operations', 'unmarked_mismatch');
+                      }}
+                      className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+                    >
+                      Open Unmarked &amp; Mismatch Report
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsStartupAttendancePopupDismissed(true)}
+                      className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer"
+                    >
+                      Skip for Now
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       {/* Android App (WebAPK) & Standalone APK Installer Modal */}
       {androidInstallerModal}
