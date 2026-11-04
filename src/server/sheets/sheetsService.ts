@@ -81,15 +81,19 @@ const RUNTIME_CREDS_FILE = path.join(DATA_DIR, 'google_credentials.json');
 function stripLargeBase64ForSheetCell(obj: any): string {
   try {
     const json = JSON.stringify(obj, (_key, value) => {
-      if (typeof value === 'string' && value.length > 38000) {
+      if (typeof value === 'string' && value.length > 42000) {
         return '[ATTACHMENT_STORED]';
       }
       return value;
     });
-    if (json.length <= 46000) return json;
-    // Never slice JSON mid-string; keep compressed profilePhoto while stripping heavy secondary attachments
+    if (json.length <= 47500) return json;
+    // Never slice JSON mid-string; keep compressed profilePhoto and upiScreenshot while stripping heavy secondary attachments
     const compactJson = JSON.stringify(obj, (key, value) => {
-      if (key === 'profilePhoto' && typeof value === 'string' && value.length <= 36000) {
+      if (
+        (key === 'profilePhoto' || key === 'upiScreenshot') &&
+        typeof value === 'string' &&
+        value.length <= 40000
+      ) {
         return value;
       }
       if (typeof value === 'string' && value.startsWith('data:') && value.length > 1500) {
@@ -100,7 +104,7 @@ function stripLargeBase64ForSheetCell(obj: any): string {
       }
       return value;
     });
-    return compactJson.length <= 48000 ? compactJson : '{}';
+    return compactJson.length <= 48500 ? compactJson : '{}';
   } catch {
     return '{}';
   }
@@ -718,7 +722,47 @@ export class SheetsDatabaseManager {
         this.invoices = this.parseRowsFromSheet<FeeInvoice>(tabMap.get('Fee_Invoices'), true);
       }
       if ((tabMap.get('Fee_Receipts') || []).length >= 1) {
-        this.receipts = this.parseRowsFromSheet<FeeReceipt>(tabMap.get('Fee_Receipts'), true);
+        const rawReceiptRows = tabMap.get('Fee_Receipts') || [];
+        const prevAttachmentMap = new Map<string, string>();
+        for (const oldRec of this.receipts) {
+          if (
+            oldRec.upiScreenshot &&
+            oldRec.upiScreenshot !== '[ATTACHMENT_STORED]' &&
+            oldRec.upiScreenshot.startsWith('data:')
+          ) {
+            prevAttachmentMap.set(oldRec.id, oldRec.upiScreenshot);
+            if (oldRec.receiptNo) prevAttachmentMap.set(oldRec.receiptNo, oldRec.upiScreenshot);
+          }
+        }
+        const parsedReceipts = this.parseRowsFromSheet<FeeReceipt>(rawReceiptRows, true);
+        // Reassemble overflow attachment chunks (columns P..T) if present, or preserve in-memory data URL
+        const chunkMap = new Map<string, string>();
+        for (let rIdx = 1; rIdx < rawReceiptRows.length; rIdx++) {
+          const rRow = rawReceiptRows[rIdx];
+          if (!Array.isArray(rRow) || rRow.length <= 15) continue;
+          const rId = String(rRow[0] || '').trim();
+          const rNo = String(rRow[1] || '').trim();
+          const joinedChunks = rRow
+            .slice(15)
+            .map(c => String(c || ''))
+            .join('');
+          if (joinedChunks.startsWith('data:')) {
+            if (rId) chunkMap.set(rId, joinedChunks);
+            if (rNo) chunkMap.set(rNo, joinedChunks);
+          }
+        }
+        for (const rec of parsedReceipts) {
+          const chunkedAtt = chunkMap.get(rec.id) || chunkMap.get(rec.receiptNo);
+          if (chunkedAtt) {
+            rec.upiScreenshot = chunkedAtt;
+          } else if (!rec.upiScreenshot || rec.upiScreenshot === '[ATTACHMENT_STORED]') {
+            const preserved = prevAttachmentMap.get(rec.id) || prevAttachmentMap.get(rec.receiptNo);
+            if (preserved) {
+              rec.upiScreenshot = preserved;
+            }
+          }
+        }
+        this.receipts = parsedReceipts;
       }
       if ((tabMap.get('Fee_FollowUps') || []).length >= 1) {
         this.followUps = this.parseRowsFromSheet<FollowUpRecord>(tabMap.get('Fee_FollowUps'), true);
@@ -1689,24 +1733,42 @@ export class SheetsDatabaseManager {
         {
           range: 'Fee_Receipts!A1',
           values: [
-            ['Receipt ID', 'Receipt No', 'Date', 'Admission No', 'Member Name', 'Amount Paid (INR)', 'Discount (INR)', 'Late Fine (INR)', 'Balance Before (INR)', 'Balance After (INR)', 'Payment Mode', 'Reference / UTR', 'Received By', 'Remarks', '_JSON'],
-            ...this.receipts.map(rec => [
-              rec.id,
-              rec.receiptNo,
-              rec.date,
-              rec.admissionNo,
-              rec.studentName,
-              rec.amount,
-              rec.discountAmount || 0,
-              rec.lateFine || 0,
-              rec.balanceDueBefore ?? 0,
-              rec.balanceDueAfter ?? 0,
-              rec.paymentMode,
-              rec.referenceNo || '',
-              rec.receivedBy,
-              rec.remarks || '',
-              stripLargeBase64ForSheetCell(rec),
-            ]),
+            [
+              'Receipt ID', 'Receipt No', 'Date', 'Admission No', 'Member Name',
+              'Amount Paid (INR)', 'Discount (INR)', 'Late Fine (INR)', 'Balance Before (INR)',
+              'Balance After (INR)', 'Payment Mode', 'Reference / UTR', 'Received By',
+              'Remarks', '_JSON', '_ATT_1', '_ATT_2', '_ATT_3', '_ATT_4', '_ATT_5'
+            ],
+            ...this.receipts.map(rec => {
+              const rawAtt =
+                typeof rec.upiScreenshot === 'string' && rec.upiScreenshot.startsWith('data:')
+                  ? rec.upiScreenshot
+                  : '';
+              // If attachment exceeds 38,000 chars, store chunks across _ATT_1.._ATT_5 (up to 200 KB)
+              const needsChunks = rawAtt.length > 38000 && rawAtt.length <= 200000;
+              return [
+                rec.id,
+                rec.receiptNo,
+                rec.date,
+                rec.admissionNo,
+                rec.studentName,
+                rec.amount,
+                rec.discountAmount || 0,
+                rec.lateFine || 0,
+                rec.balanceDueBefore ?? 0,
+                rec.balanceDueAfter ?? 0,
+                rec.paymentMode,
+                rec.referenceNo || '',
+                rec.receivedBy,
+                rec.remarks || '',
+                stripLargeBase64ForSheetCell(rec),
+                needsChunks ? rawAtt.slice(0, 40000) : '',
+                needsChunks ? rawAtt.slice(40000, 80000) : '',
+                needsChunks ? rawAtt.slice(80000, 120000) : '',
+                needsChunks ? rawAtt.slice(120000, 160000) : '',
+                needsChunks ? rawAtt.slice(160000, 200000) : '',
+              ];
+            }),
           ],
         },
         {
@@ -3933,14 +3995,88 @@ export class SheetsDatabaseManager {
       }
     }
 
+    // 4b-2. Backfill campus, studentId, and normalized admissionNo on all receipts & invoices using strict ID/admissionNo lookup (never name-only when ID/admissionNo exists)
+    const normAdmHelper = (adm?: string | null) =>
+      String(adm || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '')
+        .replace(/^(nev|nrv)[-/\s]*/, '');
+
+    for (const rec of this.receipts) {
+      const recAdmNorm = normAdmHelper(rec.admissionNo);
+      const matchedStu =
+        (rec.studentId ? this.students.find(s => s.id === rec.studentId) : undefined) ||
+        (recAdmNorm
+          ? this.students.find(s => normAdmHelper(s.admissionNo) === recAdmNorm)
+          : undefined);
+
+      if (matchedStu) {
+        if (rec.studentId !== matchedStu.id) {
+          rec.studentId = matchedStu.id;
+          changed = true;
+        }
+        if (matchedStu.admissionNo && rec.admissionNo !== matchedStu.admissionNo) {
+          rec.admissionNo = matchedStu.admissionNo;
+          changed = true;
+        }
+      }
+
+      const recByLower = String(rec.receivedBy || '').toLowerCase();
+      const expectedRecCampus: 'Sr' | 'Jr' = matchedStu
+        ? (matchedStu.campus === 'Jr' || matchedStu.campus === 'Sr'
+            ? matchedStu.campus
+            : (this.inferCampusFromClass(matchedStu.class, 'Sr') === 'Jr' ? 'Jr' : 'Sr'))
+        : recByLower.includes('jr') || recByLower.includes('junior')
+        ? 'Jr'
+        : recByLower.includes('sr') || recByLower.includes('senior')
+        ? 'Sr'
+        : rec.campus === 'Jr'
+        ? 'Jr'
+        : 'Sr';
+
+      if (rec.campus !== expectedRecCampus) {
+        rec.campus = expectedRecCampus;
+        changed = true;
+      }
+    }
+
+    for (const inv of this.invoices) {
+      const invAdmNorm = normAdmHelper(inv.admissionNo);
+      const matchedStu =
+        (inv.studentId ? this.students.find(s => s.id === inv.studentId) : undefined) ||
+        (invAdmNorm
+          ? this.students.find(s => normAdmHelper(s.admissionNo) === invAdmNorm)
+          : undefined);
+      if (matchedStu) {
+        if (inv.studentId !== matchedStu.id) {
+          inv.studentId = matchedStu.id;
+          changed = true;
+        }
+        if (matchedStu.admissionNo && inv.admissionNo !== matchedStu.admissionNo) {
+          inv.admissionNo = matchedStu.admissionNo;
+          changed = true;
+        }
+        const expectedInvCampus: 'Sr' | 'Jr' =
+          matchedStu.campus === 'Jr' || matchedStu.campus === 'Sr'
+            ? matchedStu.campus
+            : (this.inferCampusFromClass(matchedStu.class, 'Sr') === 'Jr' ? 'Jr' : 'Sr');
+        if (inv.campus !== expectedInvCampus) {
+          inv.campus = expectedInvCampus;
+          changed = true;
+        }
+      }
+    }
+
     // 4c. Deterministically replay each student's receipts against their invoices so student.balanceDue and invoice status never drift across days
     for (const st of this.students) {
+      const stAdmNorm = normAdmHelper(st.admissionNo);
       const studentInvoices = this.invoices.filter(inv => inv.studentId === st.id);
       const studentReceiptsChron = this.receipts
         .filter(
           r =>
             r.studentId === st.id ||
-            (st.admissionNo && r.admissionNo === st.admissionNo)
+            (Boolean(stAdmNorm) && normAdmHelper(r.admissionNo) === stAdmNorm)
         )
         .slice()
         .reverse();
@@ -8676,8 +8812,13 @@ export class SheetsDatabaseManager {
       }
     }
 
-    // Also ensure all existing students have their campus aligned with Playgroup-IV -> Jr, V-X -> Sr, and Old school students have ₹0 fee
+    // Also ensure all existing students have their campus aligned with Playgroup-IV -> Jr, V-X -> Sr, normalized NEV admissionNo prefix, and Old school students have ₹0 fee
     for (const st of this.students) {
+      const rawAdm = String(st.admissionNo || '').trim();
+      if (/^\d+\/\d+$/.test(rawAdm)) {
+        st.admissionNo = `NEV${rawAdm}`;
+        changed = true;
+      }
       if ((st.memberType || 'Student').toLowerCase() === 'student') {
         const expectedCampus = this.inferCampusFromClass(st.class, st.campus || 'Sr');
         if (st.campus !== expectedCampus) {
@@ -8822,9 +8963,12 @@ export class SheetsDatabaseManager {
           batch.routeObj?.campus || 'Sr'
         );
 
+        const rawSeedAdm = String(item.admissionNo || '').trim();
+        const normalizedSeedAdm = /^\d+\/\d+$/.test(rawSeedAdm) ? `NEV${rawSeedAdm}` : rawSeedAdm;
+
         const newStudent: StudentMember = {
           id: deterministicId,
-          admissionNo: item.admissionNo,
+          admissionNo: normalizedSeedAdm,
           name: item.name,
           profilePhoto: '',
           memberType: 'Student',
@@ -10022,6 +10166,7 @@ export class SheetsDatabaseManager {
 
   public async recordReceipt(data: {
     studentId: string;
+    campus?: string;
     amount: number;
     discountAmount?: number;
     lateFine?: number;
@@ -10048,6 +10193,18 @@ export class SheetsDatabaseManager {
       }
       if (!data.paymentMode) {
         throw new Error('Payment Mode (Cash / Bank / UPI) is mandatory.');
+      }
+      if (
+        (data.paymentMode === 'UPI' || data.paymentMode === 'Bank') &&
+        (!data.upiScreenshot ||
+          !String(data.upiScreenshot).trim() ||
+          data.upiScreenshot === '[ATTACHMENT_STORED]')
+      ) {
+        throw new Error(
+          `Payment Proof / Screenshot attachment is compulsory when payment is made through ${
+            data.paymentMode === 'UPI' ? 'UPI' : 'Bank Transfer'
+          }.`
+        );
       }
       const feePortionPaid = Math.max(0, netPaid - lateFineCharged);
       const receiptDate = data.date || new Date().toISOString().split('T')[0];
@@ -10167,6 +10324,15 @@ export class SheetsDatabaseManager {
       }
       const balanceDueAfter = student.balanceDue;
 
+      const resolvedStudentCampus: 'Sr' | 'Jr' =
+        data.campus === 'Jr' || data.campus === 'Sr'
+          ? data.campus
+          : student.campus === 'Jr' || student.campus === 'Sr'
+          ? student.campus
+          : this.inferCampusFromClass(student.class, 'Sr') === 'Jr'
+          ? 'Jr'
+          : 'Sr';
+
       const receipt: FeeReceipt = {
         id: `rec-${Date.now()}`,
         receiptNo,
@@ -10174,6 +10340,7 @@ export class SheetsDatabaseManager {
         studentId: student.id,
         admissionNo: student.admissionNo,
         studentName: student.name,
+        campus: resolvedStudentCampus,
         amount: netPaid,
         discountAmount: totalDiscount,
         lateFine: lateFineCharged,
@@ -10208,6 +10375,22 @@ export class SheetsDatabaseManager {
         'Chart_Of_Accounts',
       ]);
       return receipt;
+    });
+  }
+
+  public async updateReceiptAttachment(receiptId: string, upiScreenshot: string): Promise<FeeReceipt> {
+    return this.enqueueWrite(async () => {
+      const cleanId = String(receiptId || '').trim();
+      const target = this.receipts.find(r => r.id === cleanId || r.receiptNo === cleanId);
+      if (!target) {
+        throw new Error('Receipt not found.');
+      }
+      if (!upiScreenshot || !String(upiScreenshot).trim()) {
+        throw new Error('Valid Payment Proof / Screenshot attachment is required.');
+      }
+      target.upiScreenshot = upiScreenshot;
+      await this.internalSyncToGoogleSheets(false, ['Fee_Receipts']);
+      return target;
     });
   }
 

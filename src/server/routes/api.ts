@@ -782,6 +782,14 @@ apiRouter.post('/receipts', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.put('/receipts/:id/attachment', async (req: Request, res: Response) => {
+  try {
+    const result = await sheetsDb.updateReceiptAttachment(req.params.id, req.body?.upiScreenshot);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 apiRouter.delete('/receipts/:id', async (req: Request, res: Response) => {
   try {
     const result = await sheetsDb.deleteReceipt(req.params.id);

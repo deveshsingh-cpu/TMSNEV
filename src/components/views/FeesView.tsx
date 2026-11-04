@@ -10,9 +10,12 @@ import {
   StudentMember, UserRole, MemberTypeMaster, CampusMaster, Route, Vehicle
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
+import { readFileCompressed } from '../../utils/fileCompressor.js';
 import { api } from '../../services/api.js';
 import {
   normalizeCampus,
+  normalizeAdmissionNo,
+  findStudentStrictly,
   formatCampusLabel,
   getStudentCampus,
   getInvoiceCampus,
@@ -207,7 +210,15 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
   const [isRunningBilling, setIsRunningBilling] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
-  const [previewScreenshot, setPreviewScreenshot] = useState<{ title: string; url: string } | null>(null);
+  const [previewScreenshot, setPreviewScreenshot] = useState<{
+    title: string;
+    url: string;
+    receipt?: FeeReceipt;
+    isPlaceholder?: boolean;
+    isPdf?: boolean;
+  } | null>(null);
+  const [localAttachmentOverrides, setLocalAttachmentOverrides] = useState<Record<string, string>>({});
+  const [isUploadingReceiptAttachment, setIsUploadingReceiptAttachment] = useState(false);
 
   // Individual Suspension Selection Modal (No auto-suspension!)
   const [isIndividualSuspendModalOpen, setIsIndividualSuspendModalOpen] = useState(false);
@@ -223,9 +234,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
   // --- Improvised Fee Collection Form State ---
   const [memberSearchQuery, setMemberSearchQuery] = useState('');
+  const [isMemberDropdownOpen, setIsMemberDropdownOpen] = useState(false);
   const [memberFilterClass, setMemberFilterClass] = useState('all');
   const [memberFilterType, setMemberFilterType] = useState('all');
   const [selectedStudentId, setSelectedStudentId] = useState(scopedStudents[0]?.id || '');
+  const [collectModalError, setCollectModalError] = useState<string | null>(null);
 
   // Month-by-Month selection & per-month Admin discount
   const [selectedMonthIds, setSelectedMonthIds] = useState<string[]>([]);
@@ -250,39 +263,71 @@ export const FeesView: React.FC<FeesViewProps> = ({
     }
   }, [preselectedStudentIdForCollect, scopedStudents.length]);
 
-  // Narrowed down member list for Collect Fee modal (Strictly scoped to campus!)
+  // Narrowed down member list for Collect Fee modal (Strictly scoped to campus! Matches ID, Name, Phone, Father, Route, Stop)
   const narrowedMembers = scopedStudents.filter((s) => {
     if (memberFilterClass !== 'all' && s.class !== memberFilterClass) return false;
     if (memberFilterType !== 'all' && s.memberType !== memberFilterType) return false;
     if (memberSearchQuery.trim()) {
-      const q = memberSearchQuery.toLowerCase();
+      const q = memberSearchQuery.trim().toLowerCase();
+      const qNormAdm = normalizeAdmissionNo(q);
+      const stuNormAdm = normalizeAdmissionNo(s.admissionNo);
       return (
         s.name.toLowerCase().includes(q) ||
         s.admissionNo.toLowerCase().includes(q) ||
+        (Boolean(qNormAdm) && stuNormAdm.includes(qNormAdm)) ||
+        (s.mobile && s.mobile.toLowerCase().includes(q)) ||
+        (s.emergencyContact && s.emergencyContact.toLowerCase().includes(q)) ||
+        (s.fatherName && s.fatherName.toLowerCase().includes(q)) ||
         s.class.toLowerCase().includes(q) ||
         (s.memberType && s.memberType.toLowerCase().includes(q)) ||
-        s.fatherName.toLowerCase().includes(q)
+        (s.routeCode && s.routeCode.toLowerCase().includes(q)) ||
+        (s.pickupDropStopName && s.pickupDropStopName.toLowerCase().includes(q)) ||
+        (s.villageName && s.villageName.toLowerCase().includes(q))
       );
     }
     return true;
   });
 
-  // Selected Member object (prioritize narrowedMembers so searching immediately updates the active student details below)
-  const selectedMember =
-    narrowedMembers.find((s) => s.id === selectedStudentId) ||
-    narrowedMembers[0] ||
-    scopedStudents.find((s) => s.id === selectedStudentId) ||
-    scopedStudents[0];
-
-  // Keep selectedStudentId in sync whenever search/filter narrows the member list
+  // Automatically keep selectedStudentId synchronized with active search results so a stale member can never remain loaded
   useEffect(() => {
-    if (narrowedMembers.length > 0) {
-      const stillInNarrowed = narrowedMembers.some((s) => s.id === selectedStudentId);
-      if (!stillInNarrowed) {
+    const q = memberSearchQuery.trim();
+    if (!q || narrowedMembers.length === 0) return;
+    const qNormAdm = normalizeAdmissionNo(q);
+    // 1. If user typed an exact Admission No (with or without NEV prefix), auto-select that exact member
+    if (qNormAdm.length >= 3) {
+      const exactAdmMatch = narrowedMembers.find(
+        (s) =>
+          normalizeAdmissionNo(s.admissionNo) === qNormAdm ||
+          s.admissionNo.trim().toLowerCase() === q.toLowerCase()
+      );
+      if (exactAdmMatch && exactAdmMatch.id !== selectedStudentId) {
+        setSelectedStudentId(exactAdmMatch.id);
+        return;
+      }
+    }
+    // 2. If only 1 member matches the typed characters, or if current selectedStudentId is not in narrowedMembers, select narrowedMembers[0]
+    if (
+      narrowedMembers.length === 1 ||
+      !narrowedMembers.some((s) => s.id === selectedStudentId)
+    ) {
+      if (narrowedMembers[0].id !== selectedStudentId) {
         setSelectedStudentId(narrowedMembers[0].id);
       }
     }
-  }, [memberSearchQuery, memberFilterClass, memberFilterType, narrowedMembers.length, selectedStudentId]);
+  }, [memberSearchQuery, narrowedMembers.length, selectedStudentId]);
+
+  // Selected Member object: updates when a user clicks or searches a member in the dropdown list
+  const selectedMember =
+    scopedStudents.find((s) => s.id === selectedStudentId) ||
+    narrowedMembers[0] ||
+    scopedStudents[0];
+
+  // Ensure selectedStudentId stays valid when campus scope changes
+  useEffect(() => {
+    if (scopedStudents.length > 0 && !scopedStudents.some((s) => s.id === selectedStudentId)) {
+      setSelectedStudentId(scopedStudents[0].id);
+    }
+  }, [scopedStudents.length, selectedCampus, selectedStudentId]);
 
   // Build pending monthly dues rows for the selected member
   const memberAllInvoices = invoices.filter((i) => i.studentId === selectedMember?.id);
@@ -324,6 +369,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
       scopedStudents.find((s) => s.id === targetStudentId);
     if (!targetMember) return;
     setSelectedStudentId(targetMember.id);
+    setMemberSearchQuery('');
+    setIsMemberDropdownOpen(false);
+    setCollectModalError(null);
     const targetUnpaid = invoices.filter(
       (i) => i.studentId === targetMember.id && i.balanceDue > 0 && i.status !== 'Paid'
     );
@@ -466,17 +514,132 @@ export const FeesView: React.FC<FeesViewProps> = ({
     .filter((r) => r.studentId === selectedMember?.id)
     .reduce((s, r) => s + r.amount, 0);
 
-  const handleUpiFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUpiFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setUpiScreenshotName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setUpiScreenshot(reader.result);
+    setCollectModalError(null);
+    try {
+      const compressedDataUrl = await readFileCompressed(file, 820, 0.68);
+      if (compressedDataUrl) {
+        setUpiScreenshot(compressedDataUrl);
       }
+    } catch {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          setUpiScreenshot(reader.result);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const getReceiptAttachmentInfo = (rec: FeeReceipt): {
+    hasAttachment: boolean;
+    displayUrl: string;
+    isPlaceholder: boolean;
+    isPdf: boolean;
+  } => {
+    const raw = (localAttachmentOverrides[rec.id] ?? rec.upiScreenshot ?? '').trim();
+    if (!raw) {
+      return { hasAttachment: false, displayUrl: '', isPlaceholder: false, isPdf: false };
+    }
+    if (raw.startsWith('data:application/pdf')) {
+      return { hasAttachment: true, displayUrl: raw, isPlaceholder: false, isPdf: true };
+    }
+    if (
+      raw.startsWith('data:image/') ||
+      raw.startsWith('http://') ||
+      raw.startsWith('https://') ||
+      raw.startsWith('/')
+    ) {
+      return { hasAttachment: true, displayUrl: raw, isPlaceholder: false, isPdf: false };
+    }
+    // Fallback digital payment voucher for legacy '[ATTACHMENT_STORED]' entries
+    const safeSchool = (schoolName || 'Narendra Edu Valley').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const safeStudent = (rec.studentName || 'Member').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const safeBreakup = (rec.feeBreakupDescription || 'Transport Fee')
+      .slice(0, 56)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;');
+    const safeRef = (rec.referenceNo || 'Verified').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const safeBy = (rec.receivedBy || 'Transport Office').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="680" height="430" viewBox="0 0 680 430">
+      <rect width="680" height="430" rx="16" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+      <rect x="20" y="20" width="640" height="72" rx="12" fill="#0f172a"/>
+      <text x="44" y="50" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#ffffff">${safeSchool}</text>
+      <text x="44" y="74" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#fbbf24">RECORDED PAYMENT PROOF VOUCHER (${rec.paymentMode})</text>
+      <rect x="500" y="36" width="140" height="38" rx="8" fill="#059669"/>
+      <text x="570" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff">PAID Rs. ${rec.amount}</text>
+      <g font-family="Arial, sans-serif" font-size="14" fill="#0f172a">
+        <text x="44" y="132" font-weight="bold" fill="#64748b">Receipt No:</text>
+        <text x="220" y="132" font-weight="bold">${rec.receiptNo}</text>
+        <text x="44" y="166" font-weight="bold" fill="#64748b">Payment Date:</text>
+        <text x="220" y="166">${rec.date}</text>
+        <text x="44" y="200" font-weight="bold" fill="#64748b">Member Name:</text>
+        <text x="220" y="200" font-weight="bold">${safeStudent} (${rec.admissionNo || ''})</text>
+        <text x="44" y="234" font-weight="bold" fill="#64748b">Mode &amp; Reference:</text>
+        <text x="220" y="234" font-weight="bold" fill="#047857">${rec.paymentMode} • Ref: ${safeRef}</text>
+        <text x="44" y="268" font-weight="bold" fill="#64748b">Fee Particulars:</text>
+        <text x="220" y="268">${safeBreakup}</text>
+        <text x="44" y="302" font-weight="bold" fill="#64748b">Received By:</text>
+        <text x="220" y="302">${safeBy}</text>
+      </g>
+      <rect x="36" y="330" width="608" height="72" rx="10" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+      <text x="54" y="356" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#92400e">Original high-size image was archived by Google Sheets cell-limit protection.</text>
+      <text x="54" y="378" font-family="Arial, sans-serif" font-size="12" fill="#b45309">Use the "Upload / Replace Screenshot" button below to attach a fresh screenshot image.</text>
+    </svg>`;
+    return {
+      hasAttachment: true,
+      displayUrl: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
+      isPlaceholder: true,
+      isPdf: false,
     };
-    reader.readAsDataURL(file);
+  };
+
+  const handleOpenReceiptAttachment = (rec: FeeReceipt) => {
+    const info = getReceiptAttachmentInfo(rec);
+    setPreviewScreenshot({
+      title: `Payment Attachment — ${rec.receiptNo} (${rec.studentName})`,
+      url: info.displayUrl,
+      receipt: rec,
+      isPlaceholder: info.isPlaceholder,
+      isPdf: info.isPdf,
+    });
+  };
+
+  const handleReplaceSavedReceiptAttachment = async (
+    rec: FeeReceipt,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploadingReceiptAttachment(true);
+    try {
+      const compressed = await readFileCompressed(file, 820, 0.68);
+      if (!compressed) return;
+      await api.updateReceiptAttachment(rec.id, compressed);
+      setLocalAttachmentOverrides((prev) => ({ ...prev, [rec.id]: compressed }));
+      setPreviewScreenshot({
+        title: `Payment Attachment — ${rec.receiptNo} (${rec.studentName})`,
+        url: compressed,
+        receipt: { ...rec, upiScreenshot: compressed },
+        isPlaceholder: false,
+        isPdf: compressed.startsWith('data:application/pdf'),
+      });
+      setStatusMessage({
+        type: 'success',
+        text: `Attachment updated & saved for Receipt ${rec.receiptNo} (${rec.studentName}).`,
+      });
+    } catch (err: any) {
+      setStatusMessage({
+        type: 'warning',
+        text: err?.message || 'Failed to update receipt attachment.',
+      });
+    } finally {
+      setIsUploadingReceiptAttachment(false);
+    }
   };
 
   // --- Follow-Up & Warning Letter Modals State ---
@@ -685,13 +848,21 @@ export const FeesView: React.FC<FeesViewProps> = ({
     });
   };
 
-  const handlePrintSingleReceipt = (rec: FeeReceipt) => {
-    const memberObj = students.find(
-      (s) =>
-        s.id === rec.studentId ||
-        s.admissionNo === rec.admissionNo ||
-        s.name.toLowerCase() === (rec.studentName || '').toLowerCase()
-    );
+  const handlePrintSingleReceipt = (rec: FeeReceipt, autoPrint = false) => {
+    const memberObj = findStudentStrictly(students, rec);
+    const stopAndVillage = memberObj
+      ? `${memberObj.pickupDropStopName || memberObj.villageName || 'Assigned Stop'}${
+          memberObj.villageName &&
+          memberObj.pickupDropStopName &&
+          memberObj.villageName.trim().toLowerCase() !==
+            memberObj.pickupDropStopName.trim().toLowerCase()
+            ? ` (${memberObj.villageName})`
+            : ''
+        }`
+      : '';
+    const routeAndStopDisplay = memberObj
+      ? `${memberObj.routeCode || 'Assigned Route'} • ${stopAndVillage}`
+      : 'Assigned Route';
     const html = `
       <html>
         <head>
@@ -716,10 +887,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
             <div class="grid">
               <div><strong>Receipt No:</strong> ${rec.receiptNo}</div>
               <div><strong>Date:</strong> ${rec.date}</div>
-              <div><strong>Member Name:</strong> ${rec.studentName}</div>
-              <div><strong>ID / Adm No:</strong> ${rec.admissionNo}</div>
+              <div><strong>Member Name:</strong> ${memberObj?.name || rec.studentName}</div>
+              <div><strong>ID / Adm No:</strong> ${memberObj?.admissionNo || rec.admissionNo}</div>
               <div><strong>Class / Sec:</strong> ${memberObj ? `${memberObj.class}-${memberObj.section}` : '—'}</div>
-              <div><strong>Route &amp; Stop:</strong> ${memberObj ? `${memberObj.routeCode} • ${memberObj.pickupDropStopName}` : 'Assigned Route'}</div>
+              <div><strong>Route &amp; Stop:</strong> ${routeAndStopDisplay}</div>
             </div>
             <div class="amount-box">
               <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
@@ -759,6 +930,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       subtitle: `Paid Rs. ${rec.amount.toLocaleString('en-IN')} via ${rec.paymentMode} on ${rec.date}`,
       html,
       filename: `fee_receipt_${rec.receiptNo}`,
+      autoPrint,
     });
   };
 
@@ -843,12 +1015,23 @@ export const FeesView: React.FC<FeesViewProps> = ({
     if (submittingReceiptRef.current || isSubmittingReceipt) {
       return;
     }
+    setCollectModalError(null);
     if (!selectedMember) {
+      setCollectModalError('Please select a transport member.');
       setStatusMessage({ type: 'warning', text: 'Please select a member.' });
       return;
     }
     if (selectedRows.length === 0) {
+      setCollectModalError('Please select at least one pending month to collect fees.');
       setStatusMessage({ type: 'warning', text: 'Please select at least one pending month to collect fees.' });
+      return;
+    }
+    if ((paymentMode === 'UPI' || paymentMode === 'Bank') && !upiScreenshot) {
+      const msg = `Payment proof / screenshot attachment is compulsory when Payment Mode is ${
+        paymentMode === 'UPI' ? 'UPI (QR / App)' : 'Bank Transfer / NEFT / Cheque'
+      }. Please upload the attachment before saving.`;
+      setCollectModalError(msg);
+      setStatusMessage({ type: 'warning', text: msg });
       return;
     }
 
@@ -867,6 +1050,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
     const paidAmountSnapshot = totalNetPayable;
     const memberSnapshot = selectedMember;
     const modeSnapshot = paymentMode;
+    const screenshotSnapshot = upiScreenshot;
 
     try {
       const createdReceipt = await onRecordReceipt({
@@ -891,6 +1075,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       setRemarks('');
       setUpiScreenshot('');
       setUpiScreenshotName('');
+      setCollectModalError(null);
 
       const savedReceiptNo = createdReceipt?.receiptNo || 'Generated';
       const updatedBal =
@@ -899,24 +1084,49 @@ export const FeesView: React.FC<FeesViewProps> = ({
           : Math.max(0, (Number(memberSnapshot.balanceDue) || 0) - paidAmountSnapshot);
       const successText = `Fee Receipt ${savedReceiptNo} saved for ${memberSnapshot.name} (${memberCampus} Campus) — Paid ₹${paidAmountSnapshot.toLocaleString('en-IN')}. Remaining Balance: ₹${updatedBal.toLocaleString('en-IN')}.`;
 
+      const receiptToPrint: FeeReceipt =
+        createdReceipt && createdReceipt.receiptNo
+          ? {
+              ...createdReceipt,
+              upiScreenshot: createdReceipt.upiScreenshot || screenshotSnapshot || undefined,
+            }
+          : {
+              id: createdReceipt?.id || `rec-${Date.now()}`,
+              receiptNo: savedReceiptNo,
+              date: isAdmin ? paymentDate : todayStr,
+              studentId: memberSnapshot.id,
+              studentName: memberSnapshot.name,
+              admissionNo: memberSnapshot.admissionNo,
+              campus: memberCampus,
+              amount: paidAmountSnapshot,
+              discountAmount: totalSelectedDiscount,
+              balanceDueBefore: Number(memberSnapshot.balanceDue) || paidAmountSnapshot,
+              balanceDueAfter: updatedBal,
+              feeBreakupDescription: descriptionStr,
+              paymentMode: modeSnapshot,
+              referenceNo,
+              upiScreenshot: screenshotSnapshot || undefined,
+              receivedBy: `${currentRole} (${memberCampus} Campus)`,
+              remarks: remarks || descriptionStr,
+            };
+
+      if (receiptToPrint.id && screenshotSnapshot) {
+        setLocalAttachmentOverrides((prev) => ({
+          ...prev,
+          [receiptToPrint.id]: screenshotSnapshot,
+        }));
+      }
+
       setStatusMessage({
         type: 'success',
         text: successText,
       });
-      setActionAckModal({
-        type: 'saved',
-        title: 'Fee Receipt Saved Successfully!',
-        receiptNo: savedReceiptNo,
-        memberName: memberSnapshot.name,
-        admissionNo: memberSnapshot.admissionNo,
-        amount: paidAmountSnapshot,
-        paymentMode: modeSnapshot,
-        balanceAfter: updatedBal,
-        message: successText,
-        receiptObj: createdReceipt && createdReceipt.id ? createdReceipt : undefined,
-      });
+
+      // Automatically open the print window for printing immediately after successful save
+      handlePrintSingleReceipt(receiptToPrint, true);
     } catch (err: any) {
       const errMsg = err?.message || 'Failed to save fee receipt.';
+      setCollectModalError(errMsg);
       setStatusMessage({
         type: 'warning',
         text: errMsg,
@@ -1396,19 +1606,29 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {scopedReceipts.map((rec) => (
+                  {scopedReceipts.map((rec) => {
+                    const linkedMember = findStudentStrictly(students, rec);
+                    return (
                     <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3 px-4 font-mono font-bold text-indigo-700">{rec.receiptNo}</td>
                       <td className="py-3 px-3 font-mono text-slate-600">{rec.date}</td>
                       <td className="py-3 px-3">
                         <button
                           type="button"
-                          onClick={() => onOpenStudentProfile && onOpenStudentProfile(rec.studentId, 'fees')}
+                          onClick={() =>
+                            onOpenStudentProfile &&
+                            onOpenStudentProfile(linkedMember?.id || rec.studentId, 'fees')
+                          }
                           className="font-bold text-slate-900 hover:text-indigo-600 hover:underline text-left cursor-pointer"
                         >
-                          {rec.studentName}
+                          {linkedMember?.name || rec.studentName}
                         </button>
-                        <div className="font-mono text-[10px] text-slate-500">{rec.admissionNo}</div>
+                        <div className="font-mono text-[10px] text-slate-500">
+                          {linkedMember?.admissionNo || rec.admissionNo}
+                          {linkedMember
+                            ? ` • ${linkedMember.class}-${linkedMember.section} • ${linkedMember.routeCode} (${linkedMember.pickupDropStopName || linkedMember.villageName})`
+                            : ''}
+                        </div>
                       </td>
                       <td className="py-3 px-3 text-slate-700 max-w-48">
                         {rec.feeBreakupDescription || 'Transport Fee'}
@@ -1434,24 +1654,40 @@ export const FeesView: React.FC<FeesViewProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-3">
-                        {rec.upiScreenshot ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPreviewScreenshot({
-                                title: `Payment Attachment — ${rec.receiptNo} (${rec.studentName})`,
-                                url: rec.upiScreenshot!,
-                              })
-                            }
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-500 text-[11px] font-bold cursor-pointer shadow-2xs"
-                            title="View Payment Screenshot / Proof"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>View</span>
-                          </button>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">—</span>
-                        )}
+                        {(() => {
+                          const attInfo = getReceiptAttachmentInfo(rec);
+                          if (attInfo.hasAttachment) {
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenReceiptAttachment(rec)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-500 text-[11px] font-bold cursor-pointer shadow-2xs"
+                                title="View Payment Screenshot / Proof"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>View</span>
+                              </button>
+                            );
+                          }
+                          if (rec.paymentMode === 'UPI' || rec.paymentMode === 'Bank') {
+                            return (
+                              <label
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 text-[10px] font-bold cursor-pointer"
+                                title="Attach Payment Screenshot / Proof"
+                              >
+                                <Upload className="w-3 h-3" />
+                                <span>Attach</span>
+                                <input
+                                  type="file"
+                                  accept="image/*,.pdf"
+                                  onChange={(e) => handleReplaceSavedReceiptAttachment(rec, e)}
+                                  className="hidden"
+                                />
+                              </label>
+                            );
+                          }
+                          return <span className="text-slate-400 text-[11px]">—</span>;
+                        })()}
                       </td>
                       <td className="py-3 px-3 text-slate-600 max-w-40 truncate" title={rec.remarks}>
                         {rec.remarks || '—'}
@@ -1480,7 +1716,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1809,9 +2046,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   <p className="text-xs text-slate-400 py-6 text-center">No Warning cum Reminder letters issued yet for this campus.</p>
                 ) : (
                   scopedWarningLetters.map((wl) => {
-                    const memberObj = scopedStudents.find(
-                      (s) => s.id === wl.studentId || s.admissionNo === wl.admissionNo
-                    );
+                    const memberObj = findStudentStrictly(scopedStudents, wl);
                     return (
                       <div
                         key={wl.id}
@@ -1836,12 +2071,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                           type="button"
                           onClick={() => {
                             const matchedOrFallback: StudentMember =
-                              students.find(
-                                (s) =>
-                                  s.id === wl.studentId ||
-                                  s.admissionNo === wl.admissionNo ||
-                                  s.name.toLowerCase() === (wl.studentName || '').toLowerCase()
-                              ) || {
+                              findStudentStrictly(students, wl) || {
                                 id: wl.studentId || 'stu-fallback',
                                 admissionNo: wl.admissionNo || 'ADM-000',
                                 name: wl.studentName || 'Member',
@@ -3173,118 +3403,161 @@ export const FeesView: React.FC<FeesViewProps> = ({
             </div>
 
             <form onSubmit={handleReceiptSubmit} className="p-6 overflow-y-auto space-y-5 text-xs">
-              {/* STEP 1: Narrow Down & Choose Member */}
+              {/* STEP 1: Unified Search & Select Transport Member Bar */}
               <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
-                <div className="font-bold text-slate-800 uppercase tracking-wider text-[11px]">
-                  Step 1: Search &amp; Narrow Down Member List
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="relative">
-                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
-                    <input
-                      type="text"
-                      value={memberSearchQuery}
-                      onChange={(e) => setMemberSearchQuery(e.target.value)}
-                      placeholder="Search Name, Admission No, Father..."
-                      className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl bg-white text-xs"
-                    />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-bold text-slate-800 uppercase tracking-wider text-[11px]">
+                    Step 1: Select Transport Member (Type Member ID, Name, or Phone No)
                   </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={memberFilterClass}
+                      onChange={(e) => {
+                        setMemberFilterClass(e.target.value);
+                        setIsMemberDropdownOpen(true);
+                      }}
+                      className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-[11px] font-medium"
+                    >
+                      <option value="all">All Classes</option>
+                      {classes.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
 
-                  <select
-                    value={memberFilterClass}
-                    onChange={(e) => setMemberFilterClass(e.target.value)}
-                    className="p-2 border border-slate-200 rounded-xl bg-white text-xs font-medium"
-                  >
-                    <option value="all">All Classes</option>
-                    {classes.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={memberFilterType}
-                    onChange={(e) => setMemberFilterType(e.target.value)}
-                    className="p-2 border border-slate-200 rounded-xl bg-white text-xs font-medium"
-                  >
-                    <option value="all">All Member Types</option>
-                    {memberTypes.map((mt) => (
-                      <option key={mt.id} value={mt.name}>
-                        {mt.name}
-                      </option>
-                    ))}
-                  </select>
+                    <select
+                      value={memberFilterType}
+                      onChange={(e) => {
+                        setMemberFilterType(e.target.value);
+                        setIsMemberDropdownOpen(true);
+                      }}
+                      className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-[11px] font-medium"
+                    >
+                      <option value="all">All Member Types</option>
+                      {memberTypes.map((mt) => (
+                        <option key={mt.id} value={mt.name}>
+                          {mt.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-1.5 relative">
                   <label className="block font-bold text-slate-700">
                     Select Transport Member ({narrowedMembers.length} matching):
                   </label>
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                    <select
-                      value={selectedMember?.id || ''}
-                      onChange={(e) => handleSelectMemberForFee(e.target.value)}
-                      className="flex-1 p-2.5 border-2 border-slate-900 rounded-xl bg-white font-bold text-slate-900"
-                    >
-                      {narrowedMembers.length === 0 ? (
-                        <option value="">No transport member matches search criteria</option>
-                      ) : (
-                        narrowedMembers.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} ({s.admissionNo}) — {s.memberType} • {s.class}-{s.section} • Due: ₹{s.balanceDue}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <button
-                      type="button"
-                      disabled={!selectedMember}
-                      onClick={() => {
-                        if (selectedMember) {
-                          handleSelectMemberForFee(selectedMember.id);
-                        }
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={memberSearchQuery}
+                      onFocus={() => setIsMemberDropdownOpen(true)}
+                      onChange={(e) => {
+                        setMemberSearchQuery(e.target.value);
+                        setIsMemberDropdownOpen(true);
                       }}
-                      className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:bg-slate-200 text-slate-950 font-black text-xs inline-flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer shrink-0"
-                    >
-                      <CheckCircle className="w-4 h-4" />
-                      <span>Proceed / Load Details</span>
-                    </button>
+                      placeholder={
+                        selectedMember
+                          ? `${selectedMember.name} (${selectedMember.admissionNo}) — ${selectedMember.class}-${selectedMember.section} • Mob: ${selectedMember.mobile || '—'} • Due: ₹${selectedMember.balanceDue}  [Type ID, Name or Phone to switch]`
+                          : 'Type Member ID, Name, or Phone No...'
+                      }
+                      className="w-full pl-10 pr-28 py-2.5 border-2 border-slate-900 rounded-xl bg-white font-bold text-slate-900 placeholder:text-slate-700 focus:placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-amber-400 text-xs"
+                    />
+                    <div className="absolute right-2 top-1.5 flex items-center gap-1">
+                      {memberSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMemberSearchQuery('');
+                            setIsMemberDropdownOpen(true);
+                          }}
+                          className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setIsMemberDropdownOpen((prev) => !prev)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 hover:bg-slate-800 text-[10px] font-bold cursor-pointer"
+                      >
+                        {isMemberDropdownOpen ? 'Hide List ▲' : 'Show List ▼'}
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Quick-select matching search chips when user types a name */}
-                  {memberSearchQuery.trim() && narrowedMembers.length > 0 && (
-                    <div className="pt-1">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-                        Matching Members (Click to Load Immediately):
+                  {/* Live Matching Member List Shown Below as User Enters Characters (or Opens Bar) */}
+                  {(isMemberDropdownOpen || memberSearchQuery.trim().length > 0) && (
+                    <div className="border-2 border-slate-900 rounded-xl bg-white shadow-xl overflow-hidden mt-1">
+                      <div className="bg-slate-900 text-white px-3 py-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider">
+                        <span>
+                          {memberSearchQuery.trim()
+                            ? `Matching Members for "${memberSearchQuery}" (${narrowedMembers.length} found) — Click any member to fill form below`
+                            : `Transport Members (${narrowedMembers.length}) — Click any member to fill form below`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setIsMemberDropdownOpen(false)}
+                          className="text-slate-300 hover:text-white cursor-pointer"
+                        >
+                          Close ✕
+                        </button>
                       </div>
-                      <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                        {narrowedMembers.slice(0, 12).map((s) => {
-                          const isSelected = selectedMember?.id === s.id;
-                          return (
-                            <button
-                              key={s.id}
-                              type="button"
-                              onClick={() => handleSelectMemberForFee(s.id)}
-                              className={`px-2.5 py-1.5 rounded-xl border text-left text-[11px] font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
-                                isSelected
-                                  ? 'bg-slate-900 text-amber-400 border-slate-900 shadow-2xs'
-                                  : 'bg-white text-slate-800 border-slate-200 hover:border-slate-400'
-                              }`}
-                            >
-                              <span className="font-bold">{s.name}</span>
-                              <span className="font-mono text-[10px] opacity-80">({s.admissionNo})</span>
-                              <span className="text-[10px] opacity-80">• {s.class}-{s.section}</span>
-                              <span
-                                className={`font-bold ${
-                                  isSelected ? 'text-amber-300' : 'text-rose-600'
+                      <div className="max-h-52 overflow-y-auto divide-y divide-slate-100">
+                        {narrowedMembers.length === 0 ? (
+                          <div className="p-4 text-center text-slate-500 font-semibold">
+                            No transport member matches "{memberSearchQuery}". Try searching by Admission ID, Name, or Phone Number.
+                          </div>
+                        ) : (
+                          narrowedMembers.slice(0, 40).map((s) => {
+                            const isSelected = selectedMember?.id === s.id;
+                            return (
+                              <button
+                                key={s.id}
+                                type="button"
+                                onClick={() => handleSelectMemberForFee(s.id)}
+                                className={`w-full px-3.5 py-2.5 text-left transition-colors cursor-pointer flex flex-wrap items-center justify-between gap-2 ${
+                                  isSelected
+                                    ? 'bg-amber-50 border-l-4 border-l-amber-500 font-bold'
+                                    : 'hover:bg-slate-50'
                                 }`}
                               >
-                                Due: ₹{s.balanceDue}
-                              </span>
-                            </button>
-                          );
-                        })}
+                                <div className="space-y-0.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-slate-900 text-xs">{s.name}</span>
+                                    <span className="px-1.5 py-0.5 rounded bg-slate-100 font-mono text-[10px] font-bold text-indigo-700">
+                                      {s.admissionNo}
+                                    </span>
+                                    <span className="text-[11px] text-slate-600 font-semibold">
+                                      {s.class}-{s.section} ({s.memberType})
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] text-slate-500 flex flex-wrap items-center gap-2">
+                                    <span>Father: <strong className="text-slate-700">{s.fatherName || '—'}</strong></span>
+                                    <span>•</span>
+                                    <span>Phone: <strong className="font-mono text-slate-800">{s.mobile || s.emergencyContact || '—'}</strong></span>
+                                    <span>•</span>
+                                    <span>Route: <strong className="text-amber-800">{s.routeCode}</strong> ({s.pickupDropStopName})</span>
+                                  </div>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <div
+                                    className={`font-mono font-black text-xs ${
+                                      s.balanceDue > 0 ? 'text-rose-600' : 'text-emerald-700'
+                                    }`}
+                                  >
+                                    Due: ₹{s.balanceDue.toLocaleString('en-IN')}
+                                  </div>
+                                  <div className="text-[10px] text-slate-400 font-semibold">
+                                    {isSelected ? '✓ Currently Loaded' : 'Click to Load →'}
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
                       </div>
                     </div>
                   )}
@@ -3394,6 +3667,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
                                   {rec.date} • {rec.paymentMode} • {rec.feeBreakupDescription || 'Transport Fee'}
                                 </div>
                               </div>
+                              {getReceiptAttachmentInfo(rec).hasAttachment && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReceiptAttachment(rec)}
+                                  className="p-1.5 rounded-md bg-blue-50 hover:bg-blue-100 text-blue-700 cursor-pointer"
+                                  title="View Payment Attachment"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handlePrintSingleReceipt(rec)}
@@ -3653,29 +3936,102 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   />
                 </div>
 
-                <div className="sm:col-span-3 pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-slate-800">
-                      Attach Payment Proof / UPI Screenshot (Visible in Fee Records)
-                    </div>
-                    <div className="text-[11px] text-slate-500">
-                      {upiScreenshotName
-                        ? `Attached: ${upiScreenshotName}`
-                        : 'Upload screenshot or slip (JPEG, PNG, WEBP, PDF)'}
+                <div
+                  className={`sm:col-span-3 p-3 rounded-xl border flex flex-wrap items-center justify-between gap-3 ${
+                    (paymentMode === 'UPI' || paymentMode === 'Bank') && !upiScreenshot
+                      ? 'bg-amber-50/70 border-amber-300'
+                      : upiScreenshot
+                      ? 'bg-emerald-50/60 border-emerald-300'
+                      : 'bg-white border-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    {upiScreenshot && upiScreenshot.startsWith('data:image/') && (
+                      <img
+                        src={upiScreenshot}
+                        alt="Payment Proof Preview"
+                        onClick={() =>
+                          setPreviewScreenshot({
+                            title: `Uploaded Payment Proof (${upiScreenshotName || paymentMode})`,
+                            url: upiScreenshot,
+                          })
+                        }
+                        className="w-12 h-12 rounded-lg object-cover border border-emerald-400 cursor-pointer shadow-2xs"
+                        title="Click to preview full image"
+                      />
+                    )}
+                    <div>
+                      <div className="font-bold text-slate-800 flex items-center gap-2">
+                        <span>Attach Payment Proof / UPI Screenshot (Visible in Fee Records)</span>
+                        {paymentMode === 'UPI' || paymentMode === 'Bank' ? (
+                          <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-700 text-[10px] font-extrabold uppercase">
+                            * Compulsory for {paymentMode === 'UPI' ? 'UPI' : 'Bank Transfer'}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10px] font-semibold">
+                            Optional for Cash
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        {upiScreenshot ? (
+                          <span className="text-emerald-700 font-bold">
+                            ✓ Attached: {upiScreenshotName || 'Payment Screenshot'} (Auto-compressed for instant viewing)
+                          </span>
+                        ) : (
+                          <span>
+                            Upload payment screenshot or bank slip (JPEG, PNG, WEBP, PDF)
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs">
-                    <Upload className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{upiScreenshot ? 'Change Attachment' : 'Upload Attachment'}</span>
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      onChange={handleUpiFileUpload}
-                      className="hidden"
-                    />
-                  </label>
+                  <div className="flex items-center gap-2">
+                    {upiScreenshot && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewScreenshot({
+                            title: `Uploaded Payment Proof (${upiScreenshotName || paymentMode})`,
+                            url: upiScreenshot,
+                            isPdf: upiScreenshot.startsWith('data:application/pdf'),
+                          })
+                        }
+                        className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Preview</span>
+                      </button>
+                    )}
+                    <label className="cursor-pointer inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs">
+                      <Upload className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{upiScreenshot ? 'Change Attachment' : 'Upload Attachment *'}</span>
+                      <input
+                        type="file"
+                        accept="image/*,.pdf"
+                        onChange={handleUpiFileUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
+
+              {collectModalError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-800 font-bold text-xs flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>{collectModalError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCollectModalError(null)}
+                    className="text-rose-600 hover:text-rose-900 text-xs font-black cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <button
@@ -3694,10 +4050,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   {isSubmittingReceipt ? (
                     <>
                       <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Saving Receipt... Please wait</span>
+                      <span>Saving &amp; Opening Print...</span>
                     </>
                   ) : (
-                    <span>Save &amp; Print Receipt (₹{totalNetPayable.toLocaleString('en-IN')})</span>
+                    <>
+                      <Printer className="w-4 h-4" />
+                      <span>Save &amp; Auto-Print Receipt (₹{totalNetPayable.toLocaleString('en-IN')})</span>
+                    </>
                   )}
                 </button>
               </div>
@@ -4054,9 +4413,18 @@ export const FeesView: React.FC<FeesViewProps> = ({
       {/* Payment Attachment Preview Modal */}
       {previewScreenshot && (
         <div className="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl border border-slate-200">
-            <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
-              <h4 className="font-bold text-sm">{previewScreenshot.title}</h4>
+          <div className="bg-white rounded-2xl max-w-3xl w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[92vh]">
+            <div className="p-4 bg-slate-900 text-white flex items-center justify-between gap-3">
+              <div>
+                <h4 className="font-bold text-sm">{previewScreenshot.title}</h4>
+                {previewScreenshot.receipt && (
+                  <p className="text-[11px] text-slate-300">
+                    Receipt {previewScreenshot.receipt.receiptNo} • Paid ₹
+                    {previewScreenshot.receipt.amount.toLocaleString('en-IN')} via{' '}
+                    {previewScreenshot.receipt.paymentMode} on {previewScreenshot.receipt.date}
+                  </p>
+                )}
+              </div>
               <button
                 onClick={() => setPreviewScreenshot(null)}
                 className="p-1 text-slate-400 hover:text-white rounded-lg cursor-pointer"
@@ -4064,12 +4432,74 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6 bg-slate-100 flex items-center justify-center max-h-[75vh] overflow-auto">
-              <img
-                src={previewScreenshot.url}
-                alt={previewScreenshot.title}
-                className="max-w-full max-h-[65vh] rounded-xl border border-slate-300 shadow-md object-contain bg-white"
-              />
+
+            <div className="p-6 bg-slate-100 flex flex-col items-center justify-center flex-1 overflow-auto min-h-[280px]">
+              {previewScreenshot.isPdf || previewScreenshot.url.startsWith('data:application/pdf') ? (
+                <iframe
+                  src={previewScreenshot.url}
+                  title={previewScreenshot.title}
+                  className="w-full h-[65vh] rounded-xl border border-slate-300 bg-white"
+                />
+              ) : (
+                <img
+                  src={previewScreenshot.url}
+                  alt={previewScreenshot.title}
+                  className="max-w-full max-h-[65vh] rounded-xl border border-slate-300 shadow-md object-contain bg-white"
+                />
+              )}
+            </div>
+
+            <div className="px-5 py-3.5 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                {previewScreenshot.receipt && (
+                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-2xs">
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>
+                      {isUploadingReceiptAttachment
+                        ? 'Saving Screenshot...'
+                        : previewScreenshot.isPlaceholder
+                        ? 'Upload Original Screenshot Image'
+                        : 'Replace Screenshot'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      disabled={isUploadingReceiptAttachment}
+                      onChange={(e) =>
+                        previewScreenshot.receipt &&
+                        handleReplaceSavedReceiptAttachment(previewScreenshot.receipt, e)
+                      }
+                      className="hidden"
+                    />
+                  </label>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewScreenshot.url}
+                  download={`payment_proof_${previewScreenshot.receipt?.receiptNo || 'receipt'}.jpg`}
+                  className="px-3.5 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 font-bold text-slate-700 inline-flex items-center gap-1.5"
+                >
+                  <span>Download Proof</span>
+                </a>
+                {previewScreenshot.receipt && (
+                  <button
+                    type="button"
+                    onClick={() => handlePrintSingleReceipt(previewScreenshot.receipt!, true)}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Print Receipt</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewScreenshot(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>

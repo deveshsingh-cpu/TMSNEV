@@ -85,6 +85,111 @@ export function getRouteCampus(route?: Partial<Route> | null): ResolvedCampus {
 }
 
 /**
+ * Normalizes an admission number for comparison so 'NEV1368/26', 'NEV 1368/26', and '1368/26' match.
+ */
+export function normalizeAdmissionNo(adm?: string | null): string {
+  if (!adm) return '';
+  return String(adm)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/^(nev|nrv)[-/\s]*/, '');
+}
+
+/**
+ * Strictly resolves a Student from a list of students using prioritized matching:
+ * 1. Exact studentId + matching normalized admissionNo
+ * 2. Exact studentId
+ * 3. Exact or normalized admissionNo (preferring matching name if multiple share admissionNo)
+ * 4. Student name ONLY when both studentId and admissionNo are absent
+ *
+ * This prevents single-pass .find(s => s.id === ... || s.name === ...) from returning an earlier
+ * student in the array who happens to share the same name (e.g., Ansh Kumar, Anshika Kumari, Pallavi Kumari).
+ */
+export function findStudentStrictly(
+  students: Student[] = [],
+  ref:
+    | {
+        studentId?: string | null;
+        memberId?: string | null;
+        admissionNo?: string | null;
+        studentName?: string | null;
+        memberName?: string | null;
+        campus?: string | null;
+        receivedBy?: string | null;
+      }
+    | null
+    | undefined
+): Student | undefined {
+  if (!ref || !Array.isArray(students) || students.length === 0) return undefined;
+
+  const targetId = String(ref.studentId || ref.memberId || '').trim();
+  const targetAdmRaw = String(ref.admissionNo || '').trim().toLowerCase();
+  const targetAdmNorm = normalizeAdmissionNo(ref.admissionNo);
+  const targetName = String(ref.studentName || ref.memberName || '').trim().toLowerCase();
+  const targetCampus = normalizeCampus(ref.campus) || normalizeCampus(ref.receivedBy);
+
+  // Priority 1: Both studentId and normalized admissionNo match
+  if (targetId && targetAdmNorm) {
+    const exactBoth = students.find(
+      (s) =>
+        s &&
+        s.id === targetId &&
+        normalizeAdmissionNo(s.admissionNo) === targetAdmNorm
+    );
+    if (exactBoth) return exactBoth;
+  }
+
+  // Priority 2: Exact studentId match
+  if (targetId) {
+    const byId = students.find((s) => s && s.id === targetId);
+    if (byId) return byId;
+  }
+
+  // Priority 3: Exact or normalized admissionNo match
+  if (targetAdmRaw || targetAdmNorm) {
+    const admMatches = students.filter(
+      (s) =>
+        s &&
+        Boolean(s.admissionNo) &&
+        (String(s.admissionNo).trim().toLowerCase() === targetAdmRaw ||
+          (targetAdmNorm && normalizeAdmissionNo(s.admissionNo) === targetAdmNorm))
+    );
+    if (admMatches.length === 1) return admMatches[0];
+    if (admMatches.length > 1) {
+      if (targetName) {
+        const byAdmAndName = admMatches.find(
+          (s) => (s.name || '').trim().toLowerCase() === targetName
+        );
+        if (byAdmAndName) return byAdmAndName;
+      }
+      if (targetCampus) {
+        const byAdmAndCampus = admMatches.find(
+          (s) => getStudentCampus(s) === targetCampus
+        );
+        if (byAdmAndCampus) return byAdmAndCampus;
+      }
+      return admMatches[0];
+    }
+  }
+
+  // Priority 4: Fallback to studentName ONLY when BOTH studentId and admissionNo are absent
+  if (!targetId && !targetAdmNorm && targetName) {
+    const nameMatches = students.filter(
+      (s) => s && (s.name || '').trim().toLowerCase() === targetName
+    );
+    if (nameMatches.length === 1) return nameMatches[0];
+    if (nameMatches.length > 1 && targetCampus) {
+      const byCampus = nameMatches.find((s) => getStudentCampus(s) === targetCampus);
+      if (byCampus) return byCampus;
+    }
+    if (nameMatches.length > 0) return nameMatches[0];
+  }
+
+  return undefined;
+}
+
+/**
  * Resolves a FeeInvoice's campus ('Sr' or 'Jr')
  */
 export function getInvoiceCampus(
@@ -97,14 +202,7 @@ export function getInvoiceCampus(
   if (direct) return direct;
 
   const safeStudents = Array.isArray(students) ? students : [];
-  const invStudentName = (invoice.studentName || '').trim().toLowerCase();
-  const st = safeStudents.find(
-    (s) =>
-      s &&
-      (s.id === invoice.studentId ||
-        (invoice.admissionNo && s.admissionNo === invoice.admissionNo) ||
-        (invStudentName && (s.name || '').trim().toLowerCase() === invStudentName))
-  );
+  const st = findStudentStrictly(safeStudents, invoice);
   if (st) return getStudentCampus(st, routes);
 
   const fromRoute = normalizeCampus(invoice.routeName);
@@ -127,24 +225,17 @@ export function getReceiptCampus(
   if (direct) return direct;
 
   const safeStudents = Array.isArray(students) ? students : [];
-  const recStudentName = (receipt.studentName || '').trim().toLowerCase();
-  const st = safeStudents.find(
-    (s) =>
-      s &&
-      (s.id === receipt.studentId ||
-        (receipt.admissionNo && s.admissionNo === receipt.admissionNo) ||
-        (recStudentName && (s.name || '').trim().toLowerCase() === recStudentName))
-  );
+  const st = findStudentStrictly(safeStudents, receipt);
   if (st) return getStudentCampus(st, routes);
+
+  const fromReceivedBy = normalizeCampus(receipt.receivedBy);
+  if (fromReceivedBy) return fromReceivedBy;
 
   const invId = receipt.invoiceId || receipt.allocatedToInvoiceId;
   if (invId && Array.isArray(invoices)) {
     const inv = invoices.find((i) => i && i.id === invId);
     if (inv) return getInvoiceCampus(inv, safeStudents, routes);
   }
-
-  const fromReceivedBy = normalizeCampus(receipt.receivedBy);
-  if (fromReceivedBy) return fromReceivedBy;
 
   return 'Sr';
 }
@@ -376,24 +467,7 @@ export function getStudentLinkedCampus(
   if (direct) return direct;
 
   const safeStudents = Array.isArray(students) ? students : [];
-  const recStudentId =
-    (record as { studentId?: string; memberId?: string }).studentId ||
-    (record as { memberId?: string }).memberId;
-  const recStudentName = (
-    (record as { studentName?: string; memberName?: string }).studentName ||
-    (record as { memberName?: string }).memberName ||
-    ''
-  )
-    .trim()
-    .toLowerCase();
-
-  const st = safeStudents.find(
-    (s) =>
-      s &&
-      ((recStudentId && s.id === recStudentId) ||
-        (record.admissionNo && s.admissionNo === record.admissionNo) ||
-        (recStudentName && (s.name || '').trim().toLowerCase() === recStudentName))
-  );
+  const st = findStudentStrictly(safeStudents, record as any);
   if (st) return getStudentCampus(st, routes);
 
   const fromRoute = normalizeCampus((record as { routeName?: string }).routeName);

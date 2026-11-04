@@ -1017,6 +1017,18 @@ export const api = {
     }
     return res.json();
   },
+  updateReceiptAttachment: async (id: string, upiScreenshot: string): Promise<FeeReceipt> => {
+    const res = await fetch(`/api/receipts/${encodeURIComponent(id)}/attachment`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ upiScreenshot }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to update receipt attachment');
+    }
+    return res.json();
+  },
   deleteReceipt: async (id: string) => {
     const res = await fetch(`/api/receipts/${encodeURIComponent(id)}`, {
       method: 'DELETE',

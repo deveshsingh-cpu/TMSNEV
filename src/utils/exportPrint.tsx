@@ -187,6 +187,7 @@ export function openHtmlPrintPreview(
         subtitle?: string;
         html: string;
         filename?: string;
+        autoPrint?: boolean;
       }
     | string,
   legacySecondArg?: string
@@ -195,6 +196,7 @@ export function openHtmlPrintPreview(
   let subtitle: string | undefined;
   let html = '';
   let filename: string | undefined;
+  let autoPrint = false;
 
   if (typeof optionsOrHtml === 'string') {
     const firstLooksLikeHtml = /<[a-z][\s\S]*>/i.test(optionsOrHtml);
@@ -211,6 +213,7 @@ export function openHtmlPrintPreview(
     subtitle = optionsOrHtml.subtitle;
     html = optionsOrHtml.html || '';
     filename = optionsOrHtml.filename;
+    autoPrint = Boolean(optionsOrHtml.autoPrint);
   }
 
   const fullHtml = /<html[\s>]/i.test(html)
@@ -442,6 +445,22 @@ export function openHtmlPrintPreview(
     doc.open();
     doc.write(fullHtml);
     doc.close();
+  }
+
+  if (autoPrint) {
+    setTimeout(() => {
+      try {
+        if (window.self === window.top) {
+          window.focus();
+          window.print();
+        } else if (iframe.contentWindow) {
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
+        }
+      } catch {
+        // Print preview modal remains open with Print Document button
+      }
+    }, 200);
   }
 }
 
