@@ -164,9 +164,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
   // Campus-scoped records: Transport Assistants strictly see only their assigned campus;
   // Admin and Transport Coordinator see records based on their selectedCampus ('all', 'Sr', or 'Jr').
-  const scopedStudents = students.filter((s) =>
-    matchesCampusFilter(getStudentCampus(s, routes), selectedCampus)
-  );
+  const scopedStudents = students.filter((s) => {
+    if (!matchesCampusFilter(getStudentCampus(s, routes), selectedCampus)) return false;
+    if (s.transportStatus === 'Left') {
+      return (
+        s.balanceDue > 0 ||
+        invoices.some((i) => i.studentId === s.id && i.balanceDue > 0 && i.status !== 'Paid')
+      );
+    }
+    return true;
+  });
   const scopedInvoices = invoices.filter((inv) =>
     matchesCampusFilter(getInvoiceCampus(inv, students, routes), selectedCampus)
   );
@@ -2727,9 +2734,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
           };
         });
 
-        // 3. Member-wise Matrix (Previous Dues vs Month-wise Session Fees)
+        // 3. Member-wise Matrix (Previous Dues vs Month-wise Session Fees; includes Left members only if they have unpaid pre-Left dues)
         const matrixRows = matrixStudents
-          .filter((s) => s.transportStatus !== 'Left' && s.transportStatus !== 'Left School')
+          .filter(
+            (s) =>
+              (s.transportStatus !== 'Left' && s.transportStatus !== 'Left School') ||
+              s.balanceDue > 0
+          )
           .filter((s) => {
             const rt = routes.find(
               (r) =>
@@ -3407,7 +3418,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="font-bold text-slate-800 uppercase tracking-wider text-[11px]">
-                    Step 1: Select Transport Member (Type Member ID, Name, or Phone No)
+                    Select Transport Member
                   </div>
                   <div className="flex items-center gap-2">
                     <select
@@ -3494,8 +3505,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
                       <div className="bg-slate-900 text-white px-3 py-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider">
                         <span>
                           {memberSearchQuery.trim()
-                            ? `Matching Members for "${memberSearchQuery}" (${narrowedMembers.length} found) — Click any member to fill form below`
-                            : `Transport Members (${narrowedMembers.length}) — Click any member to fill form below`}
+                            ? `Matching Members (${narrowedMembers.length})`
+                            : `Transport Members (${narrowedMembers.length})`}
                         </span>
                         <button
                           type="button"
@@ -3525,7 +3536,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                                 }`}
                               >
                                 <div className="space-y-0.5">
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 flex-wrap">
                                     <span className="font-bold text-slate-900 text-xs">{s.name}</span>
                                     <span className="px-1.5 py-0.5 rounded bg-slate-100 font-mono text-[10px] font-bold text-indigo-700">
                                       {s.admissionNo}
@@ -3533,6 +3544,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
                                     <span className="text-[11px] text-slate-600 font-semibold">
                                       {s.class}-{s.section} ({s.memberType})
                                     </span>
+                                    {s.transportStatus === 'Left' && (
+                                      <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-300 text-[10px] font-bold">
+                                        Left Transport — Pre-Left Dues Only
+                                      </span>
+                                    )}
                                   </div>
                                   <div className="text-[10px] text-slate-500 flex flex-wrap items-center gap-2">
                                     <span>Father: <strong className="text-slate-700">{s.fatherName || '—'}</strong></span>
@@ -3570,9 +3586,17 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="border border-slate-200 rounded-xl overflow-hidden">
                       <div className="bg-slate-100 px-3.5 py-2 font-bold text-slate-800 border-b border-slate-200 flex items-center justify-between">
-                        <span>Member Details (Reconfirm):</span>
-                        <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-                          Active Selection
+                        <span>Member Details:</span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            selectedMember.transportStatus === 'Left'
+                              ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                              : 'bg-emerald-100 text-emerald-800'
+                          }`}
+                        >
+                          {selectedMember.transportStatus === 'Left'
+                            ? 'Left Transport (Pre-Left Dues Only)'
+                            : 'Active Selection'}
                         </span>
                       </div>
                       <table className="w-full text-xs">
@@ -3718,14 +3742,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
                       onChange={toggleSelectAllMonths}
                       className="w-4 h-4 accent-amber-500 rounded cursor-pointer"
                     />
-                    <span className="font-bold text-xs">
-                      Select Pending Months to Pay (Amount auto-calculated from dues)
+                     <span className="font-bold text-xs">
+                      Pending Dues Breakdown
                     </span>
                   </div>
                   <span className="text-[11px] text-amber-300 font-semibold">
-                    {isAdmin
-                      ? 'Admin Privilege: You can enter Discount against each month'
-                      : 'Note: Month-wise Discount can only be applied by Admin'}
+                    {selectedMember?.transportStatus === 'Left'
+                      ? 'Left Facility — Receiving fees charged prior to leaving only'
+                      : isAdmin
+                      ? 'Admin: Discount enabled'
+                      : 'Discount: Admin Only'}
                   </span>
                 </div>
 

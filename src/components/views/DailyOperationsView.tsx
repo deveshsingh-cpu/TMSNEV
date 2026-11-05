@@ -168,8 +168,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
   const resolveAllowedSubView = (
     tab?: string
-  ): 'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees' | 'unmarked_mismatch' => {
+  ):
+    | 'board'
+    | 'calendar'
+    | 'summary'
+    | 'pack'
+    | 'call_absentees'
+    | 'unmarked_mismatch'
+    | 'mark_holiday' => {
     if (tab === 'unmarked_mismatch') return 'unmarked_mismatch';
+    if (tab === 'mark_holiday') return 'mark_holiday';
     if (tab === 'summary') return 'summary';
     if (tab === 'calendar') return 'calendar';
     if (tab === 'call_absentees') return 'call_absentees';
@@ -178,7 +186,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   };
 
   const [activeSubView, setActiveSubView] = useState<
-    'board' | 'calendar' | 'summary' | 'pack' | 'call_absentees' | 'unmarked_mismatch'
+    | 'board'
+    | 'calendar'
+    | 'summary'
+    | 'pack'
+    | 'call_absentees'
+    | 'unmarked_mismatch'
+    | 'mark_holiday'
   >(() => resolveAllowedSubView(initialSubTab));
 
   // Separate mode for 1- Arrival Attendance vs 2- Departure Attendance
@@ -202,12 +216,14 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     student: StudentMember;
     record: TripAttendanceRecord;
     mode: 'arrival' | 'departure';
+    expectedReturnDate: string;
     remarks: string;
   } | null>(null);
   const [isConfirmingEarlyArrival, setIsConfirmingEarlyArrival] = useState(false);
 
   useEffect(() => {
     if (initialSubTab === 'unmarked_mismatch') setActiveSubView('unmarked_mismatch');
+    else if (initialSubTab === 'mark_holiday') setActiveSubView('mark_holiday');
     else if (initialSubTab === 'pack') setActiveSubView('pack');
     else if (initialSubTab === 'summary') setActiveSubView('summary');
     else if (initialSubTab === 'calendar') setActiveSubView('calendar');
@@ -262,6 +278,27 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const [discrepancyCategoryTab, setDiscrepancyCategoryTab] = useState<
     'both_not_marked' | 'single_shift_not_marked' | 'status_mismatch' | 'requests_acks'
   >('both_not_marked');
+
+  // --- Mark Route Holiday Sub-Module State ---
+  const [holidaySubDate, setHolidaySubDate] = useState<string>(todayStr);
+  const [holidaySubCampus, setHolidaySubCampus] = useState<'all' | 'Sr' | 'Jr'>(
+    (lockedCampus as 'Sr' | 'Jr') || 'all'
+  );
+  const [holidaySubReason, setHolidaySubReason] = useState<string>('School Holiday');
+  const [selectedHolidayRouteIds, setSelectedHolidayRouteIds] = useState<string[]>([]);
+  const [isMarkingRoutesHoliday, setIsMarkingRoutesHoliday] = useState<boolean>(false);
+  const [localHolidayMarkedRouteDates, setLocalHolidayMarkedRouteDates] = useState<
+    Record<string, boolean>
+  >({});
+  const [holidayResultModal, setHolidayResultModal] = useState<{
+    type: 'success' | 'error';
+    title: string;
+    message: string;
+    date?: string;
+    routeNames?: string[];
+    memberCount?: number;
+    occasion?: string;
+  } | null>(null);
   const [changeRequestModalTarget, setChangeRequestModalTarget] = useState<{
     studentId: string;
     studentName: string;
@@ -387,7 +424,12 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     if (!route) return [];
     return students
       .filter((s) => {
-        if (s.transportStatus === 'Left') return false;
+        if (
+          s.transportStatus === 'Left' ||
+          String(s.transportStatus || '').trim().toLowerCase() === 'left'
+        ) {
+          return false;
+        }
         if (s.routeId === route.id || (route.code && s.routeCode === route.code)) return true;
         if (!s.routeId && (!s.routeCode || s.routeCode === 'Unassigned')) {
           const hasStopMatch =
@@ -668,6 +710,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const absentCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Absent').length;
   const leaveCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Leave').length;
   const holidayCount = tripAttendanceList.filter((a) => activeBoardStatus(a) === 'Holiday').length;
+  const isRouteMarkedHoliday =
+    tripAttendanceList.length > 0 && holidayCount === tripAttendanceList.length;
   const pendingCount = tripAttendanceList.filter(
     (a) =>
       activeBoardStatus(a) !== 'Present' &&
@@ -676,28 +720,84 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       activeBoardStatus(a) !== 'Holiday'
   ).length;
 
-  const effectiveInTime =
-    localTimingForCurrentRoute?.inTime ||
-    (matchedTripForRouteAndDate?.inTime &&
-    matchedTripForRouteAndDate?.status !== 'Ready' &&
-    matchedTripForRouteAndDate?.status !== 'Planned'
-      ? matchedTripForRouteAndDate.inTime
-      : undefined) ||
-    (tripAttendanceList.some((a) => a.driverStatus && a.driverStatus !== 'Pending')
-      ? matchedTripForRouteAndDate?.inTime || tripInTime || '07:30'
-      : undefined);
+  // Helper to resolve active tentative return date (expectedReturnDate) marked by Assistant/Coordinator
+  const getActiveTentativeReturnDateForStudent = (
+    studentId: string,
+    forDate: string
+  ): string | null => {
+    const stu = students.find((s) => s.id === studentId);
+    if (stu?.expectedReturnDate && forDate < stu.expectedReturnDate) {
+      return stu.expectedReturnDate;
+    }
+    const callWithExpected = absenteeCalls.find(
+      (c) =>
+        c.studentId === studentId &&
+        c.expectedReturnDate &&
+        !c.earlyArrivalConfirmedAt &&
+        forDate < c.expectedReturnDate
+    );
+    return callWithExpected?.expectedReturnDate || null;
+  };
 
-  const effectiveOutTime =
-    localTimingForCurrentRoute?.outTime ||
-    (matchedTripForRouteAndDate?.outTime &&
-    (matchedTripForRouteAndDate?.status === 'Departed' ||
-      matchedTripForRouteAndDate?.status === 'Completed' ||
-      matchedTripForRouteAndDate?.status === 'Verified')
-      ? matchedTripForRouteAndDate.outTime
-      : undefined) ||
-    (tripAttendanceList.some((a) => a.assistantStatus && a.assistantStatus !== 'Pending')
-      ? matchedTripForRouteAndDate?.outTime || tripOutTime || '14:00'
-      : undefined);
+  // Auto-mark Leave ('L') daily when user opens the attendance form for members with a future Tentative Date of Arrival
+  useEffect(() => {
+    if (activeSubView !== 'board' || tripAttendanceList.length === 0) return;
+    setDraftAttendance((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const rec of tripAttendanceList) {
+        const savedSt = getSavedStatusForMode(rec, boardMode);
+        if (savedSt !== 'Pending') continue;
+        const key = getDraftKey(rec.id, boardMode);
+        if (next[key]) continue;
+        const tentativeDate = getActiveTentativeReturnDateForStudent(rec.studentId, selectedDate);
+        if (tentativeDate) {
+          next[key] = {
+            status: 'Leave',
+            reason: `Auto-marked Leave (Tentative return: ${tentativeDate})`,
+          };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [
+    activeSubView,
+    selectedRouteObj?.id,
+    selectedDate,
+    boardMode,
+    tripAttendanceList.length,
+    absenteeCalls.length,
+  ]);
+
+  const effectiveInTime = isRouteMarkedHoliday
+    ? undefined
+    : localTimingForCurrentRoute?.inTime ||
+      (matchedTripForRouteAndDate?.inTime &&
+      matchedTripForRouteAndDate?.status !== 'Ready' &&
+      matchedTripForRouteAndDate?.status !== 'Planned'
+        ? matchedTripForRouteAndDate.inTime
+        : undefined) ||
+      (tripAttendanceList.some(
+        (a) => a.driverStatus && a.driverStatus !== 'Pending' && a.driverStatus !== 'Holiday'
+      )
+        ? matchedTripForRouteAndDate?.inTime || tripInTime || '07:30'
+        : undefined);
+
+  const effectiveOutTime = isRouteMarkedHoliday
+    ? undefined
+    : localTimingForCurrentRoute?.outTime ||
+      (matchedTripForRouteAndDate?.outTime &&
+      (matchedTripForRouteAndDate?.status === 'Departed' ||
+        matchedTripForRouteAndDate?.status === 'Completed' ||
+        matchedTripForRouteAndDate?.status === 'Verified')
+        ? matchedTripForRouteAndDate.outTime
+        : undefined) ||
+      (tripAttendanceList.some(
+        (a) => a.assistantStatus && a.assistantStatus !== 'Pending' && a.assistantStatus !== 'Holiday'
+      )
+        ? matchedTripForRouteAndDate?.outTime || tripOutTime || '14:00'
+        : undefined);
 
   const isArrivalTimeMarked = Boolean(effectiveInTime);
   const isDepartureTimeMarked = Boolean(effectiveOutTime);
@@ -774,23 +874,21 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     mode: 'arrival' | 'departure',
     newStatus: string
   ) => {
-    const earlyStu = checkRequiresEarlyArrivalConfirmation(rec, newStatus);
-    if (earlyStu) {
+    const earlyInfo = checkRequiresEarlyArrivalConfirmation(rec, newStatus);
+    if (earlyInfo) {
       setEarlyArrivalModal({
-        student: earlyStu,
+        student: earlyInfo.student,
         record: rec,
         mode,
-        remarks:
-          mode === 'arrival'
-            ? `Arrived early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`
-            : `Departed / Present early on ${selectedDate} (Scheduled Tentative Date of Arrival was ${earlyStu.expectedReturnDate})`,
+        expectedReturnDate: earlyInfo.expectedReturnDate,
+        remarks: `Arrived early on ${selectedDate} (Tentative Date: ${earlyInfo.expectedReturnDate})`,
       });
       return;
     }
 
     if (mode === 'departure') {
       const arrStatus = getEffectiveArrivalStatus(rec);
-      if (arrStatus !== 'Pending' && arrStatus !== newStatus) {
+      if (arrStatus !== 'Pending' && arrStatus !== newStatus && newStatus !== 'Holiday' && arrStatus !== 'Holiday') {
         setMismatchError(null);
         const existingDraft = draftAttendance[getDraftKey(rec.id, 'departure')];
         setMismatchPopup({
@@ -808,7 +906,24 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     stageSingleDraftAttendance(rec, mode, newStatus);
   };
 
-  const applyAllHolidayToDraft = (mode: 'arrival' | 'departure', includeSavedRecords: boolean) => {
+  const applyAllHolidayToDraft = async (
+    mode: 'arrival' | 'departure',
+    includeSavedRecords: boolean
+  ) => {
+    const recordsToMark = tripAttendanceList.filter((rec) => {
+      const savedSt = getSavedStatusForMode(rec, mode);
+      return savedSt === 'Pending' || includeSavedRecords;
+    });
+
+    if (recordsToMark.length === 0) {
+      setHolidayResultModal({
+        type: 'error',
+        title: 'No Members Available to Mark Holiday',
+        message: 'No active or unmarked transport members were found on this route to mark Holiday.',
+      });
+      return;
+    }
+
     setDraftAttendance((prev) => {
       const next = { ...prev };
       for (const rec of tripAttendanceList) {
@@ -823,32 +938,88 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       }
       return next;
     });
-    setStatusFeedback(
-      `Marked Holiday (H) in draft for ${
-        mode === 'arrival' ? 'Arrival' : 'Departure'
-      } Attendance. Click "Save Attendance" to finalize.`
-    );
-    setTimeout(() => setStatusFeedback(null), 4000);
+
+    setIsSavingAttendanceBatch(true);
+    try {
+      const batchPayload: Array<{
+        recordId: string;
+        source: 'driver' | 'assistant';
+        value: string;
+        reason?: string;
+      }> = [];
+
+      for (const rec of recordsToMark) {
+        batchPayload.push({
+          recordId: rec.id,
+          source: 'driver',
+          value: 'Holiday',
+          reason: 'School Holiday',
+        });
+        batchPayload.push({
+          recordId: rec.id,
+          source: 'assistant',
+          value: 'Holiday',
+          reason: 'School Holiday',
+        });
+      }
+
+      if (onBatchSaveAttendance) {
+        await onBatchSaveAttendance(batchPayload);
+      } else {
+        for (const item of batchPayload) {
+          await onMarkAttendance(item.recordId, item.source, item.value, item.reason);
+        }
+      }
+
+      // Clear draft entries after direct save
+      setDraftAttendance((prev) => {
+        const next = { ...prev };
+        for (const rec of recordsToMark) {
+          delete next[getDraftKey(rec.id, 'arrival')];
+          delete next[getDraftKey(rec.id, 'departure')];
+        }
+        return next;
+      });
+
+      if (selectedRouteObj?.id) {
+        setLocalHolidayMarkedRouteDates((prev) => ({
+          ...prev,
+          [`${selectedRouteObj.id}:${selectedDate}`]: true,
+        }));
+      }
+
+      const routeLabel = selectedRouteObj?.code || currentTrip?.routeName || 'Selected Route';
+      setStatusFeedback(
+        `✓ Holiday (H) marked and saved for ${recordsToMark.length} member(s) on ${routeLabel} (${selectedDate}).`
+      );
+      setTimeout(() => setStatusFeedback(null), 5000);
+
+      setHolidayResultModal({
+        type: 'success',
+        title: 'Holiday Marked Successfully',
+        message: `Holiday (H) has been marked and saved for ${recordsToMark.length} transport member(s) on ${routeLabel} (Arrival & Departure time not applicable).`,
+        date: selectedDate,
+        routeNames: [routeLabel],
+        memberCount: recordsToMark.length,
+        occasion: 'School Holiday',
+      });
+    } catch (err: any) {
+      const errMsg =
+        err?.message || 'An error occurred while saving Holiday attendance. Please try again.';
+      setStatusFeedback(`Error: ${errMsg}`);
+      setTimeout(() => setStatusFeedback(null), 5000);
+      setHolidayResultModal({
+        type: 'error',
+        title: 'Error Marking Holiday',
+        message: errMsg,
+      });
+    } finally {
+      setIsSavingAttendanceBatch(false);
+    }
   };
 
   const handleMarkAllHoliday = async () => {
-    if (boardMode === 'arrival' && !isArrivalTimeMarked) {
-      setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
-      setTimeRequiredPrompt({
-        mode: 'arrival',
-        pendingAction: { type: 'all_holiday' },
-      });
-      return;
-    }
-    if (boardMode === 'departure' && !isDepartureTimeMarked) {
-      setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
-      setTimeRequiredPrompt({
-        mode: 'departure',
-        pendingAction: { type: 'all_holiday' },
-      });
-      return;
-    }
-
+    // Arrival and departure time is NOT applicable in case of Holiday — never prompt for time here.
     const alreadySavedNonHoliday = tripAttendanceList.filter((rec) => {
       const savedSt = getSavedStatusForMode(rec, boardMode);
       return savedSt !== 'Pending' && savedSt !== 'Holiday';
@@ -949,10 +1120,19 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       return;
     }
 
-    // Double-check role permission if any saved record is being modified
-    const modifyingSaved = recordsToSave.some(
-      (rec) => getSavedStatusForMode(rec, modeToSave) !== 'Pending'
-    );
+    // Double-check role permission if any saved record is being modified (except Leave -> Present early arrival confirmation or Holiday)
+    const modifyingSaved = recordsToSave.some((rec) => {
+      const savedSt = getSavedStatusForMode(rec, modeToSave);
+      if (savedSt === 'Pending') return false;
+      const dEntry = draftAttendance[getDraftKey(rec.id, modeToSave)];
+      if (savedSt === 'Leave' && dEntry?.status === 'Present' && dEntry?.earlyArrivalConfirmed) {
+        return false;
+      }
+      if (dEntry?.status === 'Holiday') {
+        return false;
+      }
+      return true;
+    });
     if (modifyingSaved && !isAdmin) {
       setLockedRecordModal({
         studentName: 'Saved Attendance Record(s)',
@@ -998,6 +1178,12 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         }
       }
 
+      const allSavedWereHoliday =
+        recordsToSave.length > 0 &&
+        recordsToSave.every(
+          (rec) => draftAttendance[getDraftKey(rec.id, modeToSave)]?.status === 'Holiday'
+        );
+
       // Clear saved draft entries for this mode
       setDraftAttendance((prev) => {
         const next = { ...prev };
@@ -1007,15 +1193,40 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         return next;
       });
 
+      const routeLabel = selectedRouteObj?.code || currentTrip?.routeName || 'Route';
       setStatusFeedback(
         `✓ Saved & Finalized ${recordsToSave.length} ${
           modeToSave === 'arrival' ? 'Arrival' : 'Departure'
-        } Attendance record(s) for ${currentTrip?.routeName || 'Route'} (${selectedDate}).`
+        } Attendance record(s) for ${routeLabel} (${selectedDate}).`
       );
       setTimeout(() => setStatusFeedback(null), 4500);
+
+      if (allSavedWereHoliday) {
+        if (selectedRouteObj?.id) {
+          setLocalHolidayMarkedRouteDates((prev) => ({
+            ...prev,
+            [`${selectedRouteObj.id}:${selectedDate}`]: true,
+          }));
+        }
+        setHolidayResultModal({
+          type: 'success',
+          title: 'Holiday Marked Successfully',
+          message: `Holiday (H) has been marked and saved for ${recordsToSave.length} member(s) on ${routeLabel}.`,
+          date: selectedDate,
+          routeNames: [routeLabel],
+          memberCount: recordsToSave.length,
+          occasion: 'School Holiday',
+        });
+      }
     } catch (err: any) {
-      setStatusFeedback(err?.message || 'Failed to save attendance records.');
+      const errMsg = err?.message || 'Failed to save attendance records. Please try again.';
+      setStatusFeedback(`Error: ${errMsg}`);
       setTimeout(() => setStatusFeedback(null), 4500);
+      setHolidayResultModal({
+        type: 'error',
+        title: 'Error Saving Attendance',
+        message: errMsg,
+      });
     } finally {
       setIsSavingAttendanceBatch(false);
     }
@@ -1024,31 +1235,43 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   const handleSaveAttendanceClick = async () => {
     if (unsavedDraftEntriesForCurrentBoard.length === 0) return;
 
-    if (boardMode === 'arrival' && !isArrivalTimeMarked) {
-      setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
-      setTimeRequiredPrompt({
-        mode: 'arrival',
-        pendingAction: { type: 'save_batch' },
-      });
-      return;
-    }
-    if (boardMode === 'departure' && !isDepartureTimeMarked) {
-      setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
-      setTimeRequiredPrompt({
-        mode: 'departure',
-        pendingAction: { type: 'save_batch' },
-      });
-      return;
+    // Arrival and departure time is NOT applicable when saving Holiday records
+    const allUnsavedAreHoliday = unsavedDraftEntriesForCurrentBoard.every(
+      (rec) => draftAttendance[getDraftKey(rec.id, boardMode)]?.status === 'Holiday'
+    );
+
+    if (!allUnsavedAreHoliday && !isRouteMarkedHoliday) {
+      if (boardMode === 'arrival' && !isArrivalTimeMarked) {
+        setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
+        setTimeRequiredPrompt({
+          mode: 'arrival',
+          pendingAction: { type: 'save_batch' },
+        });
+        return;
+      }
+      if (boardMode === 'departure' && !isDepartureTimeMarked) {
+        setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
+        setTimeRequiredPrompt({
+          mode: 'departure',
+          pendingAction: { type: 'save_batch' },
+        });
+        return;
+      }
     }
 
     await executeSaveAttendanceBatch(boardMode);
   };
 
-  const checkRequiresEarlyArrivalConfirmation = (rec: TripAttendanceRecord, statusVal: string): StudentMember | null => {
+  const checkRequiresEarlyArrivalConfirmation = (
+    rec: TripAttendanceRecord,
+    statusVal: string
+  ): { student: StudentMember; expectedReturnDate: string } | null => {
     if (statusVal !== 'Present') return null;
     const stu = students.find((s) => s.id === rec.studentId);
-    if (stu && stu.expectedReturnDate && selectedDate < stu.expectedReturnDate) {
-      return stu;
+    if (!stu) return null;
+    const tentativeDate = getActiveTentativeReturnDateForStudent(rec.studentId, selectedDate);
+    if (tentativeDate) {
+      return { student: stu, expectedReturnDate: tentativeDate };
     }
     return null;
   };
@@ -1091,20 +1314,35 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       return;
     }
 
-    // Ensure Arrival / Departure Time is marked first
-    if (mode === 'arrival' && !isArrivalTimeMarked) {
-      setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
-      setTimeRequiredPrompt({
-        mode: 'arrival',
-        pendingAction: { type: 'single', rec, statusVal: newStatus },
-      });
-      return;
+    // Arrival / Departure Time is NOT applicable in case of Holiday
+    if (newStatus !== 'Holiday') {
+      if (mode === 'arrival' && !isArrivalTimeMarked) {
+        setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
+        setTimeRequiredPrompt({
+          mode: 'arrival',
+          pendingAction: { type: 'single', rec, statusVal: newStatus },
+        });
+        return;
+      }
+      if (mode === 'departure' && !isDepartureTimeMarked) {
+        setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
+        setTimeRequiredPrompt({
+          mode: 'departure',
+          pendingAction: { type: 'single', rec, statusVal: newStatus },
+        });
+        return;
+      }
     }
-    if (mode === 'departure' && !isDepartureTimeMarked) {
-      setTripOutTime((prev) => prev || getCurrentSystemTimeHHMM());
-      setTimeRequiredPrompt({
-        mode: 'departure',
-        pendingAction: { type: 'single', rec, statusVal: newStatus },
+
+    // If member has a Tentative Date of Arrival and user changes from Leave to Present, show Early Arrival popup directly
+    const earlyInfo = checkRequiresEarlyArrivalConfirmation(rec, newStatus);
+    if (earlyInfo && (currentEffective === 'Leave' || savedStatus === 'Leave' || savedStatus === 'Pending')) {
+      setEarlyArrivalModal({
+        student: earlyInfo.student,
+        record: rec,
+        mode,
+        expectedReturnDate: earlyInfo.expectedReturnDate,
+        remarks: `Arrived early on ${selectedDate} (Tentative Date: ${earlyInfo.expectedReturnDate})`,
       });
       return;
     }
@@ -2327,14 +2565,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           <h2 className="text-lg font-bold text-slate-900 tracking-tight">
             {activeSubView === 'unmarked_mismatch'
               ? '3- Unmarked & Mismatch Attendance Report'
+              : activeSubView === 'mark_holiday'
+              ? '4- Mark Route Holiday'
               : activeSubView === 'pack'
               ? 'Print Route List'
               : activeSubView === 'summary'
-              ? '6- Attendance Summary Sheet'
+              ? '7- Attendance Summary Sheet'
               : activeSubView === 'calendar'
-              ? '5- Monthly Calendar (P/A/L/H)'
+              ? '6- Monthly Calendar (P/A/L/H)'
               : activeSubView === 'call_absentees'
-              ? '4- Call Absentees — Parent Follow-up & Scheduled Return'
+              ? '5- Call Absentees (Follow-up)'
               : boardMode === 'departure'
               ? '2- Departure Attendance (School Dispersal)'
               : '1- Arrival Attendance (Morning Pickup)'}
@@ -2342,6 +2582,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
             {activeSubView === 'board' && `${tripAttendanceList.length} Members`}
             {activeSubView === 'unmarked_mismatch' && `Attendance Audit`}
+            {activeSubView === 'mark_holiday' && `Route Holiday`}
             {activeSubView === 'calendar' && `${routes.length} Routes`}
             {activeSubView === 'summary' && `${summaryRows.length} Vehicles`}
             {activeSubView === 'pack' && `Route Sheet`}
@@ -2683,7 +2924,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  {boardMode === 'arrival' ? (
+                  {isRouteMarkedHoliday ? (
+                    <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                      Holiday (H) — Arrival &amp; Departure Time Not Applicable
+                    </span>
+                  ) : boardMode === 'arrival' ? (
                     <>
                       <span
                         className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
@@ -2693,7 +2938,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         }`}
                       >
                         {isArrivalTimeMarked
-                          ? `✓ Arrival Time Marked: ${effectiveInTime}`
+                          ? `✓ Arrival Time: ${effectiveInTime}`
                           : '⚠ Mark Arrival Time First'}
                       </span>
                       <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
@@ -2732,7 +2977,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         }`}
                       >
                         {isDepartureTimeMarked
-                          ? `✓ Departure Time Marked: ${effectiveOutTime}`
+                          ? `✓ Departure Time: ${effectiveOutTime}`
                           : '⚠ Mark Departure Time First'}
                       </span>
                       <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
@@ -2812,11 +3057,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <div className="px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 font-semibold">
                 Arrival (In):{' '}
                 <strong className="font-mono text-emerald-700">
-                  {effectiveInTime || '—'}
+                  {isRouteMarkedHoliday ? 'N/A (Holiday)' : effectiveInTime || '—'}
                 </strong>{' '}
                 • Strength:{' '}
                 <strong className="font-mono text-slate-900">
-                  {arrivalMarkedRecordsCount > 0
+                  {isRouteMarkedHoliday
+                    ? '00'
+                    : arrivalMarkedRecordsCount > 0
                     ? String(arrivalPresentStrength).padStart(2, '0')
                     : '—'}
                 </strong>
@@ -2824,11 +3071,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <div className="px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 font-semibold">
                 Departure (Out):{' '}
                 <strong className="font-mono text-indigo-700">
-                  {effectiveOutTime || '—'}
+                  {isRouteMarkedHoliday ? 'N/A (Holiday)' : effectiveOutTime || '—'}
                 </strong>{' '}
                 • Strength:{' '}
                 <strong className="font-mono text-slate-900">
-                  {departureMarkedRecordsCount > 0
+                  {isRouteMarkedHoliday
+                    ? '00'
+                    : departureMarkedRecordsCount > 0
                     ? String(departurePresentStrength).padStart(2, '0')
                     : '—'}
                 </strong>
@@ -2879,40 +3128,23 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               {unsavedDraftEntriesForCurrentBoard.length > 0 ? (
                 <>
                   <span className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-black uppercase tracking-wide text-[11px]">
-                    ● {unsavedDraftEntriesForCurrentBoard.length} Unsaved Selection(s)
+                    ● {unsavedDraftEntriesForCurrentBoard.length} Unsaved
                   </span>
                   <span className="font-semibold text-amber-950">
-                    Attendance is marked in draft — click <strong>Save Attendance</strong> to finalize.
-                    {unsavedModifiedSavedRecordsCount > 0 && (
-                      <span className="ml-1 text-rose-700 font-bold">
-                        ({unsavedModifiedSavedRecordsCount} saved record{unsavedModifiedSavedRecordsCount > 1 ? 's' : ''} modified by Admin)
-                      </span>
-                    )}
+                    Click <strong>Save Attendance</strong> to finalize.
                   </span>
                 </>
               ) : savedRecordsOnCurrentBoardCount > 0 ? (
-                <>
-                  <span className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px] flex items-center gap-1">
-                    <CheckCircle className="w-3.5 h-3.5" />
-                    <span>
-                      Saved: {savedRecordsOnCurrentBoardCount}/{tripAttendanceList.length} Finalized
-                    </span>
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px] flex items-center gap-1">
+                  <CheckCircle className="w-3.5 h-3.5" />
+                  <span>
+                    Saved: {savedRecordsOnCurrentBoardCount}/{tripAttendanceList.length} Finalized
                   </span>
-                  <span className="text-slate-600 font-medium">
-                    {isAdmin
-                      ? 'Saved records are finalized (Admin can modify with confirmation).'
-                      : 'Saved records are finalized and locked (Admin only to change).'}
-                  </span>
-                </>
+                </span>
               ) : (
-                <>
-                  <span className="px-2.5 py-1 rounded-lg bg-slate-200 text-slate-700 font-bold text-[11px]">
-                    Not Saved Yet
-                  </span>
-                  <span className="text-slate-600 font-medium">
-                    Mark member attendance below and press <strong>Save Attendance</strong> to finalize.
-                  </span>
-                </>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-200 text-slate-700 font-bold text-[11px]">
+                  Not Saved Yet
+                </span>
               )}
             </div>
 
@@ -4659,22 +4891,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
           {/* Active List Table */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
             <div className="p-4 border-b border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-black text-slate-900">
-                  {activeAbsenteeListTab === 'main_calling'
-                    ? 'Daily Absentee Parent Calling Queue (Campus-wise Across All Routes)'
-                    : activeAbsenteeListTab === 'escalation_3days'
-                    ? 'Students Absent > 3 Consecutive Days — Transport Coordinator Calling & Remarks Queue (Both Campuses)'
-                    : 'Scheduled Return / Tentative Date of Arrival List (Informed Leave — Paused from Daily Calling)'}
-                </h3>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  {activeAbsenteeListTab === 'main_calling'
-                    ? 'Call parents of absent members. If parent informs a return date, set "Tentative Date of Arrival" to move them out of daily calling until that date. Members who did not arrive on their expected date are automatically surfaced here.'
-                    : activeAbsenteeListTab === 'escalation_3days'
-                    ? 'Members absent for more than 3 consecutive days require Transport Coordinator follow-up call and coordinator remarks across both campuses.'
-                    : 'Parents of these members have already informed their Tentative Date of Arrival. They will not appear in the main calling queue until their expected arrival date.'}
-                </p>
-              </div>
+              <h3 className="text-sm font-black text-slate-900">
+                {activeAbsenteeListTab === 'main_calling'
+                  ? 'Daily Absentee Calling Queue'
+                  : activeAbsenteeListTab === 'escalation_3days'
+                  ? 'Absent > 3 Consecutive Days (Coordinator Escalation)'
+                  : 'Scheduled Return / Tentative Date of Arrival List'}
+              </h3>
             </div>
 
             <div className="overflow-x-auto">
@@ -5190,11 +5413,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       {earlyArrivalModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-amber-300 shadow-2xl max-w-md w-full overflow-hidden">
-            <div className="bg-amber-500 text-slate-950 px-5 py-4 flex items-center justify-between">
+            <div className="bg-amber-500 text-slate-950 px-5 py-3.5 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-slate-950" />
+                <AlertTriangle className="w-4 h-4 text-slate-950" />
                 <h3 className="text-sm font-black uppercase tracking-wide">
-                  Confirm Early Arrival Before Tentative Date
+                  Early Arrival Confirmation
                 </h3>
               </div>
               <button
@@ -5211,63 +5434,445 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 <div className="font-black text-sm">
                   {earlyArrivalModal.student.name} ({earlyArrivalModal.student.admissionNo})
                 </div>
-                <div>
-                  This member is currently marked on <strong>Scheduled Return / Informed Leave</strong>{' '}
-                  with a <strong>Tentative Date of Arrival</strong> of{' '}
-                  <span className="font-mono font-black underline">
-                    {earlyArrivalModal.student.expectedReturnDate}
-                  </span>
-                  .
-                </div>
-                {earlyArrivalModal.student.expectedReturnReason && (
-                  <div className="text-[11px] text-amber-900">
-                    Parent Note: &ldquo;{earlyArrivalModal.student.expectedReturnReason}&rdquo;
-                  </div>
-                )}
-                <div className="pt-1 font-semibold text-amber-900">
-                  Since today ({selectedDate}) is earlier than their Tentative Date of Arrival, please
-                  confirm that this student has arrived early to avoid any attendance error.
-                </div>
+                <p className="text-xs leading-relaxed">
+                  Assistant / Coordinator marked that this member will not use transport facility till{' '}
+                  <strong className="font-mono underline">
+                    {earlyArrivalModal.expectedReturnDate || earlyArrivalModal.student.expectedReturnDate}
+                  </strong>
+                  . Has he/she arrived early?
+                </p>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Early Arrival Confirmation Remark
-                </label>
-                <input
-                  type="text"
-                  value={earlyArrivalModal.remarks}
-                  onChange={(e) =>
-                    setEarlyArrivalModal((prev) =>
-                      prev ? { ...prev, remarks: e.target.value } : null
-                    )
-                  }
-                  className="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-medium bg-white text-slate-900"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => setEarlyArrivalModal(null)}
-                  className="px-4 py-2 border border-slate-300 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-50 cursor-pointer"
+                  onClick={() => {
+                    const { record, mode } = earlyArrivalModal;
+                    stageSingleDraftAttendance(record, mode, 'Leave', {
+                      reason: `Continued with Leave (Till ${
+                        earlyArrivalModal.expectedReturnDate ||
+                        earlyArrivalModal.student.expectedReturnDate
+                      })`,
+                    });
+                    setEarlyArrivalModal(null);
+                  }}
+                  className="px-3.5 py-2 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 font-bold text-xs rounded-xl cursor-pointer"
                 >
-                  Cancel
+                  Continue with Leave (Rectify Member)
                 </button>
                 <button
                   type="submit"
                   disabled={isConfirmingEarlyArrival}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer"
                 >
-                  {isConfirmingEarlyArrival
-                    ? 'Confirming...'
-                    : 'Confirm Early Arrival & Mark Present'}
+                  {isConfirmingEarlyArrival ? 'Saving...' : 'Proceed to Mark Present'}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
+
+      {/* ===================================================================== */}
+      {/* SUB-VIEW: MARK ROUTE HOLIDAY (SELECTED ROUTES OR ALL ROUTES AT ONCE)  */}
+      {/* ===================================================================== */}
+      {activeSubView === 'mark_holiday' &&
+        (() => {
+          const effectiveHolidayCampus: 'all' | 'Sr' | 'Jr' = lockedCampus
+            ? (lockedCampus as 'Sr' | 'Jr')
+            : holidaySubCampus;
+
+          const scopedHolidayRoutes = routes.filter((r) => {
+            if (effectiveHolidayCampus === 'all') return true;
+            return routeHasMembersForCampus(r, effectiveHolidayCampus);
+          });
+
+          const getRouteHolidayStats = (r: Route) => {
+            const members =
+              effectiveHolidayCampus === 'all'
+                ? getAllMembersForRouteRaw(r)
+                : getMembersForRoute(r, effectiveHolidayCampus);
+            const tripId = `dt-${r.id}-${holidaySubDate}`;
+            const isOptimisticallyMarked = Boolean(
+              localHolidayMarkedRouteDates[`${r.id}:${holidaySubDate}`]
+            );
+            if (isOptimisticallyMarked && members.length > 0) {
+              return {
+                members,
+                totalCount: members.length,
+                holidayCountForRoute: members.length,
+                isFullyHoliday: true,
+              };
+            }
+            let holidayCountForRoute = 0;
+            for (const m of members) {
+              const matchingRecs = attendanceRecords.filter(
+                (a) =>
+                  a.studentId === m.id &&
+                  (a.tripId === tripId ||
+                    a.date === holidaySubDate ||
+                    a.id === `att-${tripId}-${m.id}`)
+              );
+              const hasDriverHoliday = matchingRecs.some((rec) => rec.driverStatus === 'Holiday');
+              const hasAssistantHoliday = matchingRecs.some(
+                (rec) => rec.assistantStatus === 'Holiday'
+              );
+              if (hasDriverHoliday && hasAssistantHoliday) {
+                holidayCountForRoute++;
+              }
+            }
+            return {
+              members,
+              totalCount: members.length,
+              holidayCountForRoute,
+              isFullyHoliday: members.length > 0 && holidayCountForRoute === members.length,
+            };
+          };
+
+          const allRouteIdsInScope = scopedHolidayRoutes.map((r) => r.id);
+          const areAllSelected =
+            allRouteIdsInScope.length > 0 &&
+            allRouteIdsInScope.every((id) => selectedHolidayRouteIds.includes(id));
+
+          const handleToggleSelectAllRoutes = () => {
+            if (areAllSelected) {
+              setSelectedHolidayRouteIds([]);
+            } else {
+              setSelectedHolidayRouteIds(allRouteIdsInScope);
+            }
+          };
+
+          const handleToggleRouteSelection = (rId: string) => {
+            setSelectedHolidayRouteIds((prev) =>
+              prev.includes(rId) ? prev.filter((id) => id !== rId) : [...prev, rId]
+            );
+          };
+
+          const executeMarkHolidayForRoutes = async (targetRoutes: Route[]) => {
+            if (targetRoutes.length === 0) {
+              setStatusFeedback('Select at least one route to mark Holiday.');
+              setTimeout(() => setStatusFeedback(null), 3500);
+              setHolidayResultModal({
+                type: 'error',
+                title: 'No Routes Selected',
+                message:
+                  'Please select at least one route checkbox to mark Holiday, or click "Mark Holiday for All Routes at Once".',
+              });
+              return;
+            }
+
+            const entries: Array<{
+              recordId: string;
+              source: 'driver' | 'assistant';
+              value: string;
+              reason?: string;
+            }> = [];
+
+            const cleanOccasion = (holidaySubReason || 'School Holiday').trim();
+
+            for (const r of targetRoutes) {
+              const members =
+                effectiveHolidayCampus === 'all'
+                  ? getAllMembersForRouteRaw(r)
+                  : getMembersForRoute(r, effectiveHolidayCampus);
+              const tripId = `dt-${r.id}-${holidaySubDate}`;
+
+              for (const stu of members) {
+                const existingRec = attendanceRecords.find(
+                  (a) =>
+                    a.studentId === stu.id &&
+                    (a.tripId === tripId || a.date === holidaySubDate)
+                );
+                const recordId = existingRec?.id || `att-${tripId}-${stu.id}`;
+                entries.push({
+                  recordId,
+                  source: 'driver',
+                  value: 'Holiday',
+                  reason: cleanOccasion,
+                });
+                entries.push({
+                  recordId,
+                  source: 'assistant',
+                  value: 'Holiday',
+                  reason: cleanOccasion,
+                });
+              }
+            }
+
+            if (entries.length === 0) {
+              setStatusFeedback('No active transport members found on the selected route(s).');
+              setTimeout(() => setStatusFeedback(null), 3500);
+              setHolidayResultModal({
+                type: 'error',
+                title: 'No Active Members Found',
+                message:
+                  'No active transport members were found on the selected route(s) to mark Holiday.',
+              });
+              return;
+            }
+
+            const totalMembersMarked = Math.round(entries.length / 2);
+            setIsMarkingRoutesHoliday(true);
+            try {
+              if (onBatchSaveAttendance) {
+                await onBatchSaveAttendance(entries);
+              } else {
+                for (const ent of entries) {
+                  await onMarkAttendance(ent.recordId, ent.source, ent.value, ent.reason);
+                }
+              }
+
+              // Immediately reflect Holiday status on the route table rows
+              setLocalHolidayMarkedRouteDates((prev) => {
+                const next = { ...prev };
+                for (const r of targetRoutes) {
+                  next[`${r.id}:${holidaySubDate}`] = true;
+                }
+                return next;
+              });
+              setSelectedHolidayRouteIds([]);
+
+              const successText = `✓ Holiday (H) marked successfully for ${targetRoutes.length} route(s) (${totalMembersMarked} members) on ${holidaySubDate}.`;
+              setStatusFeedback(successText);
+              setTimeout(() => setStatusFeedback(null), 5000);
+
+              setHolidayResultModal({
+                type: 'success',
+                title: 'Holiday Marked Successfully!',
+                message: `Holiday (H) has been marked and saved for ${targetRoutes.length} route(s) (${totalMembersMarked} active members) on ${holidaySubDate}. Arrival & Departure timings are automatically marked Not Applicable (N/A).`,
+                date: holidaySubDate,
+                routeNames: targetRoutes.map((r) => `${r.code} (${r.name})`),
+                memberCount: totalMembersMarked,
+                occasion: cleanOccasion,
+              });
+            } catch (err: any) {
+              const errMsg =
+                err?.message ||
+                'An unexpected error occurred while marking Holiday. Please check your connection and try again.';
+              setStatusFeedback(`Error: ${errMsg}`);
+              setTimeout(() => setStatusFeedback(null), 5000);
+              setHolidayResultModal({
+                type: 'error',
+                title: 'Failed to Mark Holiday',
+                message: errMsg,
+              });
+            } finally {
+              setIsMarkingRoutesHoliday(false);
+            }
+          };
+
+          return (
+            <div className="space-y-4">
+              {statusFeedback && (
+                <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-3 rounded-xl text-xs font-bold flex items-center justify-between shadow-2xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{statusFeedback}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStatusFeedback(null)}
+                    className="text-emerald-700 hover:text-emerald-950 font-black cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                      Holiday Date
+                    </label>
+                    <input
+                      type="date"
+                      value={holidaySubDate}
+                      onChange={(e) => setHolidaySubDate(e.target.value)}
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                      Campus
+                    </label>
+                    <select
+                      value={effectiveHolidayCampus}
+                      disabled={Boolean(lockedCampus)}
+                      onChange={(e) =>
+                        setHolidaySubCampus(e.target.value as 'all' | 'Sr' | 'Jr')
+                      }
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-slate-800 disabled:opacity-70"
+                    >
+                      {!lockedCampus && <option value="all">All Campuses (Sr &amp; Jr)</option>}
+                      {(!lockedCampus || lockedCampus === 'Sr') && (
+                        <option value="Sr">Senior Campus (Sr)</option>
+                      )}
+                      {(!lockedCampus || lockedCampus === 'Jr') && (
+                        <option value="Jr">Junior Campus (Jr)</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
+                      Holiday Occasion / Remark
+                    </label>
+                    <input
+                      type="text"
+                      value={holidaySubReason}
+                      onChange={(e) => setHolidaySubReason(e.target.value)}
+                      placeholder="e.g. Festival / School Closed"
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 text-slate-900"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleSelectAllRoutes}
+                      className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-bold text-xs cursor-pointer"
+                    >
+                      {areAllSelected ? 'Unselect All Routes' : `Select All Routes (${scopedHolidayRoutes.length})`}
+                    </button>
+                    <span className="text-xs font-semibold text-slate-500">
+                      Selected: <strong className="text-slate-900">{selectedHolidayRouteIds.length}</strong> of{' '}
+                      {scopedHolidayRoutes.length} routes
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isMarkingRoutesHoliday || selectedHolidayRouteIds.length === 0}
+                      onClick={() =>
+                        executeMarkHolidayForRoutes(
+                          scopedHolidayRoutes.filter((r) =>
+                            selectedHolidayRouteIds.includes(r.id)
+                          )
+                        )
+                      }
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs cursor-pointer shadow-xs"
+                    >
+                      {isMarkingRoutesHoliday
+                        ? 'Marking Holiday...'
+                        : `Mark Holiday for Selected Routes (${selectedHolidayRouteIds.length})`}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isMarkingRoutesHoliday || scopedHolidayRoutes.length === 0}
+                      onClick={() => executeMarkHolidayForRoutes(scopedHolidayRoutes)}
+                      className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-amber-400 font-bold text-xs cursor-pointer shadow-xs"
+                    >
+                      {isMarkingRoutesHoliday
+                        ? 'Marking All Routes...'
+                        : `Mark Holiday for All Routes at Once (${scopedHolidayRoutes.length})`}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                        <th className="py-3 px-4 w-10">
+                          <input
+                            type="checkbox"
+                            checked={areAllSelected}
+                            onChange={handleToggleSelectAllRoutes}
+                            className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
+                          />
+                        </th>
+                        <th className="py-3 px-3">Route Code &amp; Name</th>
+                        <th className="py-3 px-3">Campus</th>
+                        <th className="py-3 px-3">Vehicle &amp; Driver</th>
+                        <th className="py-3 px-3 text-center">Active Members</th>
+                        <th className="py-3 px-3 text-center">Holiday Status ({holidaySubDate})</th>
+                        <th className="py-3 px-4 text-right">Quick Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {scopedHolidayRoutes.map((r) => {
+                        const stats = getRouteHolidayStats(r);
+                        const isChecked = selectedHolidayRouteIds.includes(r.id);
+                        return (
+                          <tr
+                            key={r.id}
+                            className={`hover:bg-slate-50/80 ${
+                              stats.isFullyHoliday ? 'bg-indigo-50/30' : ''
+                            }`}
+                          >
+                            <td className="py-2.5 px-4">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => handleToggleRouteSelection(r.id)}
+                                className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
+                              />
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-bold text-slate-900">{r.code}</div>
+                              <div className="text-[11px] text-slate-500">{r.name}</div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  normalizeCampusCode(r.campus) === 'Jr'
+                                    ? 'bg-amber-100 text-amber-900'
+                                    : 'bg-indigo-100 text-indigo-900'
+                                }`}
+                              >
+                                {r.campus}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-mono font-semibold text-slate-800">
+                                {r.vehicleNumber || '—'}
+                              </div>
+                              <div className="text-[11px] text-slate-500">{r.driverName || '—'}</div>
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-bold text-slate-900">
+                              {stats.totalCount}
+                            </td>
+                            <td className="py-2.5 px-3 text-center">
+                              {stats.isFullyHoliday ? (
+                                <span className="px-2.5 py-1 rounded-lg bg-indigo-100 text-indigo-900 font-bold text-[11px]">
+                                  ✓ Holiday Marked ({stats.holidayCountForRoute}/{stats.totalCount})
+                                </span>
+                              ) : stats.holidayCountForRoute > 0 ? (
+                                <span className="px-2.5 py-1 rounded-lg bg-amber-100 text-amber-900 font-bold text-[11px]">
+                                  Partial ({stats.holidayCountForRoute}/{stats.totalCount})
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 font-medium">Regular / Pending</span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-4 text-right">
+                              <button
+                                type="button"
+                                disabled={isMarkingRoutesHoliday || stats.totalCount === 0}
+                                onClick={() => executeMarkHolidayForRoutes([r])}
+                                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-bold text-xs cursor-pointer"
+                              >
+                                Mark Holiday (H)
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       {/* ===================================================================== */}
       {/* SUB-VIEW 6: UNMARKED & MISMATCH ATTENDANCE REPORT                     */}
@@ -5450,13 +6055,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                       </span>
                     </div>
                     <h3 className="text-base font-bold text-slate-900 mt-1">
-                      Unmarked Attendance (Arrival / Departure / Both) &amp; Status Mismatch Audit
+                      Unmarked Attendance &amp; Status Mismatch Report
                     </h3>
-                    <p className="text-xs text-slate-500">
-                      Separately inspect members with <strong>Both Arrival &amp; Departure Not Marked</strong>,{' '}
-                      <strong>Single Shift Not Marked</strong>, and <strong>Arrival vs. Departure Mismatch (Present vs. Absent)</strong>.{' '}
-                      Coordinator, Assistant &amp; Attendance Incharge can mark <strong>only unmarked</strong> entries without altering already-marked records, acknowledge yesterday&apos;s unmarked records, or send a <strong>Change Request to Admin</strong>.
-                    </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -6348,6 +6948,119 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Holiday Success / Error Confirmation Popup Modal */}
+      {holidayResultModal && (
+        <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div
+            className={`bg-white rounded-2xl border shadow-2xl max-w-md w-full overflow-hidden ${
+              holidayResultModal.type === 'success'
+                ? 'border-emerald-300'
+                : 'border-rose-300'
+            }`}
+          >
+            <div
+              className={`px-5 py-4 flex items-center justify-between ${
+                holidayResultModal.type === 'success'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-rose-600 text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                {holidayResultModal.type === 'success' ? (
+                  <CheckCircle className="w-5 h-5 text-white shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-5 h-5 text-white shrink-0" />
+                )}
+                <h3 className="text-sm font-black uppercase tracking-wide">
+                  {holidayResultModal.title}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHolidayResultModal(null)}
+                className="text-white/80 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div
+                className={`p-3.5 rounded-xl border space-y-2 ${
+                  holidayResultModal.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+                    : 'bg-rose-50 border-rose-200 text-rose-950'
+                }`}
+              >
+                <p className="font-bold text-sm leading-relaxed">
+                  {holidayResultModal.message}
+                </p>
+
+                {holidayResultModal.type === 'success' && (
+                  <div className="pt-2 border-t border-emerald-200/80 space-y-1.5 text-slate-700">
+                    {holidayResultModal.date && (
+                      <div className="flex justify-between">
+                        <span className="font-semibold text-slate-600">Holiday Date:</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          {holidayResultModal.date}
+                        </span>
+                      </div>
+                    )}
+                    {holidayResultModal.occasion && (
+                      <div className="flex justify-between">
+                        <span className="font-semibold text-slate-600">Occasion / Remark:</span>
+                        <span className="font-bold text-slate-900">
+                          {holidayResultModal.occasion}
+                        </span>
+                      </div>
+                    )}
+                    {typeof holidayResultModal.memberCount === 'number' && (
+                      <div className="flex justify-between">
+                        <span className="font-semibold text-slate-600">Members Marked (H):</span>
+                        <span className="font-bold text-emerald-800">
+                          {holidayResultModal.memberCount} Member(s) (Arrival &amp; Departure)
+                        </span>
+                      </div>
+                    )}
+                    {holidayResultModal.routeNames && holidayResultModal.routeNames.length > 0 && (
+                      <div className="pt-1">
+                        <div className="font-semibold text-slate-600 mb-1">
+                          Route(s) Marked ({holidayResultModal.routeNames.length}):
+                        </div>
+                        <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
+                          {holidayResultModal.routeNames.map((rName) => (
+                            <span
+                              key={rName}
+                              className="px-2 py-0.5 rounded-md bg-white border border-emerald-300 text-emerald-900 font-bold text-[11px]"
+                            >
+                              ✓ {rName}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => setHolidayResultModal(null)}
+                  className={`px-6 py-2.5 rounded-xl font-bold text-xs cursor-pointer shadow-xs ${
+                    holidayResultModal.type === 'success'
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                      : 'bg-rose-600 hover:bg-rose-700 text-white'
+                  }`}
+                >
+                  OK, Done
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

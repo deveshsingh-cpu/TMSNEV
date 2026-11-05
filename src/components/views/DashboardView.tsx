@@ -731,12 +731,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               )}
             </div>
             <h3 className="text-base font-bold tracking-tight">
-              Unmarked &amp; Mismatched Attendance List (Arrival • Departure • Both • Mismatch)
+              Unmarked &amp; Mismatched Attendance List
             </h3>
-            <p className="text-xs text-slate-300">
-              Separate lists for members with <strong>Both Arrival &amp; Departure Not Marked</strong>,{' '}
-              <strong>Single Shift Not Marked</strong>, and <strong>Present vs. Absent Mismatches</strong>.
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">

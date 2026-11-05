@@ -3938,6 +3938,32 @@ export class SheetsDatabaseManager {
             }
           }
         }
+      } else if (st.transportStatus === 'Left') {
+        // Member has Left transport facility: no further monthly fees should be charged after leaving date,
+        // while preserving any unpaid invoices/previous dues charged before marking Left.
+        const leavingDateMatch = String((st as any).leavingDate || st.statusReason || '').match(/\d{4}-\d{2}-\d{2}/);
+        const leavingMonth = leavingDateMatch ? leavingDateMatch[0].slice(0, 7) : '';
+        if (leavingMonth) {
+          const beforeLeftFilter = this.invoices.length;
+          this.invoices = this.invoices.filter(inv => {
+            if (inv.studentId !== st.id) return true;
+            const key = String(inv.idempotencyKey || '').trim();
+            const mStr = String(inv.month || '').trim();
+            if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) {
+              return true;
+            }
+            if ((Number(inv.paidAmount) || 0) > 0) {
+              return true;
+            }
+            if (/^\d{4}-\d{2}$/.test(mStr) && mStr > leavingMonth) {
+              return false;
+            }
+            return true;
+          });
+          if (this.invoices.length !== beforeLeftFilter) {
+            changed = true;
+          }
+        }
       }
 
       if ((Number(st.previousDues) || 0) > 0) {
@@ -9301,8 +9327,28 @@ export class SheetsDatabaseManager {
               .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
           }
           this.students[idx] = updated;
-          // Auto-calculate monthly fee for both Active and Suspended members
-          this.ensureAutoFeeForMember(updated);
+          if (updated.transportStatus === 'Left') {
+            const todayStr = new Date().toISOString().split('T')[0];
+            if (!(updated as any).leavingDate) {
+              (updated as any).leavingDate = todayStr;
+            }
+            const leavingMonth = String((updated as any).leavingDate || todayStr).slice(0, 7);
+            this.invoices = this.invoices.filter(inv => {
+              if (inv.studentId !== updated.id) return true;
+              const key = String(inv.idempotencyKey || '').trim();
+              const mStr = String(inv.month || '').trim();
+              if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) return true;
+              if ((Number(inv.paidAmount) || 0) > 0) return true;
+              if (/^\d{4}-\d{2}$/.test(mStr) && mStr > leavingMonth) return false;
+              return true;
+            });
+            updated.balanceDue = this.invoices
+              .filter(inv => inv.studentId === updated.id && inv.status !== 'Paid')
+              .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
+          } else {
+            // Auto-calculate monthly fee for both Active and Suspended members
+            this.ensureAutoFeeForMember(updated);
+          }
           if (data.previousDues !== undefined) {
             this.syncPreviousDuesInvoiceForStudent(updated, data.previousDues, data.previousDuesRemarks);
           }
@@ -10690,7 +10736,15 @@ export class SheetsDatabaseManager {
         this.trips.push(trip);
       }
 
-      // Ensure attendance records exist for all students on this route for this trip
+      // Remove any attendance records belonging to students marked 'Left'
+      const leftStudentIds = new Set(
+        this.students.filter(s => s.transportStatus === 'Left').map(s => s.id)
+      );
+      this.attendance = this.attendance.filter(
+        a => !(a.tripId === trip!.id && leftStudentIds.has(a.studentId))
+      );
+
+      // Ensure attendance records exist for all active/suspended students on this route for this trip
       let existingAtt = this.attendance.filter(a => a.tripId === trip!.id);
       const existingStuIds = new Set(existingAtt.map(a => a.studentId));
       for (const stu of routeStudents) {
@@ -10759,10 +10813,12 @@ export class SheetsDatabaseManager {
   ): TripAttendanceRecord {
     let rec = this.attendance.find(a => a.id === recordId);
 
-    // If record doesn't exist yet (e.g. marking directly from Arrival & Departure board before trip record creation),
-    // parse deterministic ID `att-${tripId}-${studentId}` and auto-create trip + attendance record
+    // If record doesn't exist yet (e.g. marking directly from Arrival & Departure board or Mark Route Holiday before trip creation),
+    // parse deterministic ID `att-${tripId}-${studentId}` and auto-create or reuse trip + attendance record
     if (!rec && recordId.startsWith('att-')) {
-      const matchedStu = this.students.find(s => recordId.endsWith(`-${s.id}`));
+      const matchedStu = [...this.students]
+        .sort((a, b) => b.id.length - a.id.length)
+        .find(s => recordId.endsWith(`-${s.id}`));
       if (matchedStu) {
         const tripIdPart = recordId.slice(4, recordId.length - matchedStu.id.length - 1);
         let trip = this.trips.find(t => t.id === tripIdPart);
@@ -10776,7 +10832,7 @@ export class SheetsDatabaseManager {
             const veh = this.vehicles.find(v => v.id === route.vehicleId || v.registrationNumber === route.vehicleNumber);
             const routeStudents = this.getStudentsForRoute(route);
             trip = {
-              id: `dt-${route.id}-${datePart}`,
+              id: tripIdPart,
               date: datePart,
               campus: route.campus,
               routeId: route.id,
@@ -10799,26 +10855,43 @@ export class SheetsDatabaseManager {
           }
         }
         const effectiveTripId = trip?.id || tripIdPart;
-        const effectiveDate = trip?.date || (tripIdPart.length >= 10 ? tripIdPart.slice(-10) : new Date().toISOString().split('T')[0]);
-        rec = {
-          id: `att-${effectiveTripId}-${matchedStu.id}`,
-          tripId: effectiveTripId,
-          date: effectiveDate,
-          studentId: matchedStu.id,
-          admissionNo: matchedStu.admissionNo,
-          studentName: matchedStu.name,
-          classSection: `${matchedStu.class}-${matchedStu.section}`,
-          stopName: matchedStu.pickupDropStopName,
-          transportStatus: matchedStu.transportStatus,
-          driverStatus: 'Pending',
-          assistantStatus: 'Pending',
-          reconciliationStatus: 'Assistant_Pending',
-        };
-        this.attendance.push(rec);
+        const effectiveDate =
+          trip?.date ||
+          (tripIdPart.length >= 10
+            ? tripIdPart.slice(-10)
+            : new Date().toISOString().split('T')[0]);
+
+        rec = this.attendance.find(
+          a =>
+            a.id === recordId ||
+            a.id === `att-${effectiveTripId}-${matchedStu.id}` ||
+            (a.studentId === matchedStu.id &&
+              (a.tripId === effectiveTripId || a.date === effectiveDate))
+        );
+
+        if (!rec) {
+          rec = {
+            id: recordId,
+            tripId: effectiveTripId,
+            date: effectiveDate,
+            studentId: matchedStu.id,
+            admissionNo: matchedStu.admissionNo,
+            studentName: matchedStu.name,
+            classSection: `${matchedStu.class}-${matchedStu.section}`,
+            stopName: matchedStu.pickupDropStopName,
+            transportStatus: matchedStu.transportStatus,
+            driverStatus: 'Pending',
+            assistantStatus: 'Pending',
+            reconciliationStatus: 'Assistant_Pending',
+          };
+          this.attendance.push(rec);
+        } else if (!rec.date) {
+          rec.date = effectiveDate;
+        }
       }
     }
 
-    if (!rec) throw new Error('Record not found');
+    if (!rec) throw new Error('Attendance record could not be matched to an active member.');
 
     const tripForValidation = this.trips.find(t => t.id === rec!.tripId);
     const nowTimeHHMM = new Date().toLocaleTimeString([], {
@@ -10827,7 +10900,7 @@ export class SheetsDatabaseManager {
       hour12: false,
     });
     if (source === 'driver') {
-      if (tripForValidation) {
+      if (tripForValidation && value !== 'Holiday') {
         if (!tripForValidation.inTime) {
           tripForValidation.inTime = nowTimeHHMM;
         }
@@ -10837,10 +10910,15 @@ export class SheetsDatabaseManager {
           tripForValidation.verifiedAt = tripForValidation.verifiedAt || new Date().toISOString();
         }
       }
+      const isLeaveToPresentEarlyArrival =
+        rec.driverStatus === 'Leave' && value === 'Present';
+      const isMarkingHoliday = value === 'Holiday';
       if (
         rec.driverStatus &&
         rec.driverStatus !== 'Pending' &&
         rec.driverStatus !== value &&
+        !isLeaveToPresentEarlyArrival &&
+        !isMarkingHoliday &&
         role &&
         role !== 'Admin'
       ) {
@@ -10854,7 +10932,7 @@ export class SheetsDatabaseManager {
         rec.notes = reason;
       }
     } else if (source === 'assistant') {
-      if (tripForValidation) {
+      if (tripForValidation && value !== 'Holiday') {
         if (!tripForValidation.outTime) {
           tripForValidation.outTime = nowTimeHHMM;
         }
@@ -10868,10 +10946,15 @@ export class SheetsDatabaseManager {
           tripForValidation.verifiedAt = tripForValidation.verifiedAt || new Date().toISOString();
         }
       }
+      const isLeaveToPresentEarlyArrival =
+        rec.assistantStatus === 'Leave' && value === 'Present';
+      const isMarkingHoliday = value === 'Holiday';
       if (
         rec.assistantStatus &&
         rec.assistantStatus !== 'Pending' &&
         rec.assistantStatus !== value &&
+        !isLeaveToPresentEarlyArrival &&
+        !isMarkingHoliday &&
         role &&
         role !== 'Admin'
       ) {
@@ -10888,6 +10971,17 @@ export class SheetsDatabaseManager {
       rec.resolvedBy = resolverName;
       rec.resolutionReason = reason !== undefined ? reason : rec.resolutionReason;
       rec.notes = reason !== undefined ? reason : rec.notes;
+    }
+
+    // If all records on this trip are Holiday, Arrival & Departure times are not applicable
+    if (tripForValidation && value === 'Holiday') {
+      const tripRecs = this.attendance.filter(a => a.tripId === tripForValidation.id);
+      if (tripRecs.length > 0 && tripRecs.every(a => a.driverStatus === 'Holiday')) {
+        tripForValidation.inTime = '';
+      }
+      if (tripRecs.length > 0 && tripRecs.every(a => a.assistantStatus === 'Holiday')) {
+        tripForValidation.outTime = '';
+      }
     }
 
     const arr = rec.driverStatus || 'Pending';
@@ -11935,8 +12029,24 @@ export class SheetsDatabaseManager {
     } else if (req.requestType === 'DROP_MEMBER' && req.memberId) {
       const student = this.students.find(s => s.id === req.memberId);
       if (student) {
+        const effLeaveDate = req.leavingDate || today;
         student.transportStatus = 'Left';
-        student.statusReason = `Dropped (Left School/Transport) w.e.f ${req.leavingDate || today}. Reason: ${req.requestReason} | Coordinator: ${req.coordinatorRemarks || 'Approved'} | Admin: ${req.adminRemarks || 'Approved'}`;
+        (student as any).leavingDate = effLeaveDate;
+        student.statusReason = `Dropped (Left School/Transport) w.e.f ${effLeaveDate}. Reason: ${req.requestReason} | Coordinator: ${req.coordinatorRemarks || 'Approved'} | Admin: ${req.adminRemarks || 'Approved'}`;
+        // Remove any unpaid monthly invoices strictly after the leaving month, keeping whatever was charged before marking Left
+        const leavingMonth = effLeaveDate.slice(0, 7);
+        this.invoices = this.invoices.filter(inv => {
+          if (inv.studentId !== student.id) return true;
+          const key = String(inv.idempotencyKey || '').trim();
+          const mStr = String(inv.month || '').trim();
+          if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) return true;
+          if ((Number(inv.paidAmount) || 0) > 0) return true;
+          if (/^\d{4}-\d{2}$/.test(mStr) && mStr > leavingMonth) return false;
+          return true;
+        });
+        student.balanceDue = this.invoices
+          .filter(inv => inv.studentId === student.id && inv.status !== 'Paid')
+          .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
         student.version = (student.version || 1) + 1;
         this.rebuildScheduledServices();
       }

@@ -512,6 +512,7 @@ export function App() {
         targetSubTab !== 'arrival' &&
         targetSubTab !== 'departure' &&
         targetSubTab !== 'unmarked_mismatch' &&
+        targetSubTab !== 'mark_holiday' &&
         targetSubTab !== 'call_absentees' &&
         targetSubTab !== 'calendar' &&
         targetSubTab !== 'summary'
@@ -1087,33 +1088,47 @@ export function App() {
       reason?: string;
     }>
   ) => {
-    // Optimistically update attendanceRecords in local React state for instant UI feedback
+    const updated = await api.batchSaveAttendance(entries, activeRole);
+
     setAttendanceRecords((prev) => {
-      const byId = new Map<string, TripAttendanceRecord>(prev.map((r) => [r.id, { ...r }]));
+      const sortedStudents = [...students].sort((a, b) => b.id.length - a.id.length);
+      const list = prev.map((r) => ({ ...r }));
+
       for (const item of entries) {
-        let rec = byId.get(item.recordId);
+        let rec = list.find((r) => r.id === item.recordId);
         if (!rec && item.recordId.startsWith('att-')) {
-          const matchedStu = students.find((s) => item.recordId.endsWith(`-${s.id}`));
+          const matchedStu = sortedStudents.find((s) => item.recordId.endsWith(`-${s.id}`));
           if (matchedStu) {
             const tripIdPart = item.recordId.slice(4, item.recordId.length - matchedStu.id.length - 1);
             const datePart =
               tripIdPart.length >= 10
                 ? tripIdPart.slice(-10)
                 : new Date().toISOString().split('T')[0];
-            rec = {
-              id: item.recordId,
-              tripId: tripIdPart,
-              date: datePart,
-              studentId: matchedStu.id,
-              admissionNo: matchedStu.admissionNo,
-              studentName: matchedStu.name,
-              classSection: `${matchedStu.class}-${matchedStu.section}`,
-              stopName: matchedStu.pickupDropStopName || matchedStu.villageName || '—',
-              transportStatus: matchedStu.transportStatus,
-              driverStatus: 'Pending',
-              assistantStatus: 'Pending',
-              reconciliationStatus: 'Assistant_Pending',
-            };
+
+            rec = list.find(
+              (r) =>
+                r.studentId === matchedStu.id &&
+                (r.tripId === tripIdPart || r.date === datePart)
+            );
+            if (!rec) {
+              rec = {
+                id: item.recordId,
+                tripId: tripIdPart,
+                date: datePart,
+                studentId: matchedStu.id,
+                admissionNo: matchedStu.admissionNo,
+                studentName: matchedStu.name,
+                classSection: `${matchedStu.class}-${matchedStu.section}`,
+                stopName: matchedStu.pickupDropStopName || matchedStu.villageName || '—',
+                transportStatus: matchedStu.transportStatus,
+                driverStatus: 'Pending',
+                assistantStatus: 'Pending',
+                reconciliationStatus: 'Assistant_Pending',
+              };
+              list.push(rec);
+            } else if (!rec.date) {
+              rec.date = datePart;
+            }
           }
         }
         if (rec) {
@@ -1137,20 +1152,17 @@ export function App() {
           } else {
             rec.resolvedStatus = 'Pending';
           }
-          byId.set(rec.id, rec);
         }
       }
-      return Array.from(byId.values());
-    });
 
-    const updated = await api.batchSaveAttendance(entries, activeRole);
-    if (Array.isArray(updated) && updated.length > 0) {
-      setAttendanceRecords((prev) => {
-        const byId = new Map(prev.map((r) => [r.id, r]));
+      if (Array.isArray(updated) && updated.length > 0) {
+        const byId = new Map(list.map((r) => [r.id, r]));
         updated.forEach((r) => byId.set(r.id, r));
         return Array.from(byId.values());
-      });
-    }
+      }
+      return list;
+    });
+
     await loadAllData();
   };
 
@@ -2537,7 +2549,7 @@ export function App() {
                             </h4>
                             <p className="text-slate-600 text-[11px]">
                               Both Unmarked: <strong>{yesterdayAnalysis.bothNotMarked.length}</strong> • Single Shift Unmarked:{' '}
-                              <strong>{yesterdayAnalysis.singleShiftNotMarked.length}</strong>. You can acknowledge that yesterday&apos;s unmarked records were not marked, or mark ONLY those left unmarked without altering already-marked members.
+                              <strong>{yesterdayAnalysis.singleShiftNotMarked.length}</strong>
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
@@ -2612,9 +2624,6 @@ export function App() {
                                 Yesterday ({yesterdayStr}) Arrival vs. Departure Mismatches (
                                 {yesterdayAnalysis.statusMismatches.length})
                               </h4>
-                              <p className="text-[11px] text-violet-800">
-                                Already-marked attendance cannot be changed directly by Coordinator, Assistant, or Attendance Incharge. Send a change request to Admin or Skip.
-                              </p>
                             </div>
                           </div>
 
@@ -2772,10 +2781,7 @@ export function App() {
                   </div>
                 )}
 
-                <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-                  <span className="text-xs text-slate-500">
-                    You can skip this popup now or proceed directly to the route attendance sheet.
-                  </span>
+                <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end">
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
