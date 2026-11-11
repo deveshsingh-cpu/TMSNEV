@@ -10213,9 +10213,12 @@ export class SheetsDatabaseManager {
   public async recordReceipt(data: {
     studentId: string;
     campus?: string;
+    role?: string;
     amount: number;
     discountAmount?: number;
     lateFine?: number;
+    lateFineAmount?: number;
+    lateFineWaiver?: number;
     invoiceDiscounts?: Record<string, number>;
     selectedInvoiceIds?: string[];
     feeBreakupDescription?: string;
@@ -10231,8 +10234,26 @@ export class SheetsDatabaseManager {
       const student = this.students.find(s => s.id === data.studentId);
       if (!student) throw new Error('Selected member record was not found.');
 
-      const totalDiscount = Number(data.discountAmount) || 0;
-      const lateFineCharged = Number(data.lateFine) || 0;
+      const callerRoleStr = String(data.role || data.receivedBy || '').trim().toLowerCase();
+      const isCallerAdmin =
+        !callerRoleStr ||
+        callerRoleStr.startsWith('admin') ||
+        callerRoleStr.includes('chief transport');
+
+      const requestedFeeDiscount = Math.max(0, Number(data.discountAmount) || 0);
+      const hasRequestedInvoiceDiscount = Object.values(data.invoiceDiscounts || {}).some(
+        v => (Number(v) || 0) > 0
+      );
+
+      if (!isCallerAdmin && (requestedFeeDiscount > 0 || hasRequestedInvoiceDiscount)) {
+        throw new Error(
+          'Only Admin can discount member actual transport fees or previous dues. Transport Assistant and Coordinator can only discount Late Fine.'
+        );
+      }
+
+      const totalDiscount = isCallerAdmin ? requestedFeeDiscount : 0;
+      const lateFineCharged = Math.max(0, Number(data.lateFine ?? data.lateFineAmount) || 0);
+      const lateFineWaiver = Math.min(100, Math.max(0, Number(data.lateFineWaiver) || 0));
       const netPaid = Number(data.amount) || 0;
       if (netPaid <= 0 && totalDiscount <= 0) {
         throw new Error('Received Fee Amount must be greater than ₹0.');
@@ -10298,8 +10319,8 @@ export class SheetsDatabaseManager {
         }
       }
 
-      // Apply month-specific discounts if provided
-      if (data.invoiceDiscounts) {
+      // Apply month-specific discounts if provided (Strictly Admin Only)
+      if (isCallerAdmin && data.invoiceDiscounts) {
         for (const [invId, discVal] of Object.entries(data.invoiceDiscounts)) {
           const d = Number(discVal) || 0;
           if (d > 0) {
@@ -10391,6 +10412,7 @@ export class SheetsDatabaseManager {
         discountAmount: totalDiscount,
         lateFine: lateFineCharged,
         lateFineAmount: lateFineCharged,
+        lateFineWaiver,
         balanceDueBefore,
         balanceDueAfter,
         feeBreakupDescription:

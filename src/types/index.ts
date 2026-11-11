@@ -675,6 +675,7 @@ export interface FeeReceipt {
   discountAmount?: number;
   lateFine?: number;
   lateFineAmount?: number;
+  lateFineWaiver?: number;
   balanceDueBefore?: number;
   balanceDueAfter?: number;
   allocatedToInvoiceId?: string;

@@ -88,7 +88,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
   onOpenStudentProfile,
 }) => {
   const isAdmin = currentRole === 'Admin';
+  const isCoordinator = currentRole === 'Transport Coordinator';
   const isAssistant = currentRole === 'Transport Assistant';
+  const canDiscountLateFine = isAdmin || isCoordinator || isAssistant;
   const lockedCampus: 'Sr' | 'Jr' | null = isAssistant
     ? normalizeCampus(userCampus) || 'Sr'
     : null;
@@ -493,7 +495,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
   };
 
   // Late Fee Mechanism: Any fee paid after due date (10th of current month) adds ₹100 extra as Late Fine.
-  // Can only be waived off by Admin through discount.
+  // Late Fine can be discounted/waived by Admin, Transport Coordinator, or Transport Assistant.
+  // Actual monthly transport fees & previous dues can ONLY be discounted by Admin.
   const effectivePayDateStr = isAdmin ? paymentDate : todayStr;
   const payDayOfMonth = Number((effectivePayDateStr || todayStr).split('-')[2] || 1);
   const isPaidAfter10th = payDayOfMonth > 10;
@@ -501,15 +504,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
   // Totals for selected months
   const selectedRows = effectiveDueRows.filter((r) => selectedMonthIds.includes(r.id));
   const lateFineApplicable = isPaidAfter10th && selectedRows.length > 0 ? 100 : 0;
-  const effectiveLateFineWaiver = isAdmin ? Math.min(lateFineApplicable, Math.max(0, Number(lateFineWaiver || 0))) : 0;
+  const effectiveLateFineWaiver = canDiscountLateFine
+    ? Math.min(lateFineApplicable, Math.max(0, Number(lateFineWaiver || 0)))
+    : 0;
   const netLateFine = Math.max(0, lateFineApplicable - effectiveLateFineWaiver);
 
+  const effectiveFeeDiscount = isAdmin
+    ? selectedRows.reduce(
+        (sum, r) => sum + Math.min(r.duesAmount, Math.max(0, Number(monthDiscounts[r.id] || 0))),
+        0
+      )
+    : 0;
+
   const totalSelectedDues = selectedRows.reduce((sum, r) => sum + r.duesAmount, 0) + lateFineApplicable;
-  const totalSelectedDiscount =
-    selectedRows.reduce(
-      (sum, r) => sum + Math.min(r.duesAmount, Number(monthDiscounts[r.id] || 0)),
-      0
-    ) + effectiveLateFineWaiver;
+  const totalSelectedDiscount = effectiveFeeDiscount + effectiveLateFineWaiver;
   const totalNetPayable = Math.max(0, totalSelectedDues - totalSelectedDiscount);
 
   // Member overall fee summary for confirmation card
@@ -908,9 +916,19 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 <span>Dues Before Payment:</span>
                 <strong>Rs. ${(rec.balanceDueBefore ?? rec.amount).toLocaleString('en-IN')}</strong>
               </div>
+              ${(rec.lateFine ?? rec.lateFineAmount ?? 0) > 0 || (rec.lateFineWaiver ?? 0) > 0 ? `
+              <div style="display:flex;justify-content:space-between;margin-bottom:6px;color:#be123c;">
+                <span>Late Fine (After 10th Due Date):</span>
+                <strong>+ Rs. ${((rec.lateFine ?? rec.lateFineAmount ?? 0) + (rec.lateFineWaiver ?? 0)).toLocaleString('en-IN')}</strong>
+              </div>` : ''}
+              ${(rec.lateFineWaiver ?? 0) > 0 ? `
+              <div style="display:flex;justify-content:space-between;margin-bottom:6px;color:#b45309;">
+                <span>Late Fine Discount / Waiver:</span>
+                <strong>- Rs. ${(rec.lateFineWaiver ?? 0).toLocaleString('en-IN')}</strong>
+              </div>` : ''}
               ${(rec.discountAmount ?? 0) > 0 ? `
               <div style="display:flex;justify-content:space-between;margin-bottom:6px;color:#b45309;">
-                <span>Discount / Waiver Allowed:</span>
+                <span>Fee Discount Allowed:</span>
                 <strong>- Rs. ${(rec.discountAmount ?? 0).toLocaleString('en-IN')}</strong>
               </div>` : ''}
               <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:16px;color:#047857;">
@@ -1047,9 +1065,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
     const lateFineDesc =
       lateFineApplicable > 0
-        ? netLateFine > 0
+        ? netLateFine > 0 && effectiveLateFineWaiver > 0
+          ? ` + Late Fine ₹${netLateFine} (₹${effectiveLateFineWaiver} Late Fine Discounted by ${currentRole})`
+          : netLateFine > 0
           ? ` + Late Fine ₹${netLateFine} (Paid after 10th)`
-          : ` (Late Fine ₹100 Waived by Admin)`
+          : ` (Late Fine ₹100 Discounted by ${currentRole})`
         : '';
     const descriptionStr = `Transport Fee (${selectedRows.map((r) => r.month).join(', ')})${lateFineDesc}`;
 
@@ -1063,9 +1083,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
       const createdReceipt = await onRecordReceipt({
         studentId: selectedMember.id,
         campus: memberCampus,
+        role: currentRole,
         amount: totalNetPayable,
-        discountAmount: totalSelectedDiscount,
+        discountAmount: effectiveFeeDiscount,
+        lateFine: netLateFine,
         lateFineAmount: netLateFine,
+        lateFineWaiver: effectiveLateFineWaiver,
         invoiceDiscounts: isAdmin ? monthDiscounts : {},
         selectedInvoiceIds: selectedRows.filter((r) => !r.isSynthetic).map((r) => r.id),
         feeBreakupDescription: descriptionStr,
@@ -1088,7 +1111,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
       const updatedBal =
         createdReceipt?.balanceDueAfter !== undefined
           ? Number(createdReceipt.balanceDueAfter)
-          : Math.max(0, (Number(memberSnapshot.balanceDue) || 0) - paidAmountSnapshot);
+          : Math.max(
+              0,
+              (Number(memberSnapshot.balanceDue) || 0) -
+                Math.max(0, paidAmountSnapshot - netLateFine) -
+                effectiveFeeDiscount
+            );
       const successText = `Fee Receipt ${savedReceiptNo} saved for ${memberSnapshot.name} (${memberCampus} Campus) — Paid ₹${paidAmountSnapshot.toLocaleString('en-IN')}. Remaining Balance: ₹${updatedBal.toLocaleString('en-IN')}.`;
 
       const receiptToPrint: FeeReceipt =
@@ -1106,7 +1134,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
               admissionNo: memberSnapshot.admissionNo,
               campus: memberCampus,
               amount: paidAmountSnapshot,
-              discountAmount: totalSelectedDiscount,
+              discountAmount: effectiveFeeDiscount,
+              lateFine: netLateFine,
+              lateFineAmount: netLateFine,
+              lateFineWaiver: effectiveLateFineWaiver,
+              advanceLiabilityAmount: 0,
               balanceDueBefore: Number(memberSnapshot.balanceDue) || paidAmountSnapshot,
               balanceDueAfter: updatedBal,
               feeBreakupDescription: descriptionStr,
@@ -1526,7 +1558,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   { header: 'Admission No', accessor: (r) => r.admissionNo },
                   { header: 'Fee Description', accessor: (r) => r.feeBreakupDescription || r.remarks || 'Transport Fee' },
                   { header: 'Dues Before (INR)', accessor: (r) => r.balanceDueBefore ?? r.amount },
-                  { header: 'Discount (INR)', accessor: (r) => r.discountAmount ?? 0 },
+                  { header: 'Fee Discount (INR)', accessor: (r) => r.discountAmount ?? 0 },
+                  { header: 'Late Fine Discount (INR)', accessor: (r) => r.lateFineWaiver ?? 0 },
                   { header: 'Paid Amount (INR)', accessor: (r) => r.amount },
                   { header: 'Balance After (INR)', accessor: (r) => r.balanceDueAfter ?? 0 },
                   { header: 'Payment Mode', accessor: (r) => r.paymentMode },
@@ -1644,7 +1677,19 @@ export const FeesView: React.FC<FeesViewProps> = ({
                         ₹{(rec.balanceDueBefore ?? rec.amount).toLocaleString('en-IN')}
                       </td>
                       <td className="py-3 px-3 font-medium text-amber-700">
-                        ₹{(rec.discountAmount ?? 0).toLocaleString('en-IN')}
+                        <div>
+                          ₹{((rec.discountAmount ?? 0) + (rec.lateFineWaiver ?? 0)).toLocaleString('en-IN')}
+                        </div>
+                        {(rec.lateFineWaiver ?? 0) > 0 && (
+                          <div className="text-[10px] font-semibold text-amber-800">
+                            Late Fine: -₹{(rec.lateFineWaiver ?? 0).toLocaleString('en-IN')}
+                          </div>
+                        )}
+                        {(rec.discountAmount ?? 0) > 0 && (rec.lateFineWaiver ?? 0) > 0 && (
+                          <div className="text-[10px] text-slate-500">
+                            Fee: -₹{(rec.discountAmount ?? 0).toLocaleString('en-IN')}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3 font-bold text-emerald-700 text-sm">
                         ₹{rec.amount.toLocaleString('en-IN')}
@@ -3750,7 +3795,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     {selectedMember?.transportStatus === 'Left'
                       ? 'Left Facility — Receiving fees charged prior to leaving only'
                       : isAdmin
-                      ? 'Admin: Discount enabled'
+                      ? 'Admin: Fee & Late Fine Discount Enabled'
+                      : canDiscountLateFine
+                      ? 'Late Fine Discount Allowed • Fee / Previous Dues Discount: Admin Only'
                       : 'Discount: Admin Only'}
                   </span>
                 </div>
@@ -3769,7 +3816,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
                           <th className="py-2.5 px-3 text-right">Dues Amount (₹)</th>
                           <th className="py-2.5 px-3 text-center">
                             Discount (₹){' '}
-                            {!isAdmin && <span className="text-[10px] text-rose-600">(Admin Only)</span>}
+                            {!isAdmin && (
+                              <span className="text-[10px] text-rose-600">
+                                (Fee/Dues: Admin Only)
+                              </span>
+                            )}
                           </th>
                           <th className="py-2.5 px-4 text-right">Net Payable (₹)</th>
                         </tr>
@@ -3777,10 +3828,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
                       <tbody className="divide-y divide-slate-100">
                         {effectiveDueRows.map((row) => {
                           const isChecked = selectedMonthIds.includes(row.id);
-                          const disc = Math.min(
-                            row.duesAmount,
-                            Math.max(0, Number(monthDiscounts[row.id] || 0))
-                          );
+                          const disc = isAdmin
+                            ? Math.min(
+                                row.duesAmount,
+                                Math.max(0, Number(monthDiscounts[row.id] || 0))
+                              )
+                            : 0;
                           const netMonth = Math.max(0, row.duesAmount - disc);
 
                           return (
@@ -3813,14 +3866,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
                                     onChange={(e) =>
                                       setMonthDiscounts((prev) => ({
                                         ...prev,
-                                        [row.id]: Number(e.target.value),
+                                        [row.id]: Math.min(
+                                          row.duesAmount,
+                                          Math.max(0, Number(e.target.value || 0))
+                                        ),
                                       }))
                                     }
                                     className="w-24 p-1.5 border border-slate-300 rounded-lg text-right font-mono font-bold bg-white"
                                   />
                                 ) : (
-                                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 text-slate-500 font-mono text-[11px]">
-                                    <Lock className="w-3 h-3" /> ₹0
+                                  <span
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 text-slate-500 font-mono text-[11px]"
+                                    title="Actual Transport Fees and Previous Dues can only be discounted by Admin"
+                                  >
+                                    <Lock className="w-3 h-3" /> ₹0 (Admin Only)
                                   </span>
                                 )}
                               </td>
@@ -3831,30 +3890,57 @@ export const FeesView: React.FC<FeesViewProps> = ({
                           );
                         })}
 
-                        {/* LATE FEE MECHANISM ROW: Automatically adds ₹100 if paid after 10th of month; only Admin can waive via discount */}
+                        {/* LATE FEE MECHANISM ROW: Automatically adds ₹100 if paid after 10th of month; Admin, Coordinator & Assistant can discount Late Fine ONLY */}
                         {lateFineApplicable > 0 && (
                           <tr className="bg-rose-50/70 border-t border-rose-200">
                             <td className="py-2.5 px-3 text-center font-bold text-rose-700">Auto</td>
                             <td className="py-2.5 px-3 font-bold text-rose-900">
-                              Late Fine (Payment after 10th due date of month — ₹100 compulsory fine)
+                              Late Fine (Payment after 10th due date of month — ₹100 auto-charged)
                             </td>
                             <td className="py-2.5 px-3 text-right font-mono font-bold text-rose-800">
                               ₹100
                             </td>
                             <td className="py-2.5 px-3 text-center">
-                              {isAdmin ? (
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={100}
-                                  value={lateFineWaiver}
-                                  onChange={(e) => setLateFineWaiver(Number(e.target.value))}
-                                  title="Admin Only: Waive off Late Fine via Discount"
-                                  className="w-24 p-1.5 border border-rose-300 rounded-lg text-right font-mono font-bold bg-white text-rose-900"
-                                />
+                              {canDiscountLateFine ? (
+                                <div className="inline-flex items-center justify-center gap-1.5">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={lateFineApplicable}
+                                    value={lateFineWaiver}
+                                    onChange={(e) => {
+                                      const clamped = Math.min(
+                                        lateFineApplicable,
+                                        Math.max(0, Number(e.target.value || 0))
+                                      );
+                                      setLateFineWaiver(clamped);
+                                    }}
+                                    title="Discount Late Fine Only (₹0 to ₹100)"
+                                    className="w-20 p-1.5 border border-rose-300 rounded-lg text-right font-mono font-bold bg-white text-rose-900"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setLateFineWaiver(
+                                        effectiveLateFineWaiver >= lateFineApplicable
+                                          ? 0
+                                          : lateFineApplicable
+                                      )
+                                    }
+                                    className={`px-2 py-1.5 rounded-lg text-[10px] font-bold cursor-pointer border transition-colors ${
+                                      effectiveLateFineWaiver >= lateFineApplicable
+                                        ? 'bg-slate-200 hover:bg-slate-300 text-slate-700 border-slate-300'
+                                        : 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700'
+                                    }`}
+                                  >
+                                    {effectiveLateFineWaiver >= lateFineApplicable
+                                      ? 'Reset'
+                                      : 'Waive ₹100'}
+                                  </button>
+                                </div>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-100 text-rose-700 font-mono text-[11px]">
-                                  <Lock className="w-3 h-3" /> Admin Waiver Only
+                                  <Lock className="w-3 h-3" /> Restricted
                                 </span>
                               )}
                             </td>
@@ -4555,6 +4641,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
           const rawRem = edit !== undefined ? edit.remarks : (student.previousDuesRemarks || 'Previous Dues (Old Software)');
           const amt = Number(rawAmt);
           if (isNaN(amt) || amt < 0) return;
+          const existingPrevDues = Number(student.previousDues ?? 0) || 0;
+          if (!isAdmin && amt < existingPrevDues) {
+            setStatusMessage({
+              type: 'warning',
+              text: `Only Admin can reduce or discount recorded Previous Dues (current: ₹${existingPrevDues.toLocaleString('en-IN')}).`,
+            });
+            return;
+          }
           setIsSavingPrevDues(true);
           try {
             await api.setStudentPreviousDues(student.id, amt, rawRem);
@@ -4568,13 +4662,29 @@ export const FeesView: React.FC<FeesViewProps> = ({
         };
 
         const handleSaveAllEditedPrevDues = async () => {
-          const entries = Object.entries(prevDuesEdits)
+          const rawEntries = Object.entries(prevDuesEdits)
             .map(([studentId, val]) => ({
               studentId,
               amount: Number(val.amount) || 0,
               remarks: val.remarks || 'Previous Dues (Old Software)',
             }))
             .filter(e => !isNaN(e.amount) && e.amount >= 0);
+
+          if (!isAdmin) {
+            const reducedAny = rawEntries.some(entry => {
+              const st = students.find(s => s.id === entry.studentId);
+              return st && entry.amount < (Number(st.previousDues ?? 0) || 0);
+            });
+            if (reducedAny) {
+              setStatusMessage({
+                type: 'warning',
+                text: 'Only Admin can reduce or discount recorded Previous Dues. Transport Assistant and Coordinator can only discount Late Fine.',
+              });
+              return;
+            }
+          }
+
+          const entries = rawEntries;
 
           if (entries.length === 0) {
             setIsPrevDuesModalOpen(false);

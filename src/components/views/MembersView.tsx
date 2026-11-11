@@ -975,7 +975,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
         routeId: rt?.id || '',
         routeCode: resolvedRouteCode,
         monthlyFee: effectiveFee,
-        concessionAmount: Number(concessionAmount) || 0,
+        concessionAmount: isAdmin ? Number(concessionAmount) || 0 : 0,
         previousDues: Number(previousDues) || 0,
         previousDuesRemarks: previousDuesRemarks.trim() || undefined,
         transportStatus: memberStatusInput,
@@ -5120,12 +5120,21 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Monthly Concession (₹)</label>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Monthly Concession (₹) {!isAdmin && <span className="text-[10px] text-rose-600">(Admin Only)</span>}
+                    </label>
                     <input
                       type="number"
-                      value={concessionAmount}
-                      onChange={e => setConcessionAmount(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                      min={0}
+                      disabled={!isAdmin}
+                      readOnly={!isAdmin}
+                      value={isAdmin ? concessionAmount : 0}
+                      onChange={e => {
+                        if (isAdmin) setConcessionAmount(Number(e.target.value));
+                      }}
+                      className={`w-full px-3 py-2 border border-slate-300 rounded-xl text-xs ${
+                        isAdmin ? 'bg-white' : 'bg-slate-100 text-slate-500 cursor-not-allowed'
+                      }`}
                     />
                   </div>
                   <div>
