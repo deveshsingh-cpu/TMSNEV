@@ -191,6 +191,7 @@ export interface SchoolConfig {
   attachedSessionMonths?: SessionMonthCode[];
   effectiveBillingStartMonth?: string; // e.g. '2026-11'
   lastAutoBilledMonth?: string;
+  restoredRiddhi261102LiveSynced?: boolean;
 }
 
 export interface TransportStop {

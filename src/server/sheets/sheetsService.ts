@@ -78,36 +78,67 @@ const DATA_DIR = process.env.VERCEL ? '/tmp/.data' : path.resolve(process.cwd(),
 const DB_SNAPSHOT_FILE = path.join(DATA_DIR, 'erp_database.json');
 const RUNTIME_CREDS_FILE = path.join(DATA_DIR, 'google_credentials.json');
 
-function stripLargeBase64ForSheetCell(obj: any): string {
+function stripLargeBase64ForSheetCell(obj: any, forceStripKeys: string[] = []): string {
+  const forceSet = new Set(forceStripKeys);
   try {
-    const json = JSON.stringify(obj, (_key, value) => {
-      if (typeof value === 'string' && value.length > 42000) {
+    const json = JSON.stringify(obj, (key, value) => {
+      if (key && forceSet.has(key) && typeof value === 'string' && value.length > 0) {
+        return '[ATTACHMENT_STORED]';
+      }
+      if (typeof value === 'string' && value.length > 40000) {
         return '[ATTACHMENT_STORED]';
       }
       return value;
     });
-    if (json.length <= 47500) return json;
-    // Never slice JSON mid-string; keep compressed profilePhoto and upiScreenshot while stripping heavy secondary attachments
+    if (json && json.length <= 46500) return json;
+
+    // Second pass: strip data URLs > 1200 chars and truncate huge free-text strings
     const compactJson = JSON.stringify(obj, (key, value) => {
-      if (
-        (key === 'profilePhoto' || key === 'upiScreenshot') &&
-        typeof value === 'string' &&
-        value.length <= 40000
-      ) {
-        return value;
-      }
-      if (typeof value === 'string' && value.startsWith('data:') && value.length > 1500) {
+      if (key && forceSet.has(key) && typeof value === 'string' && value.length > 0) {
         return '[ATTACHMENT_STORED]';
       }
-      if (typeof value === 'string' && value.length > 4000) {
-        return value.slice(0, 4000);
+      if (typeof value === 'string' && value.startsWith('data:') && value.length > 1200) {
+        return '[ATTACHMENT_STORED]';
+      }
+      if (typeof value === 'string' && value.length > 3500) {
+        return value.slice(0, 3500);
       }
       return value;
     });
-    return compactJson.length <= 48500 ? compactJson : '{}';
+    if (compactJson && compactJson.length <= 47500) return compactJson;
+
+    // Emergency pass: never return '{}' — preserve all core scalar fields so no row is ever lost
+    const minimalObj: Record<string, any> = {};
+    if (obj && typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) {
+        if (forceSet.has(k) || k === 'documents' || k === 'specialHistory') continue;
+        if (typeof v === 'number' || typeof v === 'boolean' || v === null) {
+          minimalObj[k] = v;
+        } else if (typeof v === 'string') {
+          minimalObj[k] = v.startsWith('data:') && v.length > 400 ? '[ATTACHMENT_STORED]' : v.slice(0, 600);
+        } else if (Array.isArray(v) && v.length <= 20) {
+          minimalObj[k] = v;
+        }
+      }
+    }
+    const fallbackJson = JSON.stringify(minimalObj);
+    return fallbackJson && fallbackJson.length <= 48500 ? fallbackJson : JSON.stringify({ id: obj?.id || '' });
   } catch {
-    return '{}';
+    return JSON.stringify({ id: obj?.id || '' });
   }
+}
+
+function serializeBoundedJsonArray(items: any[], maxChars = 45000): string {
+  if (!Array.isArray(items) || items.length === 0) return '[]';
+  let sliceCount = items.length;
+  while (sliceCount > 0) {
+    const candidate = stripLargeBase64ForSheetCell(items.slice(0, sliceCount));
+    if (candidate.length <= maxChars && candidate.startsWith('[')) {
+      return candidate;
+    }
+    sliceCount = Math.floor(sliceCount * 0.8);
+  }
+  return '[]';
 }
 
 export class SheetsDatabaseManager {
@@ -175,10 +206,12 @@ export class SheetsDatabaseManager {
   private pendingRemoteSync = false;
   private isFlushingRemoteSync = false;
   private remoteSyncTimer: any = null;
+  private explicitlyDeletedIds = new Set<string>();
+  private recentlyRevertedStudentIds = new Set<string>();
 
   constructor() {
-    this.loadLocalSnapshot();
     this.initGoogleServiceAccount();
+    this.loadLocalSnapshot();
     if (this.isGoogleConfigured) {
       this.initPromise = this.autoBootstrapGoogleSheets().catch((err) => {
         this.lastError = err.message;
@@ -269,6 +302,11 @@ export class SheetsDatabaseManager {
           if (Array.isArray(parsed.memberRequests)) this.memberRequests = parsed.memberRequests;
           if (Array.isArray(parsed.absenteeCalls)) this.absenteeCalls = parsed.absenteeCalls;
           if (Array.isArray(parsed.complaints)) this.complaints = parsed.complaints;
+          if (Array.isArray(parsed.explicitlyDeletedIds)) {
+            this.explicitlyDeletedIds = new Set(
+              parsed.explicitlyDeletedIds.map((x: any) => String(x || '').trim()).filter(Boolean)
+            );
+          }
           this.ensureSeededRouteMembers();
         }
       } else {
@@ -324,6 +362,7 @@ export class SheetsDatabaseManager {
         memberRequests: this.memberRequests,
         absenteeCalls: this.absenteeCalls,
         complaints: this.complaints,
+        explicitlyDeletedIds: Array.from(this.explicitlyDeletedIds).slice(-1000),
       };
       fs.writeFileSync(DB_SNAPSHOT_FILE, JSON.stringify(payload), 'utf-8');
     } catch (err) {
@@ -482,11 +521,17 @@ export class SheetsDatabaseManager {
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (!Array.isArray(row) || row.length === 0) continue;
+      const nonEmptyCells = row.some((c: any) => String(c ?? '').trim() !== '');
+      if (!nonEmptyCells) continue;
       const rawJson = jsonColIdx >= 0 ? row[jsonColIdx] : row[row.length - 1];
       if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
         try {
           const parsed = JSON.parse(rawJson);
           if (parsed && typeof parsed === 'object') {
+            const keys = Object.keys(parsed);
+            if (keys.length === 0 || (keys.length === 1 && keys[0] === 'id' && !parsed.id)) {
+              continue;
+            }
             if (dedupeById && parsed.id) {
               if (seenIds.has(String(parsed.id))) continue;
               seenIds.add(String(parsed.id));
@@ -499,6 +544,307 @@ export class SheetsDatabaseManager {
       }
     }
     return results;
+  }
+
+  private parseInvoicesFromSheet(rows: any[][] | undefined | null): FeeInvoice[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON') >= 0 ? headers.indexOf('_JSON') : 12;
+    const results: FeeInvoice[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const colId = String(row[0] || '').trim();
+      const colInvNo = String(row[1] || '').trim();
+      const colMonth = String(row[2] || '').trim();
+      const colAdm = String(row[3] || '').trim();
+      const colName = String(row[4] || '').trim();
+      if (!colId && !colInvNo && !colName) continue;
+
+      let parsedObj: Partial<FeeInvoice> | null = null;
+      const rawJson = row[jsonColIdx];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const p = JSON.parse(rawJson);
+          if (p && typeof p === 'object' && (p.id || p.invoiceNo || p.studentId || p.month)) {
+            parsedObj = p;
+          }
+        } catch {
+          parsedObj = null;
+        }
+      }
+
+      const matchedStu =
+        (parsedObj?.studentId ? this.students.find(s => s.id === parsedObj!.studentId) : undefined) ||
+        (colAdm
+          ? this.students.find(
+              s => String(s.admissionNo || '').trim().toLowerCase() === colAdm.toLowerCase()
+            )
+          : undefined) ||
+        (colName
+          ? this.students.find(
+              s => String(s.name || '').trim().toLowerCase() === colName.toLowerCase()
+            )
+          : undefined);
+
+      const id = String(parsedObj?.id || colId || `inv-row-${i}`).trim();
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+
+      const baseFee = Number(parsedObj?.baseFee ?? row[5] ?? 0) || 0;
+      const concession = Number(parsedObj?.concession ?? row[6] ?? 0) || 0;
+      const netAmount = Number(parsedObj?.netAmount ?? row[7] ?? Math.max(0, baseFee - concession)) || 0;
+      const paidAmount = Number(parsedObj?.paidAmount ?? row[8] ?? 0) || 0;
+      const balanceDue =
+        parsedObj?.balanceDue !== undefined
+          ? Number(parsedObj.balanceDue) || 0
+          : row[9] !== undefined && String(row[9]).trim() !== ''
+          ? Number(row[9]) || 0
+          : Math.max(0, netAmount - paidAmount);
+      const rawStatus = String(parsedObj?.status || row[10] || '').trim();
+      const status: FeeInvoice['status'] =
+        rawStatus === 'Paid' || rawStatus === 'Partially Paid' || rawStatus === 'Unpaid' || rawStatus === 'Suspended_Exempt'
+          ? rawStatus
+          : balanceDue <= 0
+          ? 'Paid'
+          : paidAmount > 0
+          ? 'Partially Paid'
+          : 'Unpaid';
+      const month = String(parsedObj?.month || colMonth || '2026-11').trim();
+      const studentId = String(parsedObj?.studentId || matchedStu?.id || '').trim();
+
+      results.push({
+        ...(parsedObj as any),
+        id,
+        invoiceNo: String(parsedObj?.invoiceNo || colInvNo || `INV-${i.toString().padStart(4, '0')}`).trim(),
+        studentId,
+        admissionNo: String(parsedObj?.admissionNo || colAdm || matchedStu?.admissionNo || '').trim(),
+        studentName: String(parsedObj?.studentName || colName || matchedStu?.name || 'Member').trim(),
+        campus: parsedObj?.campus || matchedStu?.campus,
+        month,
+        baseFee,
+        concession,
+        netAmount,
+        paidAmount,
+        balanceDue,
+        status,
+        dueDate: String(parsedObj?.dueDate || row[11] || `${month.slice(0, 7)}-10`).trim(),
+        idempotencyKey: String(
+          parsedObj?.idempotencyKey ||
+            (month.toLowerCase().includes('previous dues')
+              ? `PREV-DUES-${studentId || id}`
+              : `BILL-${month}-${studentId || id}`)
+        ).trim(),
+      });
+    }
+    return results;
+  }
+
+  private parseReceiptsFromSheet(
+    rows: any[][] | undefined | null,
+    prevAttachmentMap?: Map<string, string>
+  ): FeeReceipt[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON') >= 0 ? headers.indexOf('_JSON') : 14;
+    const attStartIdx = headers.indexOf('_ATT_1') >= 0 ? headers.indexOf('_ATT_1') : 15;
+    const results: FeeReceipt[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const colId = String(row[0] || '').trim();
+      const colReceiptNo = String(row[1] || '').trim();
+      const colDate = String(row[2] || '').trim();
+      const colAdm = String(row[3] || '').trim();
+      const colName = String(row[4] || '').trim();
+      if (!colId && !colReceiptNo && !colName) continue;
+
+      let parsedObj: Partial<FeeReceipt> | null = null;
+      const rawJson = row[jsonColIdx];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const p = JSON.parse(rawJson);
+          if (p && typeof p === 'object' && (p.id || p.receiptNo || p.studentId || p.amount !== undefined)) {
+            parsedObj = p;
+          }
+        } catch {
+          parsedObj = null;
+        }
+      }
+
+      const matchedStu =
+        (parsedObj?.studentId ? this.students.find(s => s.id === parsedObj!.studentId) : undefined) ||
+        (colAdm
+          ? this.students.find(
+              s => String(s.admissionNo || '').trim().toLowerCase() === colAdm.toLowerCase()
+            )
+          : undefined) ||
+        (colName
+          ? this.students.find(
+              s => String(s.name || '').trim().toLowerCase() === colName.toLowerCase()
+            )
+          : undefined);
+
+      const id = String(parsedObj?.id || colId || `rec-row-${i}`).trim();
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+
+      const receiptNo = String(
+        parsedObj?.receiptNo || colReceiptNo || `REC-2611-${i.toString().padStart(4, '0')}`
+      ).trim();
+      const amount = Number(parsedObj?.amount ?? row[5] ?? 0) || 0;
+      const discountAmount = Number(parsedObj?.discountAmount ?? row[6] ?? 0) || 0;
+      const lateFine = Number(parsedObj?.lateFine ?? parsedObj?.lateFineAmount ?? row[7] ?? 0) || 0;
+      const balanceDueBefore = Number(parsedObj?.balanceDueBefore ?? row[8] ?? 0) || 0;
+      const balanceDueAfter = Number(parsedObj?.balanceDueAfter ?? row[9] ?? 0) || 0;
+      const rawMode = String(parsedObj?.paymentMode || row[10] || 'Cash').trim();
+      const paymentMode: FeeReceipt['paymentMode'] =
+        rawMode === 'UPI' || rawMode === 'Bank' || rawMode === 'Cash' ? rawMode : 'Cash';
+      const referenceNo = String(parsedObj?.referenceNo ?? row[11] ?? '').trim();
+      const receivedBy = String(parsedObj?.receivedBy || row[12] || 'Transport Staff').trim();
+      const remarks = String(parsedObj?.remarks ?? row[13] ?? '').trim();
+
+      let upiScreenshot = parsedObj?.upiScreenshot;
+      if (row.length > attStartIdx) {
+        const joinedChunks = row
+          .slice(attStartIdx, attStartIdx + 5)
+          .map((c: any) => String(c || ''))
+          .join('');
+        if (joinedChunks.startsWith('data:')) {
+          upiScreenshot = joinedChunks;
+        }
+      }
+      if ((!upiScreenshot || upiScreenshot === '[ATTACHMENT_STORED]') && prevAttachmentMap) {
+        const preserved = prevAttachmentMap.get(id) || prevAttachmentMap.get(receiptNo);
+        if (preserved) {
+          upiScreenshot = preserved;
+        }
+      }
+
+      results.push({
+        ...(parsedObj as any),
+        id,
+        receiptNo,
+        date: String(parsedObj?.date || colDate || '2026-11-02').trim(),
+        studentId: String(parsedObj?.studentId || matchedStu?.id || '').trim(),
+        admissionNo: String(parsedObj?.admissionNo || colAdm || matchedStu?.admissionNo || '').trim(),
+        studentName: String(parsedObj?.studentName || colName || matchedStu?.name || 'Member').trim(),
+        campus: parsedObj?.campus || matchedStu?.campus,
+        amount,
+        discountAmount,
+        lateFine,
+        lateFineAmount: lateFine,
+        balanceDueBefore,
+        balanceDueAfter,
+        advanceLiabilityAmount: Number(parsedObj?.advanceLiabilityAmount ?? 0) || 0,
+        feeBreakupDescription: String(
+          parsedObj?.feeBreakupDescription || remarks || 'Transport Fee'
+        ).trim(),
+        paymentMode,
+        referenceNo,
+        upiScreenshot,
+        receivedBy,
+        remarks,
+      });
+    }
+    return results;
+  }
+
+  private parseAttendanceFromSheet(rows: any[][] | undefined | null): TripAttendanceRecord[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON') >= 0 ? headers.indexOf('_JSON') : 10;
+    const results: TripAttendanceRecord[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const colId = String(row[0] || '').trim();
+      const colDate = String(row[1] || '').trim();
+      const colTripId = String(row[2] || '').trim();
+      const colAdm = String(row[3] || '').trim();
+      const colName = String(row[4] || '').trim();
+      if (!colId && !colTripId && !colName) continue;
+
+      let parsedObj: Partial<TripAttendanceRecord> | null = null;
+      const rawJson = row[jsonColIdx];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const p = JSON.parse(rawJson);
+          if (p && typeof p === 'object' && (p.id || p.tripId || p.studentId)) {
+            parsedObj = p;
+          }
+        } catch {
+          parsedObj = null;
+        }
+      }
+
+      const id = String(parsedObj?.id || colId || `att-row-${i}`).trim();
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+
+      const tripId = String(parsedObj?.tripId || colTripId || '').trim();
+      let inferredStuId = String(parsedObj?.studentId || '').trim();
+      if (!inferredStuId && tripId && id.startsWith(`att-${tripId}-`)) {
+        inferredStuId = id.slice(`att-${tripId}-`.length);
+      }
+      const matchedStu =
+        (inferredStuId ? this.students.find(s => s.id === inferredStuId) : undefined) ||
+        (colAdm
+          ? this.students.find(
+              s => String(s.admissionNo || '').trim().toLowerCase() === colAdm.toLowerCase()
+            )
+          : undefined);
+
+      results.push({
+        ...(parsedObj as any),
+        id,
+        tripId,
+        date: String(parsedObj?.date || colDate || '').trim(),
+        studentId: inferredStuId || matchedStu?.id || '',
+        admissionNo: String(parsedObj?.admissionNo || colAdm || matchedStu?.admissionNo || '').trim(),
+        studentName: String(parsedObj?.studentName || colName || matchedStu?.name || 'Member').trim(),
+        classSection: String(parsedObj?.classSection || row[5] || '').trim(),
+        stopName: String(parsedObj?.stopName || row[6] || '').trim(),
+        transportStatus: (parsedObj?.transportStatus || matchedStu?.transportStatus || 'Active') as any,
+        driverStatus: (parsedObj?.driverStatus || row[7] || 'Pending') as any,
+        assistantStatus: (parsedObj?.assistantStatus || row[8] || 'Pending') as any,
+        reconciliationStatus: (parsedObj?.reconciliationStatus || row[9] || 'Assistant_Pending') as any,
+      });
+    }
+    return results;
+  }
+
+  private unionPermanentRecords<T extends { id: string }>(
+    primaryList: T[],
+    secondaryList: T[],
+    extraUniqueKey?: (item: T) => string | undefined
+  ): T[] {
+    const out: T[] = [];
+    const seenIds = new Set<string>();
+    const seenExtra = new Set<string>();
+
+    const pushItem = (item: T) => {
+      if (!item || !item.id) return;
+      const cleanId = String(item.id).trim();
+      if (!cleanId || this.explicitlyDeletedIds.has(cleanId)) return;
+      const extra = extraUniqueKey ? String(extraUniqueKey(item) || '').trim() : '';
+      if (extra && this.explicitlyDeletedIds.has(extra)) return;
+      if (seenIds.has(cleanId)) return;
+      if (extra && seenExtra.has(extra)) return;
+      seenIds.add(cleanId);
+      if (extra) seenExtra.add(extra);
+      out.push(item);
+    };
+
+    for (const item of primaryList) pushItem(item);
+    for (const item of secondaryList) pushItem(item);
+    return out;
   }
 
   private parseSystemUsersFromSheet(rows: any[][] | undefined | null): SystemUser[] {
@@ -634,6 +980,22 @@ export class SheetsDatabaseManager {
                 // ignore malformed JSON
               }
             }
+            const deletedIdsRow = schoolMastersRows.find(
+              r => Array.isArray(r) && String(r[0] || '').trim() === 'DeletedIds_JSON'
+            );
+            if (deletedIdsRow && typeof deletedIdsRow[1] === 'string' && deletedIdsRow[1].trim().startsWith('[')) {
+              try {
+                const parsedDel = JSON.parse(deletedIdsRow[1]);
+                if (Array.isArray(parsedDel)) {
+                  for (const dId of parsedDel) {
+                    const clean = String(dId || '').trim();
+                    if (clean) this.explicitlyDeletedIds.add(clean);
+                  }
+                }
+              } catch {
+                // ignore malformed JSON
+              }
+            }
             if (!parsedJsonOk) {
               const classesRow = schoolMastersRows.find(r => Array.isArray(r) && String(r[0] || '').trim() === 'Classes');
               if (classesRow && classesRow.length > 1) {
@@ -679,26 +1041,49 @@ export class SheetsDatabaseManager {
       if ((tabMap.get('Employees_Staff') || []).length >= 1) {
         this.employees = this.parseRowsFromSheet<Employee>(tabMap.get('Employees_Staff'), true);
       }
+      const keepRecentLocalLedgers =
+        this.pendingRemoteSync ||
+        this.isFlushingRemoteSync ||
+        (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 90000);
+
       if ((tabMap.get('Staff_Attendance') || []).length >= 1) {
-        this.staffAttendance = this.parseRowsFromSheet<StaffAttendanceRecord>(tabMap.get('Staff_Attendance'), true);
+        const remote = this.parseRowsFromSheet<StaffAttendanceRecord>(tabMap.get('Staff_Attendance'), true);
+        this.staffAttendance = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.staffAttendance, remote)
+          : remote;
       }
       if ((tabMap.get('Staff_Advances') || []).length >= 1) {
-        this.staffAdvances = this.parseRowsFromSheet<StaffAdvanceRecord>(tabMap.get('Staff_Advances'), true);
+        const remote = this.parseRowsFromSheet<StaffAdvanceRecord>(tabMap.get('Staff_Advances'), true);
+        this.staffAdvances = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.staffAdvances, remote)
+          : remote;
       }
       if ((tabMap.get('Staff_Payroll') || []).length >= 1) {
-        this.staffPayrolls = this.parseRowsFromSheet<StaffPayrollRecord>(tabMap.get('Staff_Payroll'), true);
+        const remote = this.parseRowsFromSheet<StaffPayrollRecord>(tabMap.get('Staff_Payroll'), true);
+        this.staffPayrolls = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.staffPayrolls, remote)
+          : remote;
       }
       if ((tabMap.get('Holidays_Calendar') || []).length >= 1) {
         this.holidays = this.parseRowsFromSheet<HolidayRecord>(tabMap.get('Holidays_Calendar'), true);
       }
       if ((tabMap.get('Daily_Trips') || []).length >= 1) {
-        this.trips = this.parseRowsFromSheet<DailyTrip>(tabMap.get('Daily_Trips'), true);
+        const remote = this.parseRowsFromSheet<DailyTrip>(tabMap.get('Daily_Trips'), true);
+        this.trips = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.trips, remote)
+          : remote;
       }
       if ((tabMap.get('Trip_Attendance') || []).length >= 1) {
-        this.attendance = this.parseRowsFromSheet<TripAttendanceRecord>(tabMap.get('Trip_Attendance'), true);
+        const remote = this.parseAttendanceFromSheet(tabMap.get('Trip_Attendance'));
+        this.attendance = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.attendance, remote)
+          : remote;
       }
       if ((tabMap.get('Daily_Log_Book_24H') || []).length >= 1) {
-        this.odometerLogs = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true);
+        const remote = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true);
+        this.odometerLogs = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.odometerLogs, remote)
+          : remote;
       }
       if ((tabMap.get('Driver_Fuel_Advances') || []).length >= 1) {
         this.fuelAdvances = this.parseRowsFromSheet<FuelAdvanceAndPurchase>(tabMap.get('Driver_Fuel_Advances'), true);
@@ -710,16 +1095,25 @@ export class SheetsDatabaseManager {
         this.expenseHeads = this.parseRowsFromSheet<ExpenseHead>(tabMap.get('Expense_Heads'), true);
       }
       if ((tabMap.get('Expenses_Fuel_Ledger') || []).length >= 1) {
-        this.expenses = this.parseRowsFromSheet<ExpenseRecord>(tabMap.get('Expenses_Fuel_Ledger'), true);
+        const remote = this.parseRowsFromSheet<ExpenseRecord>(tabMap.get('Expenses_Fuel_Ledger'), true);
+        this.expenses = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.expenses, remote, e => e.expenseNo)
+          : remote.filter(e => !this.explicitlyDeletedIds.has(e.id));
       }
       if ((tabMap.get('Income_Heads') || []).length >= 1) {
         this.incomeHeads = this.parseRowsFromSheet<IncomeHead>(tabMap.get('Income_Heads'), true);
       }
       if ((tabMap.get('Other_Incomes') || []).length >= 1) {
-        this.incomes = this.parseRowsFromSheet<IncomeRecord>(tabMap.get('Other_Incomes'), true);
+        const remote = this.parseRowsFromSheet<IncomeRecord>(tabMap.get('Other_Incomes'), true);
+        this.incomes = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.incomes, remote, i => i.incomeNo)
+          : remote.filter(i => !this.explicitlyDeletedIds.has(i.id));
       }
       if ((tabMap.get('Fee_Invoices') || []).length >= 1) {
-        this.invoices = this.parseRowsFromSheet<FeeInvoice>(tabMap.get('Fee_Invoices'), true);
+        const remoteInvoices = this.parseInvoicesFromSheet(tabMap.get('Fee_Invoices'));
+        this.invoices = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.invoices, remoteInvoices, inv => inv.idempotencyKey)
+          : remoteInvoices.filter(inv => !this.explicitlyDeletedIds.has(inv.id));
       }
       if ((tabMap.get('Fee_Receipts') || []).length >= 1) {
         const rawReceiptRows = tabMap.get('Fee_Receipts') || [];
@@ -734,51 +1128,40 @@ export class SheetsDatabaseManager {
             if (oldRec.receiptNo) prevAttachmentMap.set(oldRec.receiptNo, oldRec.upiScreenshot);
           }
         }
-        const parsedReceipts = this.parseRowsFromSheet<FeeReceipt>(rawReceiptRows, true);
-        // Reassemble overflow attachment chunks (columns P..T) if present, or preserve in-memory data URL
-        const chunkMap = new Map<string, string>();
-        for (let rIdx = 1; rIdx < rawReceiptRows.length; rIdx++) {
-          const rRow = rawReceiptRows[rIdx];
-          if (!Array.isArray(rRow) || rRow.length <= 15) continue;
-          const rId = String(rRow[0] || '').trim();
-          const rNo = String(rRow[1] || '').trim();
-          const joinedChunks = rRow
-            .slice(15)
-            .map(c => String(c || ''))
-            .join('');
-          if (joinedChunks.startsWith('data:')) {
-            if (rId) chunkMap.set(rId, joinedChunks);
-            if (rNo) chunkMap.set(rNo, joinedChunks);
-          }
-        }
-        for (const rec of parsedReceipts) {
-          const chunkedAtt = chunkMap.get(rec.id) || chunkMap.get(rec.receiptNo);
-          if (chunkedAtt) {
-            rec.upiScreenshot = chunkedAtt;
-          } else if (!rec.upiScreenshot || rec.upiScreenshot === '[ATTACHMENT_STORED]') {
-            const preserved = prevAttachmentMap.get(rec.id) || prevAttachmentMap.get(rec.receiptNo);
-            if (preserved) {
-              rec.upiScreenshot = preserved;
-            }
-          }
-        }
-        this.receipts = parsedReceipts;
+        const parsedReceipts = this.parseReceiptsFromSheet(rawReceiptRows, prevAttachmentMap);
+        this.receipts = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.receipts, parsedReceipts, r => r.receiptNo)
+          : parsedReceipts.filter(
+              r => !this.explicitlyDeletedIds.has(r.id) && !this.explicitlyDeletedIds.has(r.receiptNo)
+            );
       }
       if ((tabMap.get('Fee_FollowUps') || []).length >= 1) {
-        this.followUps = this.parseRowsFromSheet<FollowUpRecord>(tabMap.get('Fee_FollowUps'), true);
+        const remote = this.parseRowsFromSheet<FollowUpRecord>(tabMap.get('Fee_FollowUps'), true);
+        this.followUps = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.followUps, remote)
+          : remote.filter(f => !this.explicitlyDeletedIds.has(f.id));
       }
       if ((tabMap.get('Warning_Letters') || []).length >= 1) {
-        this.warningLetters = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
+        const remote = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
+        this.warningLetters = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.warningLetters, remote)
+          : remote;
       }
       if ((tabMap.get('Discipline_Records') || []).length >= 1) {
-        this.disciplineRecords = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
+        const remote = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
+        this.disciplineRecords = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.disciplineRecords, remote)
+          : remote.filter(d => !this.explicitlyDeletedIds.has(d.id));
       }
       if ((tabMap.get('Chart_Of_Accounts') || []).length >= 1) {
         const acc = this.parseRowsFromSheet<AccountHead>(tabMap.get('Chart_Of_Accounts'), true);
         if (acc.length > 0) this.accounts = acc;
       }
       if ((tabMap.get('Journal_Vouchers') || []).length >= 1) {
-        this.vouchers = this.parseRowsFromSheet<JournalVoucher>(tabMap.get('Journal_Vouchers'), true);
+        const remote = this.parseRowsFromSheet<JournalVoucher>(tabMap.get('Journal_Vouchers'), true);
+        this.vouchers = keepRecentLocalLedgers
+          ? this.unionPermanentRecords(this.vouchers, remote, v => v.voucherNo)
+          : remote;
       }
 
       const users = this.parseSystemUsersFromSheet(tabMap.get('System_Users'));
@@ -786,16 +1169,17 @@ export class SheetsDatabaseManager {
         this.systemUsers = users;
       }
 
+          this.hasHydratedFromSheets = true;
+          this.lastConnectedState = true;
           const seededNew = this.ensureSeededRouteMembers();
           this.rebuildScheduledServices();
           this.saveLocalSnapshot();
-          this.hasHydratedFromSheets = true;
-          this.lastConnectedState = true;
           this.lastHydratedAt = Date.now();
           this.lastError = null;
           if (seededNew) {
             // Fire-and-forget targeted sync so GET /api/bootstrap never blocks on writing 29 tabs
             this.flushToGoogleSheetsRemote([
+              'School_Masters',
               'Fee_Receipts',
               'Fee_Invoices',
               'Members_Transport',
@@ -879,14 +1263,11 @@ export class SheetsDatabaseManager {
     const execution = this.writeQueue.then(async () => {
       try {
         await this.initPromise;
-        const recentlyWroteLocally =
-          this.pendingRemoteSync ||
-          this.isFlushingRemoteSync ||
-          (this.lastLocalWriteAt > 0 && Date.now() - this.lastLocalWriteAt < 180000);
+        const activelySyncingLocally = this.pendingRemoteSync || this.isFlushingRemoteSync;
         if (
           this.isGoogleConfigured &&
           (!this.hasHydratedFromSheets ||
-            (Boolean(process.env.VERCEL) && !recentlyWroteLocally && Date.now() - this.lastHydratedAt > 45000))
+            (!activelySyncingLocally && Date.now() - this.lastHydratedAt > 15000))
         ) {
           await this.hydrateFromGoogleSheets(true);
         }
@@ -1221,12 +1602,144 @@ export class SheetsDatabaseManager {
     }
   }
 
+  private async mergeRemotePermanentTabsBeforeFlush(onlyTabs?: string[]): Promise<void> {
+    if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) return;
+    const permanentTabs = [
+      'Fee_Receipts',
+      'Fee_Invoices',
+      'Trip_Attendance',
+      'Daily_Trips',
+      'Expenses_Fuel_Ledger',
+      'Other_Incomes',
+      'Journal_Vouchers',
+      'Staff_Attendance',
+      'Fee_FollowUps',
+      'Warning_Letters',
+    ];
+    const tabsToCheck =
+      onlyTabs && onlyTabs.length > 0
+        ? permanentTabs.filter(t => onlyTabs.includes(t))
+        : permanentTabs;
+    if (tabsToCheck.length === 0) return;
+
+    try {
+      const batchRes = await this.sheetsClient.spreadsheets.values.batchGet({
+        spreadsheetId: this.sheetId,
+        ranges: tabsToCheck.map(t => `${t}!A1:Z`),
+      });
+      const valueRanges: any[] = batchRes.data?.valueRanges || [];
+      const remoteMap = new Map<string, any[][]>();
+      tabsToCheck.forEach((t, i) => {
+        remoteMap.set(t, valueRanges[i]?.values || []);
+      });
+
+      let feesMerged = false;
+
+      if (remoteMap.has('Fee_Receipts')) {
+        const prevAttachmentMap = new Map<string, string>();
+        for (const r of this.receipts) {
+          if (r.upiScreenshot && r.upiScreenshot.startsWith('data:')) {
+            prevAttachmentMap.set(r.id, r.upiScreenshot);
+            if (r.receiptNo) prevAttachmentMap.set(r.receiptNo, r.upiScreenshot);
+          }
+        }
+        const remoteReceipts = this.parseReceiptsFromSheet(remoteMap.get('Fee_Receipts'), prevAttachmentMap);
+        const beforeCount = this.receipts.length;
+        this.receipts = this.unionPermanentRecords(this.receipts, remoteReceipts, r => r.receiptNo);
+        if (this.receipts.length !== beforeCount) {
+          feesMerged = true;
+        }
+      }
+
+      if (remoteMap.has('Fee_Invoices')) {
+        const remoteInvoices = this.parseInvoicesFromSheet(remoteMap.get('Fee_Invoices'));
+        // Never downgrade an invoice that was already marked Paid remotely unless Admin just reverted that student
+        for (const rInv of remoteInvoices) {
+          if (this.explicitlyDeletedIds.has(rInv.id)) continue;
+          const localInv = this.invoices.find(
+            l =>
+              l.id === rInv.id ||
+              (Boolean(l.idempotencyKey) && l.idempotencyKey === rInv.idempotencyKey)
+          );
+          if (
+            localInv &&
+            !this.recentlyRevertedStudentIds.has(localInv.studentId) &&
+            (Number(rInv.paidAmount) || 0) > (Number(localInv.paidAmount) || 0)
+          ) {
+            localInv.paidAmount = Number(rInv.paidAmount) || 0;
+            localInv.balanceDue = Math.max(0, (Number(localInv.netAmount) || 0) - localInv.paidAmount);
+            localInv.status =
+              localInv.balanceDue <= 0
+                ? 'Paid'
+                : localInv.paidAmount > 0
+                ? 'Partially Paid'
+                : 'Unpaid';
+            feesMerged = true;
+          }
+        }
+        const beforeInvCount = this.invoices.length;
+        this.invoices = this.unionPermanentRecords(this.invoices, remoteInvoices, i => i.idempotencyKey);
+        if (this.invoices.length !== beforeInvCount) {
+          feesMerged = true;
+        }
+      }
+
+      if (remoteMap.has('Trip_Attendance')) {
+        const remoteAtt = this.parseAttendanceFromSheet(remoteMap.get('Trip_Attendance'));
+        this.attendance = this.unionPermanentRecords(this.attendance, remoteAtt);
+      }
+      if (remoteMap.has('Daily_Trips')) {
+        const remoteTrips = this.parseRowsFromSheet<DailyTrip>(remoteMap.get('Daily_Trips'), true);
+        this.trips = this.unionPermanentRecords(this.trips, remoteTrips);
+      }
+      if (remoteMap.has('Expenses_Fuel_Ledger')) {
+        const remoteExp = this.parseRowsFromSheet<ExpenseRecord>(remoteMap.get('Expenses_Fuel_Ledger'), true);
+        this.expenses = this.unionPermanentRecords(this.expenses, remoteExp, e => e.expenseNo);
+      }
+      if (remoteMap.has('Other_Incomes')) {
+        const remoteInc = this.parseRowsFromSheet<IncomeRecord>(remoteMap.get('Other_Incomes'), true);
+        this.incomes = this.unionPermanentRecords(this.incomes, remoteInc, i => i.incomeNo);
+      }
+      if (remoteMap.has('Journal_Vouchers')) {
+        const remoteVch = this.parseRowsFromSheet<JournalVoucher>(remoteMap.get('Journal_Vouchers'), true);
+        this.vouchers = this.unionPermanentRecords(this.vouchers, remoteVch, v => v.voucherNo);
+      }
+      if (remoteMap.has('Staff_Attendance')) {
+        const remoteSa = this.parseRowsFromSheet<StaffAttendanceRecord>(remoteMap.get('Staff_Attendance'), true);
+        this.staffAttendance = this.unionPermanentRecords(this.staffAttendance, remoteSa);
+      }
+      if (remoteMap.has('Fee_FollowUps')) {
+        const remoteFu = this.parseRowsFromSheet<FollowUpRecord>(remoteMap.get('Fee_FollowUps'), true);
+        this.followUps = this.unionPermanentRecords(this.followUps, remoteFu);
+      }
+      if (remoteMap.has('Warning_Letters')) {
+        const remoteWl = this.parseRowsFromSheet<WarningLetter>(remoteMap.get('Warning_Letters'), true);
+        this.warningLetters = this.unionPermanentRecords(this.warningLetters, remoteWl);
+      }
+
+      if (feesMerged) {
+        this.purgeOctober2026AppliedFeesAndSyncBalances();
+        this.saveLocalSnapshot();
+      }
+    } catch {
+      // Non-fatal: proceed with flush if pre-read transiently fails
+    }
+  }
+
   private async flushToGoogleSheetsRemote(
     onlyTabs?: string[]
   ): Promise<{ success: boolean; message: string }> {
     if (!this.isGoogleConfigured || !this.sheetsClient || !this.sheetId) {
       return { success: false, message: 'Google Sheets credentials are not configured.' };
     }
+
+    // Never allow an unhydrated container to overwrite Google Sheets with local/seed data
+    if (!this.hasHydratedFromSheets) {
+      await this.hydrateFromGoogleSheets(true);
+    }
+
+    // Union any remote permanent ledger rows written by other devices/containers before overwriting tabs
+    await this.mergeRemotePermanentTabsBeforeFlush(onlyTabs);
 
     try {
       const dataPayload = [
@@ -1251,8 +1764,6 @@ export class SheetsDatabaseManager {
                 sectionsMaster: this.sectionsMaster,
                 tripsMaster: this.tripsMaster,
                 designationsMaster: this.designationsMaster,
-                absenteeCalls: this.absenteeCalls.slice(0, 250),
-                complaints: this.complaints.slice(0, 150),
               }),
             ],
             [],
@@ -1263,17 +1774,18 @@ export class SheetsDatabaseManager {
             ['Sections', ...this.sectionsMaster],
             ['Trips', ...this.tripsMaster.map(t => `Trip ${t.tripNumber}: ${t.description}`)],
             ['Designations', ...this.designationsMaster.map(d => d.name)],
-            ['AbsenteeCalls_JSON', stripLargeBase64ForSheetCell(this.absenteeCalls.slice(0, 500))],
-            ['Complaints_JSON', stripLargeBase64ForSheetCell(this.complaints.slice(0, 300))],
+            ['AbsenteeCalls_JSON', serializeBoundedJsonArray(this.absenteeCalls)],
+            ['Complaints_JSON', serializeBoundedJsonArray(this.complaints)],
             [
               'MemberRequests_JSON',
-              stripLargeBase64ForSheetCell(
-                this.memberRequests.slice(0, 200).map(r => ({
+              serializeBoundedJsonArray(
+                this.memberRequests.map(r => ({
                   ...r,
                   memberPayload: r.memberPayload ? { ...r.memberPayload, profilePhoto: '' } : undefined,
                 }))
               ),
             ],
+            ['DeletedIds_JSON', JSON.stringify(Array.from(this.explicitlyDeletedIds).slice(-600))],
           ],
         },
         {
@@ -1744,8 +2256,8 @@ export class SheetsDatabaseManager {
                 typeof rec.upiScreenshot === 'string' && rec.upiScreenshot.startsWith('data:')
                   ? rec.upiScreenshot
                   : '';
-              // If attachment exceeds 38,000 chars, store chunks across _ATT_1.._ATT_5 (up to 200 KB)
-              const needsChunks = rawAtt.length > 38000 && rawAtt.length <= 200000;
+              // Store screenshots > 20,000 chars across _ATT_1.._ATT_5 (up to 220 KB) and strip from _JSON so _JSON never overflows 50k cell limit
+              const needsChunks = rawAtt.length > 20000 && rawAtt.length <= 220000;
               return [
                 rec.id,
                 rec.receiptNo,
@@ -1761,12 +2273,12 @@ export class SheetsDatabaseManager {
                 rec.referenceNo || '',
                 rec.receivedBy,
                 rec.remarks || '',
-                stripLargeBase64ForSheetCell(rec),
-                needsChunks ? rawAtt.slice(0, 40000) : '',
-                needsChunks ? rawAtt.slice(40000, 80000) : '',
-                needsChunks ? rawAtt.slice(80000, 120000) : '',
-                needsChunks ? rawAtt.slice(120000, 160000) : '',
-                needsChunks ? rawAtt.slice(160000, 200000) : '',
+                stripLargeBase64ForSheetCell(rec, needsChunks ? ['upiScreenshot'] : []),
+                needsChunks ? rawAtt.slice(0, 44000) : '',
+                needsChunks ? rawAtt.slice(44000, 88000) : '',
+                needsChunks ? rawAtt.slice(88000, 132000) : '',
+                needsChunks ? rawAtt.slice(132000, 176000) : '',
+                needsChunks ? rawAtt.slice(176000, 220000) : '',
               ];
             }),
           ],
@@ -1943,6 +2455,7 @@ export class SheetsDatabaseManager {
         throw syncErr;
       }
 
+      this.recentlyRevertedStudentIds.clear();
       this.lastSyncAt = new Date().toISOString();
       this.lastConnectedState = true;
       this.lastError = null;
@@ -3809,33 +4322,7 @@ export class SheetsDatabaseManager {
       }
     }
 
-    // 3. Remove all October 2026 ('2026-10' / 'October 2026') monthly transport fee invoices while preserving Previous Dues
-    const beforeInvLen = this.invoices.length;
-    this.invoices = this.invoices.filter(inv => {
-      const m = String(inv.month || '').trim().toLowerCase();
-      const key = String(inv.idempotencyKey || '').trim();
-      // Always keep Previous Dues invoices intact
-      if (key.startsWith('PREV-DUES-') || m.includes('previous dues')) {
-        return true;
-      }
-      if (
-        m === '2026-10' ||
-        m === 'october 2026' ||
-        m === 'oct 2026' ||
-        m === 'oct' ||
-        key.startsWith('BILL-2026-10-') ||
-        key.startsWith('BILL-October 2026-')
-      ) {
-        return false;
-      }
-      return true;
-    });
-
-    if (this.invoices.length !== beforeInvLen) {
-      changed = true;
-    }
-
-    // 4. Sync every student's monthlyFee and reconcile monthly invoices (including November 2026 '2026-11' auto-due & trial invoices) with Village/Stop Fee Structure
+    // 3 & 4. Sync every student's monthlyFee and reconcile unpaid/upcoming monthly invoices with Village/Stop Fee Structure (never auto-deleting any existing invoice or receipt)
     for (const st of this.students) {
       const matchedVil =
         this.villages.find(v => st.villageId && v.id === st.villageId) ||
@@ -3886,29 +4373,16 @@ export class SheetsDatabaseManager {
         const effectiveMonth =
           matchedStop?.effectiveFromMonth || matchedVil.effectiveFromMonth || '2026-11';
 
-        if (expectedFee === 0) {
-          const beforeZeroFilter = this.invoices.length;
-          this.invoices = this.invoices.filter(
-            inv =>
-              !(
-                inv.studentId === st.id &&
-                !String(inv.idempotencyKey || '').startsWith('PREV-DUES-') &&
-                !String(inv.month || '').toLowerCase().includes('previous dues') &&
-                (Number(inv.paidAmount) || 0) === 0
-              )
-          );
-          if (this.invoices.length !== beforeZeroFilter) {
-            changed = true;
-          }
-        } else {
+        if (expectedFee > 0) {
           for (const inv of this.invoices) {
             if (inv.studentId !== st.id) continue;
+            // Never alter already Paid invoices retroactively
+            if (inv.status === 'Paid' && (Number(inv.paidAmount) || 0) > 0) continue;
             const key = String(inv.idempotencyKey || '').trim();
             const mStr = String(inv.month || '').trim();
             if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) {
               continue;
             }
-            // If an explicit future effectiveFromMonth is set on the stop/village (e.g. '2026-12'), do not alter earlier months ('2026-11')
             if (/^\d{4}-\d{2}$/.test(mStr) && mStr < effectiveMonth) {
               continue;
             }
@@ -3938,32 +4412,6 @@ export class SheetsDatabaseManager {
             }
           }
         }
-      } else if (st.transportStatus === 'Left') {
-        // Member has Left transport facility: no further monthly fees should be charged after leaving date,
-        // while preserving any unpaid invoices/previous dues charged before marking Left.
-        const leavingDateMatch = String((st as any).leavingDate || st.statusReason || '').match(/\d{4}-\d{2}-\d{2}/);
-        const leavingMonth = leavingDateMatch ? leavingDateMatch[0].slice(0, 7) : '';
-        if (leavingMonth) {
-          const beforeLeftFilter = this.invoices.length;
-          this.invoices = this.invoices.filter(inv => {
-            if (inv.studentId !== st.id) return true;
-            const key = String(inv.idempotencyKey || '').trim();
-            const mStr = String(inv.month || '').trim();
-            if (key.startsWith('PREV-DUES-') || mStr.toLowerCase().includes('previous dues')) {
-              return true;
-            }
-            if ((Number(inv.paidAmount) || 0) > 0) {
-              return true;
-            }
-            if (/^\d{4}-\d{2}$/.test(mStr) && mStr > leavingMonth) {
-              return false;
-            }
-            return true;
-          });
-          if (this.invoices.length !== beforeLeftFilter) {
-            changed = true;
-          }
-        }
       }
 
       if ((Number(st.previousDues) || 0) > 0) {
@@ -3971,57 +4419,29 @@ export class SheetsDatabaseManager {
       }
     }
 
-    // 4b. Automatically purge lag-induced duplicate receipts (where user clicked Save repeatedly and advanceLiabilityAmount >= feePortion)
-    if (this.receipts.length > 1) {
-      const chronological = [...this.receipts].reverse();
-      const seenKeys = new Set<string>();
-      const keptChronological: FeeReceipt[] = [];
-      for (const rec of chronological) {
-        const sig = `${rec.studentId}|${rec.date}|${Number(rec.amount) || 0}|${String(rec.feeBreakupDescription || '').trim().toLowerCase()}`;
-        const netPaid = Math.max(0, Number(rec.amount) || 0);
-        const lateFine = Math.max(0, Number(rec.lateFine ?? rec.lateFineAmount) || 0);
-        const feePortion = Math.max(0, netPaid - lateFine);
-        if (seenKeys.has(sig) && feePortion > 0) {
-          changed = true;
-          continue;
-        }
-        seenKeys.add(sig);
-        keptChronological.push(rec);
+    // 4b. Never auto-delete or renumber existing receipts; only assign a receiptNo if a record is missing one completely
+    const existingReceiptNos = new Set<string>(
+      this.receipts.map(r => String(r.receiptNo || '').trim()).filter(Boolean)
+    );
+    let maxExistingSeq = 0;
+    for (const rNo of existingReceiptNos) {
+      const m = /^REC-\d{4}-(\d+)$/.exec(rNo);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (!isNaN(n) && n > maxExistingSeq) maxExistingSeq = n;
       }
-      if (keptChronological.length !== this.receipts.length) {
-        // Ensure unique sequential receipt numbers in chronological order
-        const usedReceiptNos = new Set<string>();
-        for (let i = 0; i < keptChronological.length; i++) {
-          const r = keptChronological[i];
-          const ymPrefix = r.receiptNo && /^REC-\d{4}-/.test(r.receiptNo)
-            ? r.receiptNo.slice(0, 9)
-            : `REC-${String(r.date || '2026-11').slice(2, 7).replace('-', '')}-`;
-          const candidateNo = `${ymPrefix}${(i + 1).toString().padStart(4, '0')}`;
-          if (!r.receiptNo || usedReceiptNos.has(r.receiptNo) || r.receiptNo !== candidateNo) {
-            r.receiptNo = candidateNo;
-            changed = true;
-          }
-          usedReceiptNos.add(r.receiptNo);
-        }
-        this.receipts = keptChronological.reverse();
-      } else {
-        // Still fix any duplicate receiptNo (e.g. two REC-2611-0004)
-        const usedReceiptNos = new Set<string>();
-        for (let i = 0; i < keptChronological.length; i++) {
-          const r = keptChronological[i];
-          if (usedReceiptNos.has(r.receiptNo)) {
-            const ymPrefix = r.receiptNo && /^REC-\d{4}-/.test(r.receiptNo)
-              ? r.receiptNo.slice(0, 9)
-              : `REC-${String(r.date || '2026-11').slice(2, 7).replace('-', '')}-`;
-            r.receiptNo = `${ymPrefix}${(i + 1).toString().padStart(4, '0')}`;
-            changed = true;
-          }
-          usedReceiptNos.add(r.receiptNo);
-        }
+    }
+    for (const r of this.receipts) {
+      if (!r.receiptNo || !String(r.receiptNo).trim()) {
+        maxExistingSeq++;
+        const ymPrefix = `REC-${String(r.date || '2026-11').slice(2, 7).replace('-', '')}-`;
+        r.receiptNo = `${ymPrefix}${maxExistingSeq.toString().padStart(4, '0')}`;
+        existingReceiptNos.add(r.receiptNo);
+        changed = true;
       }
     }
 
-    // 4b-2. Backfill campus, studentId, and normalized admissionNo on all receipts & invoices using strict ID/admissionNo lookup (never name-only when ID/admissionNo exists)
+    // 4b-2. Backfill campus, studentId, and normalized admissionNo on all receipts & invoices using strict ID/admissionNo lookup
     const normAdmHelper = (adm?: string | null) =>
       String(adm || '')
         .trim()
@@ -4094,7 +4514,7 @@ export class SheetsDatabaseManager {
       }
     }
 
-    // 4c. Deterministically replay each student's receipts against their invoices so student.balanceDue and invoice status never drift across days
+    // 4c. Non-destructively reconcile each student's receipts against their invoices (never resetting already Paid invoices when receipts are absent)
     for (const st of this.students) {
       const stAdmNorm = normAdmHelper(st.admissionNo);
       const studentInvoices = this.invoices.filter(inv => inv.studentId === st.id);
@@ -4107,12 +4527,23 @@ export class SheetsDatabaseManager {
         .slice()
         .reverse();
 
+      const existingPaidOnInvoices = studentInvoices.reduce(
+        (sum, inv) => sum + Math.max(0, Number(inv.paidAmount) || 0),
+        0
+      );
+      const totalReceiptCredit = studentReceiptsChron.reduce((sum, r) => {
+        const netPaid = Math.max(0, Number(r.amount) || 0);
+        const fine = Math.max(0, Number(r.lateFine ?? r.lateFineAmount) || 0);
+        const disc = Math.max(0, Number(r.discountAmount) || 0);
+        return sum + Math.max(0, netPaid - fine) + disc;
+      }, 0);
+
       if (
         studentInvoices.length > 0 &&
-        (studentReceiptsChron.length > 0 ||
-          studentInvoices.some(inv => (Number(inv.paidAmount) || 0) > 0 || inv.status === 'Paid'))
+        studentReceiptsChron.length > 0 &&
+        totalReceiptCredit >= existingPaidOnInvoices
       ) {
-        // Reset student invoices to base state before replaying receipts
+        // Safe to replay receipts onto student's invoices
         for (const inv of studentInvoices) {
           const key = String(inv.idempotencyKey || '').trim();
           const mStr = String(inv.month || '').trim();
@@ -4123,12 +4554,7 @@ export class SheetsDatabaseManager {
             ? 0
             : Math.min(base, Math.max(0, Number(st.concessionAmount) || 0));
           const expectedNet = Math.max(0, base - stdConc);
-          if (
-            inv.concession !== stdConc ||
-            inv.netAmount !== expectedNet ||
-            (studentReceiptsChron.length === 0 &&
-              (inv.paidAmount !== 0 || inv.balanceDue !== expectedNet))
-          ) {
+          if (inv.concession !== stdConc || inv.netAmount !== expectedNet) {
             changed = true;
           }
           inv.concession = stdConc;
@@ -8883,15 +9309,8 @@ export class SheetsDatabaseManager {
           st.monthlyFee = 0;
           changed = true;
         }
-        const beforeInvCount = this.invoices.length;
-        this.invoices = this.invoices.filter(
-          inv => !(inv.studentId === st.id && (Number(inv.paidAmount) || 0) === 0)
-        );
-        if (this.invoices.length !== beforeInvCount) {
-          changed = true;
-        }
         const remainingDue = this.invoices
-          .filter(inv => inv.studentId === st.id)
+          .filter(inv => inv.studentId === st.id && inv.status !== 'Paid')
           .reduce((sum, inv) => sum + (Number(inv.balanceDue) || 0), 0);
         if (Number(st.balanceDue) !== remainingDue) {
           st.balanceDue = remainingDue;
@@ -9030,6 +9449,73 @@ export class SheetsDatabaseManager {
 
         this.students.push(newStudent);
         this.ensureAutoFeeForMember(newStudent);
+        changed = true;
+      }
+    }
+
+    // One-time idempotent restoration of Riddhi Krishna's (NEV837/22, stu-sr71751-9) 02-11-2026 fee receipt after Google Sheets hydration
+    if (
+      (this.isGoogleConfigured ? this.hasHydratedFromSheets : true) &&
+      !this.config.restoredRiddhi261102LiveSynced
+    ) {
+      const riddhiStu = this.students.find(
+        s =>
+          s.id === 'stu-sr71751-9' ||
+          String(s.admissionNo || '').trim().toUpperCase() === 'NEV837/22'
+      );
+      if (riddhiStu) {
+        const hasExistingRiddhiReceipt = this.receipts.some(
+          r =>
+            r.studentId === riddhiStu.id ||
+            String(r.admissionNo || '').trim().toUpperCase() === 'NEV837/22'
+        );
+        if (
+          !hasExistingRiddhiReceipt &&
+          !this.explicitlyDeletedIds.has('rec-1793600100001') &&
+          !this.explicitlyDeletedIds.has('REC-2611-0001')
+        ) {
+          const usedRecNos = new Set(this.receipts.map(r => String(r.receiptNo || '').trim()));
+          let targetRecNo = 'REC-2611-0001';
+          if (usedRecNos.has(targetRecNo)) {
+            let seq = 1;
+            while (usedRecNos.has(`REC-2611-${seq.toString().padStart(4, '0')}`)) seq++;
+            targetRecNo = `REC-2611-${seq.toString().padStart(4, '0')}`;
+          }
+          const feeAmt = Math.max(0, (Number(riddhiStu.monthlyFee) || 650) - (Number(riddhiStu.concessionAmount) || 0));
+          const restoredReceipt: FeeReceipt = {
+            id: 'rec-1793600100001',
+            receiptNo: targetRecNo,
+            date: '2026-11-02',
+            studentId: riddhiStu.id,
+            admissionNo: riddhiStu.admissionNo || 'NEV837/22',
+            studentName: riddhiStu.name || 'Riddhi Krishna',
+            campus: 'Sr',
+            amount: feeAmt,
+            discountAmount: 0,
+            lateFine: 0,
+            lateFineAmount: 0,
+            lateFineWaiver: 0,
+            balanceDueBefore: feeAmt,
+            balanceDueAfter: 0,
+            feeBreakupDescription: 'Transport Fee (2026-11)',
+            advanceLiabilityAmount: 0,
+            paymentMode: 'UPI',
+            referenceNo: '',
+            receivedBy: 'Transport Assistant (Sr Campus)',
+            remarks: 'Transport Fee (2026-11) — Received on 02-11-2026',
+          };
+          this.receipts.unshift(restoredReceipt);
+          const novInv = this.invoices.find(
+            i => i.studentId === riddhiStu.id && i.month === '2026-11'
+          );
+          if (novInv) {
+            novInv.paidAmount = novInv.netAmount;
+            novInv.balanceDue = 0;
+            novInv.status = 'Paid';
+          }
+          riddhiStu.balanceDue = 0;
+        }
+        this.config.restoredRiddhi261102LiveSynced = true;
         changed = true;
       }
     }
@@ -9905,6 +10391,9 @@ export class SheetsDatabaseManager {
 
   public async deleteExpense(id: string) {
     return this.enqueueWrite(async () => {
+      const target = this.expenses.find(e => e.id === id);
+      if (id) this.explicitlyDeletedIds.add(String(id).trim());
+      if (target?.expenseNo) this.explicitlyDeletedIds.add(String(target.expenseNo).trim());
       this.expenses = this.expenses.filter(e => e.id !== id);
       await this.internalSyncToGoogleSheets();
       return { success: true };
@@ -10046,6 +10535,9 @@ export class SheetsDatabaseManager {
 
   public async deleteIncome(id: string) {
     return this.enqueueWrite(async () => {
+      const target = this.incomes.find(i => i.id === id);
+      if (id) this.explicitlyDeletedIds.add(String(id).trim());
+      if (target?.incomeNo) this.explicitlyDeletedIds.add(String(target.incomeNo).trim());
       this.incomes = this.incomes.filter(i => i.id !== id);
       await this.internalSyncToGoogleSheets();
       return { success: true };
@@ -10108,6 +10600,7 @@ export class SheetsDatabaseManager {
 
   public async deleteDisciplineRecord(id: string) {
     return this.enqueueWrite(async () => {
+      if (id) this.explicitlyDeletedIds.add(String(id).trim());
       this.disciplineRecords = this.disciplineRecords.filter(d => d.id !== id);
       await this.internalSyncToGoogleSheets();
       return { success: true };
@@ -10485,6 +10978,8 @@ export class SheetsDatabaseManager {
       }
 
       const [deleted] = this.receipts.splice(idx, 1);
+      if (deleted.id) this.explicitlyDeletedIds.add(String(deleted.id).trim());
+      if (deleted.receiptNo) this.explicitlyDeletedIds.add(String(deleted.receiptNo).trim());
       const netPaidDeleted = Number(deleted.amount) || 0;
       const lateFineDeleted = Number(deleted.lateFine ?? deleted.lateFineAmount) || 0;
       const discountDeleted = Number(deleted.discountAmount) || 0;
@@ -10504,6 +10999,7 @@ export class SheetsDatabaseManager {
       );
 
       if (student) {
+        this.recentlyRevertedStudentIds.add(student.id);
         const studentInvoices = this.invoices.filter(i => i.studentId === student.id);
 
         if (studentInvoices.length > 0) {
@@ -10598,6 +11094,7 @@ export class SheetsDatabaseManager {
 
       this.purgeOctober2026AppliedFeesAndSyncBalances();
       await this.internalSyncToGoogleSheets(false, [
+        'School_Masters',
         'Fee_Receipts',
         'Fee_Invoices',
         'Members_Transport',
@@ -10657,6 +11154,7 @@ export class SheetsDatabaseManager {
 
   public async deleteFollowUp(id: string) {
     return this.enqueueWrite(async () => {
+      if (id) this.explicitlyDeletedIds.add(String(id).trim());
       this.followUps = this.followUps.filter(f => f.id !== id);
       await this.internalSyncToGoogleSheets();
       return { success: true };
@@ -10758,15 +11256,7 @@ export class SheetsDatabaseManager {
         this.trips.push(trip);
       }
 
-      // Remove any attendance records belonging to students marked 'Left'
-      const leftStudentIds = new Set(
-        this.students.filter(s => s.transportStatus === 'Left').map(s => s.id)
-      );
-      this.attendance = this.attendance.filter(
-        a => !(a.tripId === trip!.id && leftStudentIds.has(a.studentId))
-      );
-
-      // Ensure attendance records exist for all active/suspended students on this route for this trip
+      // Preserve all historical attendance permanently; only ensure attendance rows exist for current active/suspended route members
       let existingAtt = this.attendance.filter(a => a.tripId === trip!.id);
       const existingStuIds = new Set(existingAtt.map(a => a.studentId));
       for (const stu of routeStudents) {
