@@ -177,8 +177,14 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         vehicleId: selectedVehObj?.id,
         vehicleNumber,
         driverName: vehicleNumber !== 'General' ? (driverName || selectedVehObj?.assignedDriverName || '') : undefined,
-        odometerReading: vehicleNumber !== 'General' && odometerReading ? Number(odometerReading) : undefined,
-        fuelLitres: vehicleNumber !== 'General' && fuelLitres ? Number(fuelLitres) : undefined,
+        odometerReading:
+          vehicleNumber !== 'General' && odometerReading.trim() !== ''
+            ? Number(odometerReading)
+            : undefined,
+        fuelLitres:
+          vehicleNumber !== 'General' && fuelLitres.trim() !== ''
+            ? Number(fuelLitres)
+            : undefined,
         amount: Number(amount),
         paymentMode,
         vendorName: vendorName || 'Direct Vendor',
@@ -780,7 +786,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                                 try {
                                   await onDeleteExpenseHead(h.id);
                                 } catch (err: any) {
-                                  alert(err.message);
+                                  setHeadError(err.message || 'Failed to delete Expense Category');
                                 }
                               }}
                               className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
@@ -859,11 +865,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                       const v = vehicles.find((veh) => veh.registrationNumber === val);
                       if (v) {
                         setDriverName(v.assignedDriverName || '');
-                        setOdometerReading(String((v.currentOdometer || 0) + 15));
                       } else {
                         setDriverName('');
-                        setOdometerReading('');
                       }
+                      setOdometerReading('');
                     }}
                     className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold text-slate-900"
                   >
@@ -893,15 +898,14 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                   </div>
                   <div>
                     <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
-                      Current Odometer (km) *
+                      Current Odometer (km)
                     </label>
                     <input
                       type="number"
-                      required
-                      min="1"
+                      min="0"
                       value={odometerReading}
                       onChange={(e) => setOdometerReading(e.target.value)}
-                      placeholder="Seek Odometer Reading"
+                      placeholder="Optional"
                       className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-mono font-bold text-slate-900"
                     />
                   </div>
