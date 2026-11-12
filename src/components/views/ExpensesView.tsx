@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   IndianRupee, Plus, Search, Calendar, Tag, X, Upload, Eye, Trash2, Lock, Check, Ban, ShieldCheck
 } from 'lucide-react';
@@ -75,6 +75,8 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   }, [initialTab]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const modalOverlayRef = useRef<HTMLDivElement | null>(null);
+  const modalBodyRef = useRef<HTMLDivElement | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedVehicle, setSelectedVehicle] = useState<string>('all');
@@ -116,7 +118,31 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     if (!isAdmin) {
       setExpenseDate(todayStr);
     }
+    if (isModalOpen) {
+      requestAnimationFrame(() => {
+        if (modalOverlayRef.current) modalOverlayRef.current.scrollTop = 0;
+        if (modalBodyRef.current) modalBodyRef.current.scrollTop = 0;
+      });
+    }
   }, [isAdmin, todayStr, isModalOpen]);
+
+  const handleOpenAddModal = () => {
+    setVehicleNumber('General');
+    setDriverName('');
+    setOdometerReading('');
+    setFuelLitres('');
+    setAmount('');
+    setVendorName('');
+    setBillNumber('');
+    setBillPhoto('');
+    setBillFileName('');
+    setNarration('');
+    setShowInlineHeadCreator(false);
+    if (!isAdmin) {
+      setExpenseDate(todayStr);
+    }
+    setIsModalOpen(true);
+  };
 
   const selectedHeadObj = expenseHeads.find((h) => h.name === category);
   const categoryNeedsApproval = !!selectedHeadObj?.requiresApproval;
@@ -195,6 +221,8 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         requiresApproval: categoryNeedsApproval,
       });
       setIsModalOpen(false);
+      setVehicleNumber('General');
+      setDriverName('');
       setAmount('');
       setVendorName('');
       setBillNumber('');
@@ -203,6 +231,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       setNarration('');
       setOdometerReading('');
       setFuelLitres('');
+      setShowInlineHeadCreator(false);
     } catch (err) {
       console.error('Failed to add expense:', err);
     } finally {
@@ -422,7 +451,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
 
           {activeTab === 'expenses' && (
             <button
-              onClick={() => setIsModalOpen(true)}
+              onClick={handleOpenAddModal}
               className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer whitespace-nowrap"
             >
               <Plus className="w-4 h-4" />
@@ -808,16 +837,20 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
 
       {/* Add Expense Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 space-y-4 my-8">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div
+          ref={modalOverlayRef}
+          className="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-slate-900/60 backdrop-blur-xs p-2.5 sm:p-4 overflow-y-auto"
+        >
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-xl border border-slate-200 flex flex-col max-h-[92dvh] sm:max-h-[90vh] my-auto overflow-hidden">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5 shrink-0 bg-white">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold">
+                <div className="w-8 h-8 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold shrink-0">
                   <IndianRupee className="w-4 h-4" />
                 </div>
                 <h3 className="text-base font-bold text-slate-900">Record Transport Expense</h3>
               </div>
               <button
+                type="button"
                 onClick={() => setIsModalOpen(false)}
                 className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
@@ -825,7 +858,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleAddSubmit} className="space-y-4 text-xs">
+            <form onSubmit={handleAddSubmit} className="flex flex-col flex-1 min-h-0 text-xs">
+              <div
+                ref={modalBodyRef}
+                className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1 overscroll-contain"
+              >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="flex items-center justify-between mb-1">
@@ -1091,11 +1128,13 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              </div>
+
+              <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-slate-100 bg-slate-50/80 shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 font-semibold hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
                 </button>
