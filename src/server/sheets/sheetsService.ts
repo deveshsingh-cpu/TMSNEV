@@ -754,6 +754,143 @@ export class SheetsDatabaseManager {
     return results;
   }
 
+  private parseExpenseHeadsFromSheet(rows: any[][] | undefined | null): ExpenseHead[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON') >= 0 ? headers.indexOf('_JSON') : 5;
+    const results: ExpenseHead[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const colId = String(row[0] || '').trim();
+      const colName = String(row[1] || '').trim();
+      if (!colId && !colName) continue;
+
+      let parsedObj: Partial<ExpenseHead> | null = null;
+      const rawJson = row[jsonColIdx];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const p = JSON.parse(rawJson);
+          if (p && typeof p === 'object' && (p.id || p.name)) {
+            parsedObj = p;
+          }
+        } catch {
+          parsedObj = null;
+        }
+      }
+
+      const id = String(parsedObj?.id || colId || `eh-row-${i}`).trim();
+      const name = String(parsedObj?.name || colName || '').trim();
+      if (!name || seenIds.has(id) || this.explicitlyDeletedIds.has(id)) continue;
+      seenIds.add(id);
+
+      const reqAppRaw = String(row[3] ?? '').trim().toLowerCase();
+      const requiresApproval =
+        parsedObj?.requiresApproval !== undefined
+          ? !!parsedObj.requiresApproval
+          : reqAppRaw === 'yes' || reqAppRaw === 'true' || reqAppRaw === '1';
+
+      results.push({
+        ...(parsedObj as any),
+        id,
+        name,
+        category: String(parsedObj?.category || row[2] || 'Direct Expense').trim(),
+        requiresApproval,
+        createdAt: String(parsedObj?.createdAt || row[4] || '2026-04-01').trim(),
+      });
+    }
+    return results;
+  }
+
+  private parseExpensesFromSheet(
+    rows: any[][] | undefined | null,
+    prevAttachmentMap?: Map<string, string>
+  ): ExpenseRecord[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON') >= 0 ? headers.indexOf('_JSON') : 12;
+    const attStartIdx = headers.indexOf('_ATT_1') >= 0 ? headers.indexOf('_ATT_1') : jsonColIdx + 1;
+    const results: ExpenseRecord[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const colId = String(row[0] || '').trim();
+      const colExpNo = String(row[1] || '').trim();
+      const colVendor = String(row[5] || '').trim();
+      if (!colId && !colExpNo && !colVendor) continue;
+
+      let parsedObj: Partial<ExpenseRecord> | null = null;
+      const rawJson = row[jsonColIdx];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const p = JSON.parse(rawJson);
+          if (p && typeof p === 'object' && (p.id || p.expenseNo || p.amount !== undefined)) {
+            parsedObj = p;
+          }
+        } catch {
+          parsedObj = null;
+        }
+      }
+
+      const id = String(parsedObj?.id || colId || `exp-row-${i}`).trim();
+      if (!id || seenIds.has(id) || this.explicitlyDeletedIds.has(id)) continue;
+      const expenseNo = String(
+        parsedObj?.expenseNo || colExpNo || `EXP-2611-${i.toString().padStart(3, '0')}`
+      ).trim();
+      if (this.explicitlyDeletedIds.has(expenseNo)) continue;
+      seenIds.add(id);
+
+      const rawMode = String(parsedObj?.paymentMode || row[7] || 'Cash').trim();
+      const paymentMode: ExpenseRecord['paymentMode'] =
+        rawMode === 'UPI' || rawMode === 'Bank' || rawMode === 'Cash' ? rawMode : 'Cash';
+      const rawStatus = String(parsedObj?.approvalStatus || row[9] || 'Approved').trim();
+      const approvalStatus: ExpenseRecord['approvalStatus'] =
+        rawStatus === 'Pending Approval' || rawStatus === 'Rejected' || rawStatus === 'Approved'
+          ? rawStatus
+          : 'Approved';
+
+      let billPhoto = parsedObj?.billPhoto;
+      if (row.length > attStartIdx) {
+        const joinedChunks = row
+          .slice(attStartIdx, attStartIdx + 5)
+          .map((c: any) => String(c || ''))
+          .join('');
+        if (joinedChunks.startsWith('data:')) {
+          billPhoto = joinedChunks;
+        }
+      }
+      if ((!billPhoto || billPhoto === '[ATTACHMENT_STORED]') && prevAttachmentMap) {
+        const preserved = prevAttachmentMap.get(id) || prevAttachmentMap.get(expenseNo);
+        if (preserved) {
+          billPhoto = preserved;
+        }
+      }
+
+      results.push({
+        ...(parsedObj as any),
+        id,
+        expenseNo,
+        date: String(parsedObj?.date || row[2] || '2026-11-01').trim(),
+        category: String(parsedObj?.category || row[3] || 'General Operations').trim(),
+        vehicleNumber: String(parsedObj?.vehicleNumber || row[4] || 'General').trim(),
+        vendorName: String(parsedObj?.vendorName || colVendor || 'Direct Vendor').trim(),
+        billNumber: String(parsedObj?.billNumber ?? row[6] ?? '').trim(),
+        paymentMode,
+        amount: Number(parsedObj?.amount ?? row[8] ?? 0) || 0,
+        approvalStatus,
+        approvedBy: String(parsedObj?.approvedBy ?? row[10] ?? '').trim() || undefined,
+        narration: String(parsedObj?.narration ?? row[11] ?? '').trim(),
+        recordedBy: String(parsedObj?.recordedBy || 'Transport Staff').trim(),
+        billPhoto,
+      });
+    }
+    return results;
+  }
+
   private parseAttendanceFromSheet(rows: any[][] | undefined | null): TripAttendanceRecord[] {
     if (!Array.isArray(rows) || rows.length < 2) return [];
     const headers = rows[0].map((h: any) => String(h || '').trim());
@@ -1092,10 +1229,24 @@ export class SheetsDatabaseManager {
         this.maintenance = this.parseRowsFromSheet<MaintenanceRequest>(tabMap.get('Vehicle_Maintenance'), true);
       }
       if ((tabMap.get('Expense_Heads') || []).length >= 1) {
-        this.expenseHeads = this.parseRowsFromSheet<ExpenseHead>(tabMap.get('Expense_Heads'), true);
+        const parsedHeads = this.parseExpenseHeadsFromSheet(tabMap.get('Expense_Heads'));
+        if (parsedHeads.length > 0 || (tabMap.get('Expense_Heads') || []).length === 1) {
+          this.expenseHeads = parsedHeads;
+        }
       }
       if ((tabMap.get('Expenses_Fuel_Ledger') || []).length >= 1) {
-        const remote = this.parseRowsFromSheet<ExpenseRecord>(tabMap.get('Expenses_Fuel_Ledger'), true);
+        const prevExpAttMap = new Map<string, string>();
+        for (const oldExp of this.expenses) {
+          if (
+            oldExp.billPhoto &&
+            oldExp.billPhoto !== '[ATTACHMENT_STORED]' &&
+            oldExp.billPhoto.startsWith('data:')
+          ) {
+            prevExpAttMap.set(oldExp.id, oldExp.billPhoto);
+            if (oldExp.expenseNo) prevExpAttMap.set(oldExp.expenseNo, oldExp.billPhoto);
+          }
+        }
+        const remote = this.parseExpensesFromSheet(tabMap.get('Expenses_Fuel_Ledger'), prevExpAttMap);
         this.expenses = keepRecentLocalLedgers
           ? this.unionPermanentRecords(this.expenses, remote, e => e.expenseNo)
           : remote.filter(e => !this.explicitlyDeletedIds.has(e.id));
@@ -1349,7 +1500,19 @@ export class SheetsDatabaseManager {
     };
   }
 
-  public getBootstrapSnapshot() {
+  public getExpenseAttachmentRaw(idOrNo: string): string | undefined {
+    const clean = String(idOrNo || '').trim();
+    const exp = this.expenses.find(e => e.id === clean || e.expenseNo === clean);
+    return exp?.billPhoto;
+  }
+
+  public getReceiptAttachmentRaw(idOrNo: string): string | undefined {
+    const clean = String(idOrNo || '').trim();
+    const rec = this.receipts.find(r => r.id === clean || r.receiptNo === clean);
+    return rec?.upiScreenshot;
+  }
+
+  public getBootstrapSnapshot(options?: { includeAttendance?: boolean }) {
     if (Date.now() - this.lastMaintenanceRunAt > 60000) {
       this.lastMaintenanceRunAt = Date.now();
       if (this.purgeOctober2026AppliedFeesAndSyncBalances()) {
@@ -1365,8 +1528,34 @@ export class SheetsDatabaseManager {
     const accounts = this.getAccounts();
     const expenses = this.getExpenses();
 
+    // Serve base64 receipt & expense bill attachments via lightweight URLs so /api/bootstrap and mutation envelopes
+    // stay well below serverless payload limits even as thousands of bills & screenshots accumulate permanently.
+    const liteReceipts = receipts.map(r => {
+      if (typeof r.upiScreenshot === 'string' && r.upiScreenshot.startsWith('data:')) {
+        const isPdf = r.upiScreenshot.startsWith('data:application/pdf');
+        return {
+          ...r,
+          upiScreenshot: `/api/attachments/receipt/${encodeURIComponent(r.id)}?v=${r.upiScreenshot.length}${isPdf ? '&type=pdf' : ''}`,
+        };
+      }
+      return r;
+    });
+
+    const liteExpenses = expenses.map(e => {
+      if (typeof e.billPhoto === 'string' && e.billPhoto.startsWith('data:')) {
+        const isPdf = e.billPhoto.startsWith('data:application/pdf');
+        return {
+          ...e,
+          billPhoto: `/api/attachments/expense/${encodeURIComponent(e.id)}?v=${e.billPhoto.length}${isPdf ? '&type=pdf' : ''}`,
+        };
+      }
+      return e;
+    });
+
+    const includeAttendance = options?.includeAttendance !== false;
+
     return {
-      attendance: this.getAllAttendance(),
+      ...(includeAttendance ? { attendance: this.getAllAttendance() } : {}),
       masters: {
         config: this.getSchoolConfig(),
         campuses: [...this.getCampuses()],
@@ -1387,9 +1576,9 @@ export class SheetsDatabaseManager {
       trips: [...trips],
       services: [...this.getScheduledServices()],
       invoices: [...invoices],
-      receipts: [...receipts],
+      receipts: liteReceipts,
       warningLetters: [...this.getWarningLetters()],
-      expenses: [...expenses],
+      expenses: liteExpenses,
       expenseHeads: [...this.getExpenseHeads()],
       incomeHeads: [...this.getIncomeHeads()],
       incomes: [...this.getIncomes()],
@@ -1693,7 +1882,14 @@ export class SheetsDatabaseManager {
         this.trips = this.unionPermanentRecords(this.trips, remoteTrips);
       }
       if (remoteMap.has('Expenses_Fuel_Ledger')) {
-        const remoteExp = this.parseRowsFromSheet<ExpenseRecord>(remoteMap.get('Expenses_Fuel_Ledger'), true);
+        const prevExpAttMap = new Map<string, string>();
+        for (const e of this.expenses) {
+          if (e.billPhoto && e.billPhoto.startsWith('data:')) {
+            prevExpAttMap.set(e.id, e.billPhoto);
+            if (e.expenseNo) prevExpAttMap.set(e.expenseNo, e.billPhoto);
+          }
+        }
+        const remoteExp = this.parseExpensesFromSheet(remoteMap.get('Expenses_Fuel_Ledger'), prevExpAttMap);
         this.expenses = this.unionPermanentRecords(this.expenses, remoteExp, e => e.expenseNo);
       }
       if (remoteMap.has('Other_Incomes')) {
@@ -2171,22 +2367,39 @@ export class SheetsDatabaseManager {
         {
           range: 'Expenses_Fuel_Ledger!A1',
           values: [
-            ['Expense ID', 'Expense No', 'Date', 'Expense Head / Category', 'Vehicle Reg', 'Vendor / Party', 'Bill / Invoice No', 'Payment Mode', 'Amount (INR)', 'Approval Status', 'Approved By', 'Narration', '_JSON'],
-            ...this.expenses.map(e => [
-              e.id,
-              e.expenseNo,
-              e.date,
-              e.category,
-              e.vehicleNumber || 'General',
-              e.vendorName,
-              e.billNumber || '',
-              e.paymentMode,
-              e.amount,
-              e.approvalStatus || 'Approved',
-              e.approvedBy || '',
-              e.narration,
-              stripLargeBase64ForSheetCell(e),
-            ]),
+            [
+              'Expense ID', 'Expense No', 'Date', 'Expense Head / Category', 'Vehicle Reg',
+              'Vendor / Party', 'Bill / Invoice No', 'Payment Mode', 'Amount (INR)',
+              'Approval Status', 'Approved By', 'Narration', '_JSON',
+              '_ATT_1', '_ATT_2', '_ATT_3', '_ATT_4', '_ATT_5'
+            ],
+            ...this.expenses.map(e => {
+              const rawAtt =
+                typeof e.billPhoto === 'string' && e.billPhoto.startsWith('data:')
+                  ? e.billPhoto
+                  : '';
+              const needsChunks = rawAtt.length > 20000 && rawAtt.length <= 220000;
+              return [
+                e.id,
+                e.expenseNo,
+                e.date,
+                e.category,
+                e.vehicleNumber || 'General',
+                e.vendorName,
+                e.billNumber || '',
+                e.paymentMode,
+                e.amount,
+                e.approvalStatus || 'Approved',
+                e.approvedBy || '',
+                e.narration,
+                stripLargeBase64ForSheetCell(e, needsChunks ? ['billPhoto'] : []),
+                needsChunks ? rawAtt.slice(0, 44000) : '',
+                needsChunks ? rawAtt.slice(44000, 88000) : '',
+                needsChunks ? rawAtt.slice(88000, 132000) : '',
+                needsChunks ? rawAtt.slice(132000, 176000) : '',
+                needsChunks ? rawAtt.slice(176000, 220000) : '',
+              ];
+            }),
           ],
         },
         {
@@ -4633,51 +4846,9 @@ export class SheetsDatabaseManager {
       }
     }
 
-    // 5. Keep Cash in Hand (acc-101), School Bank Account (acc-102), and Student Transport Fee Receivables (acc-103) aligned
-    const cashAcc = this.accounts.find(a => a.id === 'acc-101');
-    const bankAcc = this.accounts.find(a => a.id === 'acc-102');
-    const approvedExpenses = this.expenses.filter(
-      e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected'
-    );
-    if (cashAcc) {
-      const cashReceipts = this.receipts
-        .filter(r => r.paymentMode === 'Cash')
-        .reduce((s, r) => s + (Number(r.amount) || 0), 0);
-      const cashIncomes = this.incomes
-        .filter(i => i.paymentMode === 'Cash')
-        .reduce((s, i) => s + (Number(i.amount) || 0), 0);
-      const cashExp = approvedExpenses
-        .filter(e => e.paymentMode === 'Cash')
-        .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-      const expectedCash = cashReceipts + cashIncomes - cashExp;
-      if (Number(cashAcc.balance) !== expectedCash) {
-        cashAcc.balance = expectedCash;
-        changed = true;
-      }
-    }
-    if (bankAcc) {
-      const onlineReceipts = this.receipts
-        .filter(r => r.paymentMode !== 'Cash')
-        .reduce((s, r) => s + (Number(r.amount) || 0), 0);
-      const onlineIncomes = this.incomes
-        .filter(i => i.paymentMode !== 'Cash')
-        .reduce((s, i) => s + (Number(i.amount) || 0), 0);
-      const onlineExp = approvedExpenses
-        .filter(e => e.paymentMode !== 'Cash')
-        .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-      const expectedBank = onlineReceipts + onlineIncomes - onlineExp;
-      if (Number(bankAcc.balance) !== expectedBank) {
-        bankAcc.balance = expectedBank;
-        changed = true;
-      }
-    }
-    const receivableAcc = this.accounts.find(a => a.id === 'acc-103' || a.code === '1100');
-    if (receivableAcc) {
-      const totalOutstanding = this.students.reduce((sum, s) => sum + (Number(s.balanceDue) || 0), 0);
-      if (Number(receivableAcc.balance) !== totalOutstanding) {
-        receivableAcc.balance = totalOutstanding;
-        changed = true;
-      }
+    // 5. Keep all Chart of Accounts balances (Cash, Bank, Receivables, Income, and Expense Heads) deterministically aligned
+    if (this.recalculateAllLedgerBalances()) {
+      changed = true;
     }
 
     // Clear any stale inTime / outTime on trips whose status is still Ready or Planned
@@ -10200,59 +10371,288 @@ export class SheetsDatabaseManager {
     return list;
   }
 
-  private postApprovedExpenseSideEffects(record: ExpenseRecord, skipLogbookSync = false) {
-    let debitAccountId = 'acc-502';
-    let debitAccountCode = '5020';
-    let debitAccountName = 'Fleet Repairs & Maintenance Expense';
+  private resolveExpenseAccountHead(category: string): {
+    debitAccountId: string;
+    debitAccountCode: string;
+    debitAccountName: string;
+  } {
+    const catLower = String(category || '').toLowerCase();
+    if (catLower.includes('fuel')) {
+      return {
+        debitAccountId: 'acc-501',
+        debitAccountCode: '5010',
+        debitAccountName: 'Vehicle Fuel Expense (Diesel / CNG)',
+      };
+    }
+    if (
+      catLower.includes('tax') ||
+      catLower.includes('permit') ||
+      catLower.includes('toll') ||
+      catLower.includes('insurance') ||
+      catLower.includes('challan')
+    ) {
+      return {
+        debitAccountId: 'acc-505',
+        debitAccountCode: '5050',
+        debitAccountName: 'Taxes, Permits & Insurance Expense',
+      };
+    }
+    if (catLower.includes('rent')) {
+      return {
+        debitAccountId: 'acc-504',
+        debitAccountCode: '5040',
+        debitAccountName: 'Vehicle Rent Expense (Hired Fleet)',
+      };
+    }
+    if (catLower.includes('salary') || catLower.includes('advance')) {
+      return {
+        debitAccountId: 'acc-503',
+        debitAccountCode: '5030',
+        debitAccountName: 'Drivers & Helpers Salary Expense',
+      };
+    }
+    return {
+      debitAccountId: 'acc-502',
+      debitAccountCode: '5020',
+      debitAccountName: 'Fleet Repairs & Maintenance Expense',
+    };
+  }
 
-    if (record.category.includes('Fuel')) {
-      debitAccountId = 'acc-501';
-      debitAccountCode = '5010';
-      debitAccountName = 'Vehicle Fuel Expense (Diesel / CNG)';
-    } else if (record.category.includes('Tax') || record.category.includes('Permit') || record.category.includes('Toll')) {
-      debitAccountId = 'acc-505';
-      debitAccountCode = '5050';
-      debitAccountName = 'Taxes, Permits & Insurance Expense';
-    } else if (record.category.includes('Rent')) {
-      debitAccountId = 'acc-504';
-      debitAccountCode = '5040';
-      debitAccountName = 'Vehicle Rent Expense (Hired Fleet)';
-    } else if (record.category.includes('Salary') || record.category.includes('Advance')) {
-      debitAccountId = 'acc-503';
-      debitAccountCode = '5030';
-      debitAccountName = 'Drivers & Helpers Salary Expense';
+  private recalculateAllLedgerBalances(): boolean {
+    let changed = false;
+    const approvedExpenses = this.expenses.filter(
+      e => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected'
+    );
+
+    // Sum manual journal vouchers (excluding auto-generated JV-EXP-* expense vouchers so we never double-count)
+    const manualAdjustments = new Map<string, number>();
+    for (const v of this.vouchers) {
+      if (String(v.voucherNo || '').startsWith('JV-EXP-')) continue;
+      for (const line of v.lines || []) {
+        const acc = this.accounts.find(a => a.id === line.accountId);
+        if (!acc) continue;
+        const delta =
+          acc.accountClass === 'Asset' || acc.accountClass === 'Expense'
+            ? (Number(line.debit) || 0) - (Number(line.credit) || 0)
+            : (Number(line.credit) || 0) - (Number(line.debit) || 0);
+        manualAdjustments.set(acc.id, (manualAdjustments.get(acc.id) || 0) + delta);
+      }
     }
 
+    const setAccBalance = (accId: string, baseVal: number) => {
+      const acc = this.accounts.find(a => a.id === accId);
+      if (!acc) return;
+      const nextBal = Math.round((baseVal + (manualAdjustments.get(accId) || 0)) * 100) / 100;
+      if (Number(acc.balance) !== nextBal) {
+        acc.balance = nextBal;
+        changed = true;
+      }
+    };
+
+    const cashReceipts = this.receipts
+      .filter(r => r.paymentMode === 'Cash')
+      .reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const cashIncomes = this.incomes
+      .filter(i => i.paymentMode === 'Cash')
+      .reduce((s, i) => s + (Number(i.amount) || 0), 0);
+    const cashExp = approvedExpenses
+      .filter(e => e.paymentMode === 'Cash')
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    setAccBalance('acc-101', cashReceipts + cashIncomes - cashExp);
+
+    const onlineReceipts = this.receipts
+      .filter(r => r.paymentMode !== 'Cash')
+      .reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const onlineIncomes = this.incomes
+      .filter(i => i.paymentMode !== 'Cash')
+      .reduce((s, i) => s + (Number(i.amount) || 0), 0);
+    const onlineExp = approvedExpenses
+      .filter(e => e.paymentMode !== 'Cash')
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    setAccBalance('acc-102', onlineReceipts + onlineIncomes - onlineExp);
+
+    const totalOutstanding = this.students.reduce((sum, s) => sum + (Number(s.balanceDue) || 0), 0);
+    setAccBalance('acc-103', totalOutstanding);
+
+    const totalAdvanceLiability = this.receipts.reduce(
+      (sum, r) => sum + (Number(r.advanceLiabilityAmount) || 0),
+      0
+    );
+    setAccBalance('acc-201', totalAdvanceLiability);
+
+    const totalReceiptsIncome = this.receipts.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const totalOtherIncome = this.incomes.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+    setAccBalance('acc-401', totalReceiptsIncome + totalOtherIncome);
+
+    const expTotals: Record<string, number> = {
+      'acc-501': 0,
+      'acc-502': 0,
+      'acc-503': 0,
+      'acc-504': 0,
+      'acc-505': 0,
+    };
+    for (const exp of approvedExpenses) {
+      const { debitAccountId } = this.resolveExpenseAccountHead(exp.category);
+      expTotals[debitAccountId] = (expTotals[debitAccountId] || 0) + (Number(exp.amount) || 0);
+    }
+    for (const [accId, sumVal] of Object.entries(expTotals)) {
+      setAccBalance(accId, sumVal);
+    }
+
+    return changed;
+  }
+
+  private syncExpenseVoucher(record: ExpenseRecord) {
+    const targetVoucherNo = `JV-${record.expenseNo}`;
+    const existingIdx = this.vouchers.findIndex(
+      v => (record.voucherId && v.id === record.voucherId) || v.voucherNo === targetVoucherNo
+    );
+    const isApproved =
+      record.approvalStatus !== 'Pending Approval' && record.approvalStatus !== 'Rejected';
+
+    if (!isApproved) {
+      if (existingIdx >= 0) {
+        const [removed] = this.vouchers.splice(existingIdx, 1);
+        if (removed?.id) this.explicitlyDeletedIds.add(removed.id);
+        if (removed?.voucherNo) this.explicitlyDeletedIds.add(removed.voucherNo);
+      }
+      record.voucherId = undefined;
+      return;
+    }
+
+    const { debitAccountId, debitAccountCode, debitAccountName } = this.resolveExpenseAccountHead(
+      record.category
+    );
     const creditAccountId = record.paymentMode === 'Cash' ? 'acc-101' : 'acc-102';
     const creditAccountCode = record.paymentMode === 'Cash' ? '1010' : '1020';
-    const creditAccountName = record.paymentMode === 'Cash'
-      ? 'Cash in Hand (Transport Counter)'
-      : 'State Bank of India - School Transport A/C';
+    const creditAccountName =
+      record.paymentMode === 'Cash'
+        ? 'Cash in Hand (Transport Counter)'
+        : 'State Bank of India - School Transport A/C';
 
-    const vch: JournalVoucher = {
-      id: `vch-${Date.now()}-${Math.floor(Math.random() * 100)}`,
-      voucherNo: `JV-${record.expenseNo}`,
+    this.explicitlyDeletedIds.delete(targetVoucherNo);
+
+    const updatedFields = {
+      voucherNo: targetVoucherNo,
       date: record.date,
-      voucherType: 'Expense',
+      voucherType: 'Expense' as const,
       narration: `${record.category} - ${record.narration} (Vendor: ${record.vendorName})`,
-      status: 'Posted',
+      status: 'Posted' as const,
       totalDebit: record.amount,
       totalCredit: record.amount,
       createdBy: record.recordedBy,
       approvedBy: record.approvedBy,
       lines: [
-        { accountId: debitAccountId, accountCode: debitAccountCode, accountName: debitAccountName, debit: record.amount, credit: 0, costCenter: record.vehicleNumber },
-        { accountId: creditAccountId, accountCode: creditAccountCode, accountName: creditAccountName, debit: 0, credit: record.amount, partyName: record.vendorName },
+        {
+          accountId: debitAccountId,
+          accountCode: debitAccountCode,
+          accountName: debitAccountName,
+          debit: record.amount,
+          credit: 0,
+          costCenter: record.vehicleNumber,
+        },
+        {
+          accountId: creditAccountId,
+          accountCode: creditAccountCode,
+          accountName: creditAccountName,
+          debit: 0,
+          credit: record.amount,
+          partyName: record.vendorName,
+        },
       ],
     };
 
-    const debitAcc = this.accounts.find(a => a.id === debitAccountId);
-    if (debitAcc) debitAcc.balance += record.amount;
-    const creditAcc = this.accounts.find(a => a.id === creditAccountId);
-    if (creditAcc) creditAcc.balance -= record.amount;
+    if (existingIdx >= 0) {
+      const existing = this.vouchers[existingIdx];
+      this.explicitlyDeletedIds.delete(existing.id);
+      this.vouchers[existingIdx] = {
+        ...existing,
+        ...updatedFields,
+      };
+      record.voucherId = existing.id;
+    } else {
+      const vch: JournalVoucher = {
+        id: `vch-${Date.now()}-${Math.floor(Math.random() * 100)}`,
+        ...updatedFields,
+      };
+      this.vouchers.unshift(vch);
+      record.voucherId = vch.id;
+    }
+  }
 
-    this.vouchers.unshift(vch);
-    record.voucherId = vch.id;
+  private removeExpenseLogbookEffects(prevRecord: ExpenseRecord) {
+    const expPrefix = `[Expense ${prevRecord.expenseNo}]`;
+    const prevLitres =
+      Number(prevRecord.fuelLitres) ||
+      (prevRecord.category.toLowerCase().includes('fuel')
+        ? Math.round((prevRecord.amount / 90) * 10) / 10
+        : 0);
+
+    const keptLogs: OdometerLog[] = [];
+    for (const log of this.odometerLogs) {
+      const matchesId = log.expenseId === prevRecord.id;
+      const matchesNote = (log.defectsReported || '').includes(expPrefix);
+      if (!matchesId && !matchesNote) {
+        keptLogs.push(log);
+        continue;
+      }
+      if (String(log.id || '').startsWith('odo-exp-')) {
+        this.explicitlyDeletedIds.add(log.id);
+        continue;
+      }
+      // Manual log that had this expense merged onto it: strip this expense's numbers & note cleanly
+      if (matchesId) {
+        log.expenseId = undefined;
+        log.expenseCategory = undefined;
+        log.expenseAmount = Math.max(0, (log.expenseAmount || 0) - prevRecord.amount);
+      }
+      if (prevLitres > 0 && log.fuelLitresAdded) {
+        log.fuelLitresAdded = Math.max(0, Math.round(((log.fuelLitresAdded || 0) - prevLitres) * 10) / 10);
+      }
+      if (prevRecord.category.toLowerCase().includes('fuel') && log.fuelCost) {
+        log.fuelCost = Math.max(0, (log.fuelCost || 0) - prevRecord.amount);
+      }
+      if (log.defectsReported) {
+        log.defectsReported = log.defectsReported
+          .split(' | ')
+          .filter(seg => !seg.includes(expPrefix))
+          .join(' | ');
+      }
+      keptLogs.push(log);
+    }
+    this.odometerLogs = keptLogs;
+  }
+
+  private syncVehicleCurrentOdometer(vehicleNumber?: string, vehicleId?: string) {
+    if (!vehicleNumber || vehicleNumber === 'General') return;
+    const veh = this.vehicles.find(
+      v => v.registrationNumber === vehicleNumber || (vehicleId && v.id === vehicleId)
+    );
+    if (!veh) return;
+    let maxOdo = 0;
+    for (const log of this.odometerLogs) {
+      if (log.vehicleNumber === veh.registrationNumber || log.vehicleId === veh.id) {
+        if ((log.endOdometer || 0) > maxOdo) maxOdo = log.endOdometer;
+      }
+    }
+    for (const exp of this.expenses) {
+      if (
+        exp.approvalStatus !== 'Pending Approval' &&
+        exp.approvalStatus !== 'Rejected' &&
+        (exp.vehicleNumber === veh.registrationNumber || (veh.id && exp.vehicleId === veh.id)) &&
+        exp.odometerReading &&
+        exp.odometerReading > maxOdo
+      ) {
+        maxOdo = Number(exp.odometerReading);
+      }
+    }
+    if (maxOdo > 0) {
+      veh.currentOdometer = maxOdo;
+    }
+  }
+
+  private postApprovedExpenseSideEffects(record: ExpenseRecord, skipLogbookSync = false) {
+    this.syncExpenseVoucher(record);
 
     // Reflect in Vehicle Log Book whenever a vehicle is selected on an accepted/approved expense
     if (!skipLogbookSync && record.vehicleNumber && record.vehicleNumber !== 'General') {
@@ -10261,17 +10661,27 @@ export class SheetsDatabaseManager {
       );
       if (veh) {
         const prevOdo = veh.currentOdometer || 0;
-        const enteredOdo = record.odometerReading && record.odometerReading >= prevOdo ? Number(record.odometerReading) : prevOdo;
-        const runKm = Math.max(0, enteredOdo - prevOdo);
+        const enteredOdo =
+          record.odometerReading && Number(record.odometerReading) > 0
+            ? Number(record.odometerReading)
+            : prevOdo;
+        const startOdo = enteredOdo >= prevOdo ? prevOdo : enteredOdo;
+        const runKm = Math.max(0, enteredOdo - startOdo);
         if (enteredOdo > prevOdo) {
           veh.currentOdometer = enteredOdo;
         }
-        const litresAdded = Number(record.fuelLitres) || (record.category.toLowerCase().includes('fuel') ? Math.round((record.amount / 90) * 10) / 10 : 0);
+        const litresAdded =
+          Number(record.fuelLitres) ||
+          (record.category.toLowerCase().includes('fuel')
+            ? Math.round((record.amount / 90) * 10) / 10
+            : 0);
 
         const existingLog = this.odometerLogs.find(
           l => l.vehicleNumber === veh.registrationNumber && l.date === record.date && !l.expenseId
         );
-        const expNote = `[Expense ${record.expenseNo}] ${record.category}: ₹${record.amount}${litresAdded ? ` (${litresAdded}L)` : ''} (${record.vendorName || 'Vendor'}) - ${record.narration || ''}`;
+        const expNote = `[Expense ${record.expenseNo}] ${record.category}: ₹${record.amount}${
+          litresAdded ? ` (${litresAdded}L)` : ''
+        } (${record.vendorName || 'Vendor'}) - ${record.narration || ''}`;
         if (existingLog) {
           existingLog.expenseId = record.id;
           existingLog.expenseCategory = record.category;
@@ -10291,12 +10701,12 @@ export class SheetsDatabaseManager {
             : expNote;
         } else {
           const autoLog: OdometerLog = {
-            id: `odo-exp-${Date.now()}`,
+            id: `odo-exp-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
             date: record.date,
             vehicleId: veh.id,
             vehicleNumber: veh.registrationNumber,
             driverName: record.driverName || veh.assignedDriverName || 'Assigned Driver',
-            startOdometer: prevOdo,
+            startOdometer: startOdo,
             endOdometer: enteredOdo,
             tripKm: runKm,
             fuelLitresAdded: litresAdded,
@@ -10312,9 +10722,13 @@ export class SheetsDatabaseManager {
         }
       }
     }
+
+    this.recalculateAllLedgerBalances();
   }
 
-  public async addExpense(data: Omit<ExpenseRecord, 'id' | 'expenseNo'> & { skipLogbookSync?: boolean }): Promise<ExpenseRecord> {
+  public async addExpense(
+    data: Omit<ExpenseRecord, 'id' | 'expenseNo'> & { skipLogbookSync?: boolean }
+  ): Promise<ExpenseRecord> {
     return this.enqueueWrite(async () => {
       if (!data.category || !data.category.trim()) {
         throw new Error('Expense Category is mandatory.');
@@ -10329,14 +10743,30 @@ export class SheetsDatabaseManager {
         throw new Error('Payment Mode (Cash / Bank / UPI) is mandatory.');
       }
 
-      const expNo = `EXP-${new Date().toISOString().slice(2, 7).replace('-', '')}-${(this.expenses.length + 1).toString().padStart(3, '0')}`;
-      const matchedHead = this.expenseHeads.find(h => h.name.toLowerCase() === (data.category || '').toLowerCase());
-      const requiresApproval = data.requiresApproval !== undefined ? data.requiresApproval : !!matchedHead?.requiresApproval;
-      const approvalStatus: ExpenseRecord['approvalStatus'] = requiresApproval ? 'Pending Approval' : 'Approved';
+      const ymPrefix = `EXP-${new Date().toISOString().slice(2, 7).replace('-', '')}-`;
+      const maxSeq = this.expenses.reduce((max, e) => {
+        const m = String(e.expenseNo || '').match(/EXP-\d{4}-(\d+)/);
+        const n = m ? parseInt(m[1], 10) : 0;
+        return n > max ? n : max;
+      }, 0);
+      const expNo = `${ymPrefix}${Math.max(this.expenses.length + 1, maxSeq + 1)
+        .toString()
+        .padStart(3, '0')}`;
+      const matchedHead = this.expenseHeads.find(
+        h => h.name.toLowerCase() === (data.category || '').toLowerCase()
+      );
+      const requiresApproval =
+        data.requiresApproval !== undefined ? data.requiresApproval : !!matchedHead?.requiresApproval;
+      const approvalStatus: ExpenseRecord['approvalStatus'] = requiresApproval
+        ? 'Pending Approval'
+        : 'Approved';
 
-      const veh = data.vehicleNumber && data.vehicleNumber !== 'General'
-        ? this.vehicles.find(v => v.registrationNumber === data.vehicleNumber || v.id === data.vehicleId)
-        : undefined;
+      const veh =
+        data.vehicleNumber && data.vehicleNumber !== 'General'
+          ? this.vehicles.find(
+              v => v.registrationNumber === data.vehicleNumber || v.id === data.vehicleId
+            )
+          : undefined;
 
       const record: ExpenseRecord = {
         ...data,
@@ -10349,19 +10779,170 @@ export class SheetsDatabaseManager {
         recordedBy: data.recordedBy || 'Finance Officer',
         requiresApproval,
         approvalStatus,
-        approvedBy: approvalStatus === 'Approved' ? 'Direct Acceptance (No Approval Required)' : undefined,
-        approvedAt: approvalStatus === 'Approved' ? new Date().toISOString().split('T')[0] : undefined,
+        approvedBy:
+          approvalStatus === 'Approved' ? 'Direct Acceptance (No Approval Required)' : undefined,
+        approvedAt:
+          approvalStatus === 'Approved' ? new Date().toISOString().split('T')[0] : undefined,
       };
 
       this.expenses.unshift(record);
 
-      // Only incorporate into paid ledgers, vouchers, and vehicle log book once Approved
       if (record.approvalStatus === 'Approved') {
         this.postApprovedExpenseSideEffects(record, !!data.skipLogbookSync);
+      } else {
+        this.recalculateAllLedgerBalances();
       }
 
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, [
+        'Expenses_Fuel_Ledger',
+        'Chart_Of_Accounts',
+        'Journal_Vouchers',
+        'Vehicles_Master',
+        'Daily_Log_Book_24H',
+      ]);
       return record;
+    });
+  }
+
+  public async updateExpense(
+    id: string,
+    data: Partial<ExpenseRecord> & { removeBillPhoto?: boolean }
+  ): Promise<ExpenseRecord> {
+    return this.enqueueWrite(async () => {
+      const cleanId = String(id || '').trim();
+      const idx = this.expenses.findIndex(e => e.id === cleanId || e.expenseNo === cleanId);
+      if (idx < 0) {
+        throw new Error('Expense record not found.');
+      }
+
+      const existing = this.expenses[idx];
+      const prevSnapshot: ExpenseRecord = { ...existing };
+
+      const nextCategory = (data.category ?? existing.category ?? '').trim();
+      if (!nextCategory) {
+        throw new Error('Expense Category is mandatory.');
+      }
+      const nextAmount = data.amount !== undefined ? Number(data.amount) : existing.amount;
+      if (!nextAmount || nextAmount <= 0) {
+        throw new Error('Expense Amount must be greater than ₹0.');
+      }
+      const nextVendor = (data.vendorName ?? existing.vendorName ?? '').trim();
+      if (!nextVendor) {
+        throw new Error('Vendor / Payee Name is mandatory.');
+      }
+      const nextMode = data.paymentMode || existing.paymentMode;
+      if (!nextMode) {
+        throw new Error('Payment Mode (Cash / Bank / UPI) is mandatory.');
+      }
+
+      // 1. Cleanly reverse previous logbook side effects before applying edited values
+      this.removeExpenseLogbookEffects(prevSnapshot);
+
+      const nextVehNum = data.vehicleNumber !== undefined ? data.vehicleNumber || 'General' : existing.vehicleNumber || 'General';
+      const veh =
+        nextVehNum && nextVehNum !== 'General'
+          ? this.vehicles.find(
+              v => v.registrationNumber === nextVehNum || (data.vehicleId && v.id === data.vehicleId)
+            )
+          : undefined;
+
+      // Preserve existing base64 billPhoto when frontend sends back the /api/attachments/expense/... URL
+      let resolvedBillPhoto = existing.billPhoto;
+      if (data.removeBillPhoto) {
+        resolvedBillPhoto = undefined;
+      } else if (typeof data.billPhoto === 'string') {
+        if (data.billPhoto.startsWith('data:')) {
+          resolvedBillPhoto = data.billPhoto;
+        } else if (data.billPhoto.trim() === '') {
+          resolvedBillPhoto = undefined;
+        }
+      }
+
+      const nextStatus: ExpenseRecord['approvalStatus'] =
+        data.approvalStatus || existing.approvalStatus || 'Approved';
+      const matchedHead = this.expenseHeads.find(
+        h => h.name.toLowerCase() === nextCategory.toLowerCase()
+      );
+
+      const hasOdometer =
+        nextVehNum !== 'General' &&
+        data.odometerReading !== undefined &&
+        data.odometerReading !== null &&
+        String(data.odometerReading).trim() !== '' &&
+        Number(data.odometerReading) > 0;
+
+      const hasFuelLitres =
+        nextVehNum !== 'General' &&
+        data.fuelLitres !== undefined &&
+        data.fuelLitres !== null &&
+        String(data.fuelLitres).trim() !== '' &&
+        Number(data.fuelLitres) > 0;
+
+      const updated: ExpenseRecord = {
+        ...existing,
+        date: data.date || existing.date,
+        campus: data.campus || existing.campus,
+        category: nextCategory,
+        vehicleId: nextVehNum === 'General' ? undefined : veh?.id || data.vehicleId || existing.vehicleId,
+        vehicleNumber: nextVehNum === 'General' ? 'General' : veh?.registrationNumber || nextVehNum,
+        driverName:
+          nextVehNum === 'General'
+            ? undefined
+            : data.driverName !== undefined
+            ? data.driverName
+            : existing.driverName || veh?.assignedDriverName,
+        odometerReading: hasOdometer ? Number(data.odometerReading) : undefined,
+        fuelLitres: hasFuelLitres ? Number(data.fuelLitres) : undefined,
+        amount: nextAmount,
+        paymentMode: nextMode,
+        vendorName: nextVendor,
+        billNumber: data.billNumber !== undefined ? data.billNumber : existing.billNumber,
+        billPhoto: resolvedBillPhoto,
+        narration:
+          data.narration !== undefined && data.narration.trim()
+            ? data.narration.trim()
+            : existing.narration,
+        requiresApproval:
+          matchedHead !== undefined ? !!matchedHead.requiresApproval : existing.requiresApproval,
+        approvalStatus: nextStatus,
+        approvedBy:
+          nextStatus === 'Approved'
+            ? existing.approvedBy || 'Admin (Edited & Approved)'
+            : nextStatus === 'Rejected'
+            ? 'Admin'
+            : undefined,
+        approvedAt:
+          nextStatus === 'Approved'
+            ? existing.approvedAt || new Date().toISOString().split('T')[0]
+            : undefined,
+      };
+
+      this.expenses[idx] = updated;
+
+      // 2. Sync Journal Voucher, Vehicle Log Book, Vehicle Odometer, and all Chart of Accounts balances
+      if (updated.approvalStatus === 'Approved') {
+        this.postApprovedExpenseSideEffects(updated, false);
+      } else {
+        this.syncExpenseVoucher(updated);
+        this.recalculateAllLedgerBalances();
+      }
+
+      if (prevSnapshot.vehicleNumber && prevSnapshot.vehicleNumber !== 'General') {
+        this.syncVehicleCurrentOdometer(prevSnapshot.vehicleNumber, prevSnapshot.vehicleId);
+      }
+      if (updated.vehicleNumber && updated.vehicleNumber !== 'General') {
+        this.syncVehicleCurrentOdometer(updated.vehicleNumber, updated.vehicleId);
+      }
+
+      await this.internalSyncToGoogleSheets(false, [
+        'Expenses_Fuel_Ledger',
+        'Chart_Of_Accounts',
+        'Journal_Vouchers',
+        'Vehicles_Master',
+        'Daily_Log_Book_24H',
+        'School_Masters',
+      ]);
+      return updated;
     });
   }
 
@@ -10372,7 +10953,7 @@ export class SheetsDatabaseManager {
     return this.enqueueWrite(async () => {
       const record = this.expenses.find(e => e.id === id);
       if (!record) throw new Error('Expense record not found.');
-      const prevStatus = record.approvalStatus;
+      const prevSnapshot: ExpenseRecord = { ...record };
       record.approvalStatus = payload.status;
       record.approvedBy = payload.approvedBy || 'Admin';
       record.approvedAt = new Date().toISOString().split('T')[0];
@@ -10380,11 +10961,25 @@ export class SheetsDatabaseManager {
         record.rejectionReason = payload.rejectionReason;
       }
 
-      if (payload.status === 'Approved' && prevStatus !== 'Approved') {
+      this.removeExpenseLogbookEffects(prevSnapshot);
+      if (payload.status === 'Approved') {
         this.postApprovedExpenseSideEffects(record, false);
+      } else {
+        this.syncExpenseVoucher(record);
+        this.recalculateAllLedgerBalances();
+      }
+      if (record.vehicleNumber && record.vehicleNumber !== 'General') {
+        this.syncVehicleCurrentOdometer(record.vehicleNumber, record.vehicleId);
       }
 
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, [
+        'Expenses_Fuel_Ledger',
+        'Chart_Of_Accounts',
+        'Journal_Vouchers',
+        'Vehicles_Master',
+        'Daily_Log_Book_24H',
+        'School_Masters',
+      ]);
       return record;
     });
   }
@@ -10393,9 +10988,33 @@ export class SheetsDatabaseManager {
     return this.enqueueWrite(async () => {
       const target = this.expenses.find(e => e.id === id);
       if (id) this.explicitlyDeletedIds.add(String(id).trim());
-      if (target?.expenseNo) this.explicitlyDeletedIds.add(String(target.expenseNo).trim());
+      if (target) {
+        if (target.expenseNo) this.explicitlyDeletedIds.add(String(target.expenseNo).trim());
+        const targetVoucherNo = `JV-${target.expenseNo}`;
+        const vch = this.vouchers.find(
+          v => (target.voucherId && v.id === target.voucherId) || v.voucherNo === targetVoucherNo
+        );
+        if (vch) {
+          this.explicitlyDeletedIds.add(vch.id);
+          this.explicitlyDeletedIds.add(vch.voucherNo);
+          this.vouchers = this.vouchers.filter(v => v.id !== vch.id && v.voucherNo !== targetVoucherNo);
+        }
+        this.removeExpenseLogbookEffects(target);
+      }
       this.expenses = this.expenses.filter(e => e.id !== id);
-      await this.internalSyncToGoogleSheets();
+      if (target?.vehicleNumber && target.vehicleNumber !== 'General') {
+        this.syncVehicleCurrentOdometer(target.vehicleNumber, target.vehicleId);
+      }
+      this.recalculateAllLedgerBalances();
+
+      await this.internalSyncToGoogleSheets(false, [
+        'Expenses_Fuel_Ledger',
+        'Chart_Of_Accounts',
+        'Journal_Vouchers',
+        'Vehicles_Master',
+        'Daily_Log_Book_24H',
+        'School_Masters',
+      ]);
       return { success: true };
     });
   }
@@ -10405,36 +11024,65 @@ export class SheetsDatabaseManager {
     return this.expenseHeads;
   }
 
-  public async saveExpenseHead(data: { id?: string; name: string; category?: string; requiresApproval?: boolean }): Promise<ExpenseHead> {
+  public async saveExpenseHead(data: {
+    id?: string;
+    name: string;
+    category?: string;
+    requiresApproval?: boolean;
+  }): Promise<ExpenseHead> {
     return this.enqueueWrite(async () => {
+      const trimmed = data.name?.trim();
+      if (!trimmed) throw new Error('Expense Category name is required.');
+
       if (data.id) {
         const existingById = this.expenseHeads.find(h => h.id === data.id);
         if (existingById) {
-          if (data.name?.trim()) existingById.name = data.name.trim();
+          const prevName = existingById.name;
+          existingById.name = trimmed;
           if (data.category) existingById.category = data.category;
-          if (data.requiresApproval !== undefined) existingById.requiresApproval = !!data.requiresApproval;
-          await this.internalSyncToGoogleSheets();
+          if (data.requiresApproval !== undefined) {
+            existingById.requiresApproval = !!data.requiresApproval;
+          }
+          let renamedLinkedExpenses = false;
+          if (prevName && prevName !== trimmed) {
+            for (const exp of this.expenses) {
+              if (exp.category === prevName) {
+                exp.category = trimmed;
+                this.syncExpenseVoucher(exp);
+                renamedLinkedExpenses = true;
+              }
+            }
+            if (renamedLinkedExpenses) {
+              this.recalculateAllLedgerBalances();
+            }
+          }
+          await this.internalSyncToGoogleSheets(
+            false,
+            renamedLinkedExpenses
+              ? ['Expense_Heads', 'Expenses_Fuel_Ledger', 'Journal_Vouchers', 'Chart_Of_Accounts']
+              : ['Expense_Heads']
+          );
           return existingById;
         }
       }
-      const trimmed = data.name?.trim();
-      if (!trimmed) throw new Error('Expense Head name is required.');
+
       const existing = this.expenseHeads.find(h => h.name.toLowerCase() === trimmed.toLowerCase());
       if (existing) {
         if (data.category) existing.category = data.category;
         if (data.requiresApproval !== undefined) existing.requiresApproval = !!data.requiresApproval;
-        await this.internalSyncToGoogleSheets();
+        await this.internalSyncToGoogleSheets(false, ['Expense_Heads']);
         return existing;
       }
+
       const head: ExpenseHead = {
         id: `eh-${Date.now()}`,
         name: trimmed,
-        category: data.category || 'Indirect Expense',
+        category: data.category || 'Direct Expense',
         requiresApproval: !!data.requiresApproval,
         createdAt: new Date().toISOString().split('T')[0],
       };
       this.expenseHeads.unshift(head);
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, ['Expense_Heads']);
       return head;
     });
   }
@@ -10445,11 +11093,14 @@ export class SheetsDatabaseManager {
       if (head) {
         const linked = this.expenses.filter(e => e.category === head.name);
         if (linked.length > 0) {
-          throw new Error(`Cannot delete Expense Head "${head.name}" because ${linked.length} expense record(s) use it.`);
+          throw new Error(
+            `Cannot delete Expense Category "${head.name}" because ${linked.length} expense record(s) use it.`
+          );
         }
       }
+      if (id) this.explicitlyDeletedIds.add(String(id).trim());
       this.expenseHeads = this.expenseHeads.filter(h => h.id !== id);
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, ['Expense_Heads', 'School_Masters']);
       return { success: true };
     });
   }

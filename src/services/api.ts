@@ -111,6 +111,12 @@ export function getLastMutationBootstrapAt(): number {
 function unwrapMutationEnvelope(data: any): any {
   if (data && typeof data === 'object' && data.__erpEnvelope === true) {
     if (data.bootstrap) {
+      if (!Array.isArray(data.bootstrap.attendance)) {
+        const prev = getCachedBootstrap();
+        if (Array.isArray(prev?.attendance)) {
+          data.bootstrap.attendance = prev.attendance;
+        }
+      }
       saveCachedBootstrap(data.bootstrap);
       if (bootstrapUpdateListener) {
         lastMutationBootstrapAt = Date.now();
@@ -130,9 +136,21 @@ async function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (method !== 'GET') {
     const headers = new Headers(init?.headers || {});
     headers.set('X-ERP-Include-Bootstrap', '1');
-    nextInit = { ...init, headers };
+    nextInit = { ...init, headers, cache: 'no-store' };
   }
-  const res = await nativeFetch(input, nextInit);
+  let res: Response;
+  try {
+    res = await nativeFetch(input, nextInit);
+  } catch (err) {
+    // On slow mobile networks or strict proxy limits, retry mutation once with a tiny 200-byte response (no bootstrap envelope)
+    if (method !== 'GET') {
+      const liteHeaders = new Headers(init?.headers || {});
+      liteHeaders.delete('X-ERP-Include-Bootstrap');
+      res = await nativeFetch(input, { ...init, headers: liteHeaders, cache: 'no-store' });
+    } else {
+      throw err;
+    }
+  }
   const origJson = res.json.bind(res);
   res.json = async () => {
     const parsed = await origJson();
@@ -746,40 +764,39 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to add expense');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to add expense');
+  },
+  updateExpense: async (
+    id: string,
+    data: Partial<ExpenseRecord> & { removeBillPhoto?: boolean }
+  ): Promise<ExpenseRecord> => {
+    const res = await fetch(`/api/expenses/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return parseApiJson(res, 'Failed to update expense bill');
   },
   deleteExpense: async (id: string) => {
-    const res = await fetch(`/api/expenses/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to delete expense');
-    }
-    return res.json();
+    const res = await fetch(`/api/expenses/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    return parseApiJson(res, 'Failed to delete expense');
   },
   updateExpenseApproval: async (
     id: string,
     payload: { status: 'Approved' | 'Rejected'; approvedBy?: string; rejectionReason?: string }
   ): Promise<ExpenseRecord> => {
-    const res = await fetch(`/api/expenses/${id}/approval`, {
+    const res = await fetch(`/api/expenses/${encodeURIComponent(id)}/approval`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to update expense approval');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to update expense approval');
   },
 
   // Dynamic Expense Heads & Income Heads & Incomes
   getExpenseHeads: async (): Promise<ExpenseHead[]> => {
     const res = await fetch('/api/expense-heads');
-    return res.json();
+    return parseApiJson(res, 'Failed to load expense categories');
   },
   saveExpenseHead: async (data: { id?: string; name: string; category?: string; requiresApproval?: boolean }): Promise<ExpenseHead> => {
     const res = await fetch('/api/expense-heads', {
@@ -787,19 +804,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to save expense head');
-    }
-    return res.json();
+    return parseApiJson(res, 'Failed to save expense category');
   },
   deleteExpenseHead: async (id: string) => {
-    const res = await fetch(`/api/expense-heads/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Cannot delete expense head');
-    }
-    return res.json();
+    const res = await fetch(`/api/expense-heads/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    return parseApiJson(res, 'Cannot delete expense category');
   },
 
   getIncomeHeads: async (): Promise<IncomeHead[]> => {

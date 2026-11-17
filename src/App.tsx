@@ -1487,6 +1487,14 @@ export function App() {
     await api.addExpense(data);
     await loadAllData();
   };
+  const handleUpdateExpense = async (
+    id: string,
+    data: Partial<ExpenseRecord> & { removeBillPhoto?: boolean }
+  ) => {
+    const updated = await api.updateExpense(id, data);
+    await loadAllData();
+    return updated;
+  };
   const handleUpdateExpenseApproval = async (
     id: string,
     payload: {
@@ -2215,6 +2223,7 @@ export function App() {
                   onSaveExpenseHead={handleSaveExpenseHead}
                   onDeleteExpenseHead={handleDeleteExpenseHead}
                   onAddExpense={handleAddExpense}
+                  onUpdateExpense={handleUpdateExpense}
                   onUpdateExpenseApproval={handleUpdateExpenseApproval}
                   onDeleteExpense={handleDeleteExpense}
                 />
@@ -2253,6 +2262,7 @@ export function App() {
                   invoices={invoices}
                   receipts={receipts}
                   expenses={expenses}
+                  expenseHeads={expenseHeads}
                   odometerLogs={odometerLogs}
                   incomeHeads={incomeHeads}
                   incomes={otherIncomes}
@@ -2260,6 +2270,7 @@ export function App() {
                   onDeleteIncomeHead={handleDeleteIncomeHead}
                   onAddIncome={handleAddOtherIncome}
                   onDeleteIncome={handleDeleteOtherIncome}
+                  onUpdateExpense={handleUpdateExpense}
                   onDeleteExpense={handleDeleteExpense}
                   onCreateVoucher={handleCreateVoucher}
                 />

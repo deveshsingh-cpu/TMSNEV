@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  IndianRupee, Plus, Search, Calendar, Tag, X, Upload, Eye, Trash2, Lock, Check, Ban, ShieldCheck
+  IndianRupee, Plus, Search, Calendar, Tag, X, Upload, Eye, Trash2, Lock, Check, Ban, ShieldCheck, Pencil
 } from 'lucide-react';
 import { ExpenseRecord, ExpenseHead, Vehicle, Route, Student } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
@@ -26,6 +26,10 @@ interface ExpensesViewProps {
   expenseHeads?: ExpenseHead[];
   vehicles?: Vehicle[];
   onAddExpense: (data: Omit<ExpenseRecord, 'id' | 'expenseNo'>) => Promise<any>;
+  onUpdateExpense?: (
+    id: string,
+    data: Partial<ExpenseRecord> & { removeBillPhoto?: boolean }
+  ) => Promise<any>;
   onUpdateExpenseApproval?: (
     id: string,
     payload: { status: 'Approved' | 'Rejected'; approvedBy?: string; rejectionReason?: string }
@@ -47,6 +51,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   expenseHeads = [],
   vehicles = [],
   onAddExpense,
+  onUpdateExpense,
   onUpdateExpenseApproval,
   onDeleteExpense,
   onSaveExpenseHead,
@@ -89,7 +94,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const [category, setCategory] = useState<string>(expenseHeads[0]?.name || 'Fuel (Diesel / CNG)');
   const [vehicleNumber, setVehicleNumber] = useState('General');
   const [amount, setAmount] = useState('');
-  const [paymentMode, setPaymentMode] = useState<'Cash' | 'Bank' | 'UPI'>('Cash');
+  const [paymentMode, setPaymentMode] = useState<ExpenseRecord['paymentMode']>('Cash');
   const [vendorName, setVendorName] = useState('');
   const [billNumber, setBillNumber] = useState('');
   const [billPhoto, setBillPhoto] = useState<string>('');
@@ -98,14 +103,21 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const [odometerReading, setOdometerReading] = useState<string>('');
   const [fuelLitres, setFuelLitres] = useState<string>('');
   const [driverName, setDriverName] = useState<string>('');
+  const [editingExpense, setEditingExpense] = useState<ExpenseRecord | null>(null);
+  const [editApprovalStatus, setEditApprovalStatus] = useState<'Approved' | 'Pending Approval' | 'Rejected'>('Approved');
+  const [removeExistingBill, setRemoveExistingBill] = useState(false);
+  const [expenseFormError, setExpenseFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [previewBill, setPreviewBill] = useState<{ title: string; url: string } | null>(null);
 
-  // Expense Head creator state
+  // Expense Head creator / editor state
+  const [editingHead, setEditingHead] = useState<ExpenseHead | null>(null);
   const [newHeadName, setNewHeadName] = useState('');
   const [newHeadDesc, setNewHeadDesc] = useState('Direct Expense');
   const [newHeadRequiresApproval, setNewHeadRequiresApproval] = useState(false);
+  const [isSavingHead, setIsSavingHead] = useState(false);
   const [headError, setHeadError] = useState<string | null>(null);
+  const [headSuccess, setHeadSuccess] = useState<string | null>(null);
   const [showInlineHeadCreator, setShowInlineHeadCreator] = useState(false);
 
   useEffect(() => {
@@ -115,7 +127,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   }, [expenseHeads, category]);
 
   useEffect(() => {
-    if (!isAdmin) {
+    if (!isAdmin && !editingExpense) {
       setExpenseDate(todayStr);
     }
     if (isModalOpen) {
@@ -124,23 +136,61 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         if (modalBodyRef.current) modalBodyRef.current.scrollTop = 0;
       });
     }
-  }, [isAdmin, todayStr, isModalOpen]);
+  }, [isAdmin, todayStr, isModalOpen, editingExpense]);
 
   const handleOpenAddModal = () => {
+    setEditingExpense(null);
+    setExpenseFormError(null);
+    setRemoveExistingBill(false);
     setVehicleNumber('General');
     setDriverName('');
     setOdometerReading('');
     setFuelLitres('');
     setAmount('');
+    setPaymentMode('Cash');
     setVendorName('');
     setBillNumber('');
     setBillPhoto('');
     setBillFileName('');
     setNarration('');
     setShowInlineHeadCreator(false);
-    if (!isAdmin) {
-      setExpenseDate(todayStr);
+    setExpenseDate(todayStr);
+    if (!lockedCampus) {
+      setExpenseCampus(selectedCampus === 'Jr' ? 'Jr' : 'Sr');
     }
+    setIsModalOpen(true);
+  };
+
+  const handleOpenEditModal = (exp: ExpenseRecord) => {
+    if (!isAdmin) return;
+    setEditingExpense(exp);
+    setExpenseFormError(null);
+    setRemoveExistingBill(false);
+    setExpenseDate(exp.date || todayStr);
+    setExpenseCampus(getExpenseCampus(exp, vehicles, routes, students));
+    setCategory(exp.category || expenseHeads[0]?.name || 'General Operations');
+    setVehicleNumber(exp.vehicleNumber || 'General');
+    const matchedVeh = vehicles.find((v) => v.registrationNumber === exp.vehicleNumber);
+    setDriverName(exp.driverName || matchedVeh?.assignedDriverName || '');
+    setOdometerReading(
+      exp.odometerReading !== undefined && exp.odometerReading !== null && exp.odometerReading > 0
+        ? String(exp.odometerReading)
+        : ''
+    );
+    setFuelLitres(
+      exp.fuelLitres !== undefined && exp.fuelLitres !== null && exp.fuelLitres > 0
+        ? String(exp.fuelLitres)
+        : ''
+    );
+    setAmount(String(exp.amount || ''));
+    setPaymentMode(exp.paymentMode || 'Cash');
+    setVendorName(exp.vendorName || '');
+    setBillNumber(exp.billNumber || '');
+    setBillPhoto(exp.billPhoto || '');
+    setBillFileName('');
+    setNarration(exp.narration || '');
+    setEditApprovalStatus(exp.approvalStatus || 'Approved');
+    setShowInlineHeadCreator(false);
     setIsModalOpen(true);
   };
 
@@ -151,6 +201,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     setBillFileName(file.name);
+    setRemoveExistingBill(false);
     try {
       const compressed = await readFileCompressed(file, 900, 0.72);
       setBillPhoto(compressed);
@@ -190,37 +241,77 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!amount || Number(amount) <= 0) return;
+    setExpenseFormError(null);
+    if (!amount || Number(amount) <= 0) {
+      setExpenseFormError('Amount must be greater than ₹0.');
+      return;
+    }
 
     try {
       setIsSubmitting(true);
       const selectedVehObj = vehicles.find((v) => v.registrationNumber === vehicleNumber);
       const targetCamp = lockedCampus || expenseCampus;
-      await onAddExpense({
-        date: isAdmin ? expenseDate : todayStr,
-        campus: targetCamp,
-        category: category || expenseHeads[0]?.name || 'General Operations',
-        vehicleId: selectedVehObj?.id,
-        vehicleNumber,
-        driverName: vehicleNumber !== 'General' ? (driverName || selectedVehObj?.assignedDriverName || '') : undefined,
-        odometerReading:
-          vehicleNumber !== 'General' && odometerReading.trim() !== ''
-            ? Number(odometerReading)
-            : undefined,
-        fuelLitres:
-          vehicleNumber !== 'General' && fuelLitres.trim() !== ''
-            ? Number(fuelLitres)
-            : undefined,
-        amount: Number(amount),
-        paymentMode,
-        vendorName: vendorName || 'Direct Vendor',
-        billNumber,
-        billPhoto: billPhoto || undefined,
-        narration: narration || `${category} expenditure (${targetCamp} Campus)`,
-        recordedBy: `${currentRole} (${targetCamp} Campus)`,
-        requiresApproval: categoryNeedsApproval,
-      });
+
+      if (editingExpense && onUpdateExpense) {
+        await onUpdateExpense(editingExpense.id, {
+          date: expenseDate,
+          campus: targetCamp,
+          category: category || expenseHeads[0]?.name || 'General Operations',
+          vehicleId: vehicleNumber !== 'General' ? selectedVehObj?.id : undefined,
+          vehicleNumber,
+          driverName:
+            vehicleNumber !== 'General'
+              ? driverName || selectedVehObj?.assignedDriverName || ''
+              : undefined,
+          odometerReading:
+            vehicleNumber !== 'General' && odometerReading.trim() !== ''
+              ? Number(odometerReading)
+              : undefined,
+          fuelLitres:
+            vehicleNumber !== 'General' && fuelLitres.trim() !== ''
+              ? Number(fuelLitres)
+              : undefined,
+          amount: Number(amount),
+          paymentMode,
+          vendorName: vendorName.trim() || 'Direct Vendor',
+          billNumber,
+          billPhoto: removeExistingBill ? '' : billPhoto || undefined,
+          removeBillPhoto: removeExistingBill,
+          narration: narration.trim() || `${category} expenditure (${targetCamp} Campus)`,
+          approvalStatus: editApprovalStatus,
+        });
+      } else {
+        await onAddExpense({
+          date: isAdmin ? expenseDate : todayStr,
+          campus: targetCamp,
+          category: category || expenseHeads[0]?.name || 'General Operations',
+          vehicleId: selectedVehObj?.id,
+          vehicleNumber,
+          driverName:
+            vehicleNumber !== 'General'
+              ? driverName || selectedVehObj?.assignedDriverName || ''
+              : undefined,
+          odometerReading:
+            vehicleNumber !== 'General' && odometerReading.trim() !== ''
+              ? Number(odometerReading)
+              : undefined,
+          fuelLitres:
+            vehicleNumber !== 'General' && fuelLitres.trim() !== ''
+              ? Number(fuelLitres)
+              : undefined,
+          amount: Number(amount),
+          paymentMode,
+          vendorName: vendorName.trim() || 'Direct Vendor',
+          billNumber,
+          billPhoto: billPhoto || undefined,
+          narration: narration.trim() || `${category} expenditure (${targetCamp} Campus)`,
+          recordedBy: `${currentRole} (${targetCamp} Campus)`,
+          requiresApproval: categoryNeedsApproval,
+        });
+      }
       setIsModalOpen(false);
+      setEditingExpense(null);
+      setRemoveExistingBill(false);
       setVehicleNumber('General');
       setDriverName('');
       setAmount('');
@@ -232,8 +323,9 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       setOdometerReading('');
       setFuelLitres('');
       setShowInlineHeadCreator(false);
-    } catch (err) {
-      console.error('Failed to add expense:', err);
+    } catch (err: any) {
+      console.error('Failed to save expense:', err);
+      setExpenseFormError(err?.message || 'Failed to save expense bill. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -242,34 +334,50 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const handleCreateExpenseHead = async (e: React.FormEvent) => {
     e.preventDefault();
     setHeadError(null);
+    setHeadSuccess(null);
     if (!newHeadName.trim()) {
       setHeadError('Expense Category Name is required.');
       return;
     }
     try {
+      setIsSavingHead(true);
       const saved = await onSaveExpenseHead({
+        id: editingHead?.id,
         name: newHeadName.trim(),
         category: newHeadDesc.trim() || 'Direct Expense',
         requiresApproval: newHeadRequiresApproval,
       });
       setCategory(saved.name);
+      setHeadSuccess(
+        editingHead
+          ? `Updated category "${saved.name}".`
+          : `Added new category "${saved.name}".`
+      );
+      setEditingHead(null);
       setNewHeadName('');
       setNewHeadDesc('Direct Expense');
       setNewHeadRequiresApproval(false);
       setShowInlineHeadCreator(false);
     } catch (err: any) {
-      setHeadError(err.message || 'Failed to save Expense Category');
+      setHeadError(err?.message || 'Failed to save Expense Category');
+    } finally {
+      setIsSavingHead(false);
     }
   };
 
   const handleToggleHeadApproval = async (head: ExpenseHead) => {
     if (!isAdmin) return;
-    await onSaveExpenseHead({
-      id: head.id,
-      name: head.name,
-      category: head.category,
-      requiresApproval: !head.requiresApproval,
-    });
+    setHeadError(null);
+    try {
+      await onSaveExpenseHead({
+        id: head.id,
+        name: head.name,
+        category: head.category,
+        requiresApproval: !head.requiresApproval,
+      });
+    } catch (err: any) {
+      setHeadError(err?.message || 'Failed to update category approval rule');
+    }
   };
 
   const hasActiveFilters =
@@ -654,6 +762,16 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                                   </button>
                                 </>
                               )}
+                              {isAdmin && onUpdateExpense && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditModal(exp)}
+                                  className="p-1.5 rounded-lg text-indigo-600 hover:bg-indigo-50 cursor-pointer"
+                                  title="Edit Expense Bill (Admin Only)"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                              )}
                               {isAdmin && onDeleteExpense && (
                                 <button
                                   type="button"
@@ -684,9 +802,26 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left: Add Expense Category Form with Approval Checkbox (Admin Only) */}
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4 h-fit">
-            <h3 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-3">
-              Add Expense Type / Category
-            </h3>
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold text-slate-900">
+                {editingHead ? 'Edit Expense Category' : 'Add Expense Type / Category'}
+              </h3>
+              {editingHead && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingHead(null);
+                    setNewHeadName('');
+                    setNewHeadDesc('Direct Expense');
+                    setNewHeadRequiresApproval(false);
+                    setHeadError(null);
+                  }}
+                  className="text-xs font-semibold text-slate-500 hover:text-slate-800 cursor-pointer"
+                >
+                  Cancel Edit
+                </button>
+              )}
+            </div>
 
             {!isAdmin ? (
               <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
@@ -700,6 +835,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     {headError}
                   </div>
                 )}
+                {headSuccess && (
+                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
+                    {headSuccess}
+                  </div>
+                )}
 
                 <form onSubmit={handleCreateExpenseHead} className="space-y-3.5 text-xs">
                   <div>
@@ -711,7 +851,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                       required
                       value={newHeadName}
                       onChange={(e) => setNewHeadName(e.target.value)}
-                      placeholder="e.g. Spare Parts, Tyre Retreading"
+                      placeholder="e.g. Rental Due to Breakdown/Other"
                       className="w-full p-2.5 border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
@@ -751,9 +891,14 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-xs cursor-pointer"
+                    disabled={isSavingHead}
+                    className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-xl shadow-xs cursor-pointer"
                   >
-                    Save Expense Category
+                    {isSavingHead
+                      ? 'Saving Category...'
+                      : editingHead
+                      ? 'Update Expense Category'
+                      : 'Save Expense Category'}
                   </button>
                 </form>
               </>
@@ -809,20 +954,39 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                         <td className="py-3 px-3 font-mono font-bold text-slate-700">{count}</td>
                         <td className="py-3 px-4 text-right">
                           {isAdmin && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  await onDeleteExpenseHead(h.id);
-                                } catch (err: any) {
-                                  setHeadError(err.message || 'Failed to delete Expense Category');
-                                }
-                              }}
-                              className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
-                              title="Delete Expense Category"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingHead(h);
+                                  setNewHeadName(h.name);
+                                  setNewHeadDesc(h.category || 'Direct Expense');
+                                  setNewHeadRequiresApproval(!!h.requiresApproval);
+                                  setHeadError(null);
+                                  setHeadSuccess(null);
+                                }}
+                                className="p-1.5 rounded-lg text-indigo-600 hover:bg-indigo-50 cursor-pointer"
+                                title="Edit Expense Category"
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setHeadError(null);
+                                  setHeadSuccess(null);
+                                  try {
+                                    await onDeleteExpenseHead(h.id);
+                                  } catch (err: any) {
+                                    setHeadError(err.message || 'Failed to delete Expense Category');
+                                  }
+                                }}
+                                className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
+                                title="Delete Expense Category"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -835,7 +999,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         </div>
       )}
 
-      {/* Add Expense Modal */}
+      {/* Add / Edit Expense Modal */}
       {isModalOpen && (
         <div
           ref={modalOverlayRef}
@@ -847,11 +1011,25 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                 <div className="w-8 h-8 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold shrink-0">
                   <IndianRupee className="w-4 h-4" />
                 </div>
-                <h3 className="text-base font-bold text-slate-900">Record Transport Expense</h3>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    {editingExpense
+                      ? `Edit Expense Bill — ${editingExpense.expenseNo}`
+                      : 'Record Transport Expense'}
+                  </h3>
+                  {editingExpense && (
+                    <p className="text-[10px] text-slate-500">
+                      Saving updates Cash/Bank balance, Journal Voucher &amp; Vehicle Log Book automatically.
+                    </p>
+                  )}
+                </div>
               </div>
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
+                onClick={() => {
+                  setIsModalOpen(false);
+                  setEditingExpense(null);
+                }}
                 className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -863,6 +1041,48 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                 ref={modalBodyRef}
                 className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1 overscroll-contain"
               >
+              {expenseFormError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-semibold">
+                  {expenseFormError}
+                </div>
+              )}
+
+              {!lockedCampus && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Campus *</label>
+                    <select
+                      value={expenseCampus}
+                      onChange={(e) => setExpenseCampus(e.target.value as ResolvedCampus)}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      <option value="Sr">Senior Campus (Sr)</option>
+                      <option value="Jr">Junior Campus (Jr)</option>
+                    </select>
+                  </div>
+                  {editingExpense && isAdmin && (
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Approval Status *
+                      </label>
+                      <select
+                        value={editApprovalStatus}
+                        onChange={(e) =>
+                          setEditApprovalStatus(
+                            e.target.value as 'Approved' | 'Pending Approval' | 'Rejected'
+                          )
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold text-slate-800"
+                      >
+                        <option value="Approved">Approved (Paid &amp; Posted)</option>
+                        <option value="Pending Approval">Pending Admin Approval</option>
+                        <option value="Rejected">Rejected (Excluded from Balances)</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="flex items-center justify-between mb-1">
@@ -882,6 +1102,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     onChange={(e) => setCategory(e.target.value)}
                     className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold text-slate-800"
                   >
+                    {category &&
+                      !expenseHeads.some((h) => h.name === category) && (
+                        <option value={category}>{category}</option>
+                      )}
                     {expenseHeads.map((h) => (
                       <option key={h.id} value={h.name}>
                         {h.name} {h.requiresApproval ? '(Approval Req.)' : '(Direct)'}
@@ -910,6 +1134,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold text-slate-900"
                   >
                     <option value="General">General (All Fleet)</option>
+                    {vehicleNumber &&
+                      vehicleNumber !== 'General' &&
+                      !vehicles.some((v) => v.registrationNumber === vehicleNumber) && (
+                        <option value={vehicleNumber}>{vehicleNumber}</option>
+                      )}
                     {vehicles.map((v) => (
                       <option key={v.id} value={v.registrationNumber}>
                         {v.registrationNumber} ({v.type})
@@ -964,20 +1193,22 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
               )}
 
               {/* Approval Policy Indicator */}
-              <div
-                className={`p-2.5 rounded-xl border flex items-center justify-between text-[11px] font-semibold ${
-                  categoryNeedsApproval
-                    ? 'bg-amber-50 border-amber-200 text-amber-900'
-                    : 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                }`}
-              >
-                <span className="flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 shrink-0" />
-                  {categoryNeedsApproval
-                    ? 'Admin Approval Required: Entry will be sent to Admin before payment & ledger posting.'
-                    : 'Direct Acceptance Category: Entry will be accepted and posted to ledgers immediately.'}
-                </span>
-              </div>
+              {!editingExpense && (
+                <div
+                  className={`p-2.5 rounded-xl border flex items-center justify-between text-[11px] font-semibold ${
+                    categoryNeedsApproval
+                      ? 'bg-amber-50 border-amber-200 text-amber-900'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 shrink-0" />
+                    {categoryNeedsApproval
+                      ? 'Admin Approval Required: Entry will be sent to Admin before payment & ledger posting.'
+                      : 'Direct Acceptance Category: Entry will be accepted and posted to ledgers immediately.'}
+                  </span>
+                </div>
+              )}
 
               {showInlineHeadCreator && (
                 <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
@@ -994,10 +1225,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     />
                     <button
                       type="button"
+                      disabled={isSavingHead}
                       onClick={handleCreateExpenseHead}
-                      className="px-3 py-1.5 bg-slate-900 text-white font-bold rounded-lg text-xs cursor-pointer"
+                      className="px-3 py-1.5 bg-slate-900 text-white font-bold rounded-lg text-xs cursor-pointer disabled:opacity-50"
                     >
-                      Add
+                      {isSavingHead ? 'Saving...' : 'Add'}
                     </button>
                   </div>
                   <label className="flex items-center gap-2 cursor-pointer text-[11px] font-semibold text-amber-900">
@@ -1020,6 +1252,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     type="number"
                     required
                     min="1"
+                    step="any"
                     placeholder="e.g. 2500"
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
@@ -1033,12 +1266,13 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                   </label>
                   <select
                     value={paymentMode}
-                    onChange={(e) => setPaymentMode(e.target.value as any)}
+                    onChange={(e) => setPaymentMode(e.target.value as ExpenseRecord['paymentMode'])}
                     className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold text-slate-800"
                   >
                     <option value="Cash">Cash</option>
                     <option value="UPI">UPI</option>
                     <option value="Bank">Bank Transfer</option>
+                    <option value="Fuel Advance">Fuel Advance</option>
                   </select>
                 </div>
 
@@ -1109,10 +1343,12 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                 <label className="block font-bold text-slate-700">
                   Attach Bill / Voucher Photo
                 </label>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2.5">
                   <label className="flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold cursor-pointer shadow-2xs">
                     <Upload className="w-3.5 h-3.5 text-amber-600" />
-                    <span>{billFileName ? 'Change Bill File' : 'Upload Bill Photo'}</span>
+                    <span>
+                      {billPhoto && !removeExistingBill ? 'Replace Bill Photo' : 'Upload Bill Photo'}
+                    </span>
                     <input
                       type="file"
                       accept="image/*,.pdf"
@@ -1120,10 +1356,37 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                       className="hidden"
                     />
                   </label>
-                  {billPhoto && (
-                    <span className="text-[11px] text-emerald-700 font-semibold truncate">
-                      ✓ {billFileName || 'Attached'}
-                    </span>
+                  {billPhoto && !removeExistingBill && (
+                    <>
+                      <span className="text-[11px] text-emerald-700 font-semibold truncate">
+                        ✓ {billFileName || 'Bill Attached'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewBill({
+                            title: editingExpense
+                              ? `Bill — ${editingExpense.expenseNo}`
+                              : 'Bill Preview',
+                            url: billPhoto,
+                          })
+                        }
+                        className="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-200 text-[11px] font-bold cursor-pointer"
+                      >
+                        View
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBillPhoto('');
+                          setBillFileName('');
+                          setRemoveExistingBill(true);
+                        }}
+                        className="px-2 py-1 rounded-lg bg-rose-50 text-rose-700 hover:bg-rose-100 text-[11px] font-semibold cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -1133,7 +1396,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
               <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-slate-100 bg-slate-50/80 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => {
+                    setIsModalOpen(false);
+                    setEditingExpense(null);
+                  }}
                   className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 font-semibold hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
@@ -1145,6 +1411,8 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                 >
                   {isSubmitting
                     ? 'Saving...'
+                    : editingExpense
+                    ? 'Save Changes & Recalculate'
                     : categoryNeedsApproval
                     ? 'Submit for Admin Approval'
                     : 'Save & Post Expense'}

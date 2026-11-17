@@ -1,33 +1,83 @@
 import { Router, Request, Response } from 'express';
+import zlib from 'zlib';
 import { sheetsDb } from '../sheets/sheetsService.js';
 
 export const apiRouter = Router();
 
+function sendDataUrlAttachment(res: Response, rawDataUrl: string | undefined) {
+  if (!rawDataUrl || !rawDataUrl.startsWith('data:')) {
+    res.status(404).json({ error: 'Attachment not found.' });
+    return;
+  }
+  const match = rawDataUrl.match(/^data:([^;,]+);base64,(.+)$/s);
+  if (!match) {
+    res.status(400).json({ error: 'Invalid attachment encoding.' });
+    return;
+  }
+  const mimeType = match[1] || 'image/jpeg';
+  const buf = Buffer.from(match[2], 'base64');
+  res.setHeader('Content-Type', mimeType);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.setHeader('Content-Length', String(buf.length));
+  res.status(200).end(buf);
+}
+
 apiRouter.use(async (req: Request, res: Response, next) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
+  if (!req.path.startsWith('/attachments/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+
+  const originalJson = res.json.bind(res);
+  res.json = ((body: any) => {
+    let payload = body;
+    if (
+      req.method !== 'GET' &&
+      res.statusCode < 400 &&
+      req.headers['x-erp-include-bootstrap'] === '1' &&
+      (!body || typeof body !== 'object' || !body.__erpEnvelope)
+    ) {
+      const includeAttendance =
+        req.path.includes('trip') || req.path.includes('attendance');
+      payload = {
+        __erpEnvelope: true,
+        result: body,
+        bootstrap: sheetsDb.getBootstrapSnapshot({ includeAttendance }),
+      };
+    }
+
+    const acceptEncoding = String(req.headers['accept-encoding'] || '');
+    if (acceptEncoding.includes('gzip') && !res.headersSent) {
+      try {
+        const jsonStr = JSON.stringify(payload);
+        if (jsonStr && jsonStr.length > 4096) {
+          const gz = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'), { level: 6 });
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Content-Encoding', 'gzip');
+          res.setHeader('Vary', 'Accept-Encoding');
+          res.setHeader('Content-Length', String(gz.length));
+          return res.end(gz);
+        }
+      } catch {
+        // Fallback to standard Express res.json
+      }
+    }
+    return originalJson(payload);
+  }) as any;
 
   if (req.method === 'GET') {
     await sheetsDb.ensureInitialized(req.query.fresh === '1');
-  } else {
-    const originalJson = res.json.bind(res);
-    res.json = ((body: any) => {
-      if (
-        res.statusCode < 400 &&
-        req.headers['x-erp-include-bootstrap'] === '1' &&
-        (!body || typeof body !== 'object' || !body.__erpEnvelope)
-      ) {
-        return originalJson({
-          __erpEnvelope: true,
-          result: body,
-          bootstrap: sheetsDb.getBootstrapSnapshot(),
-        });
-      }
-      return originalJson(body);
-    }) as any;
   }
   next();
+});
+
+apiRouter.get('/attachments/expense/:id', (req: Request, res: Response) => {
+  sendDataUrlAttachment(res, sheetsDb.getExpenseAttachmentRaw(req.params.id));
+});
+
+apiRouter.get('/attachments/receipt/:id', (req: Request, res: Response) => {
+  sendDataUrlAttachment(res, sheetsDb.getReceiptAttachmentRaw(req.params.id));
 });
 
 // 1. Google Sheets Connection & Diagnostic Status
@@ -602,6 +652,14 @@ apiRouter.post('/expenses', async (req: Request, res: Response) => {
   try {
     const expense = await sheetsDb.addExpense(req.body);
     res.json(expense);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.put('/expenses/:id', async (req: Request, res: Response) => {
+  try {
+    const updated = await sheetsDb.updateExpense(req.params.id, req.body);
+    res.json(updated);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }

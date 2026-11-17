@@ -3,11 +3,11 @@ import {
   Landmark, BookOpen, Scale, Plus, Search, 
   CheckCircle, AlertTriangle, Truck, GraduationCap, 
   FileText, X, IndianRupee, Tag, Upload, Eye, Trash2, Lock, Calendar,
-  BarChart3, Printer, PhoneCall, ChevronDown, ChevronRight, Users, Filter, Clock, MessageSquare
+  BarChart3, Printer, PhoneCall, ChevronDown, ChevronRight, Users, Filter, Clock, MessageSquare, Pencil
 } from 'lucide-react';
 import { 
   AccountHead, JournalVoucher, JournalLine, 
-  Vehicle, Student, FeeInvoice, FeeReceipt, ExpenseRecord,
+  Vehicle, Student, FeeInvoice, FeeReceipt, ExpenseRecord, ExpenseHead,
   OdometerLog, IncomeHead, IncomeRecord, CampusMaster, Route, FeeFollowUpRecord
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
@@ -58,6 +58,7 @@ interface AccountsViewProps {
   invoices: FeeInvoice[];
   receipts: FeeReceipt[];
   expenses: ExpenseRecord[];
+  expenseHeads?: ExpenseHead[];
   odometerLogs: OdometerLog[];
   incomeHeads: IncomeHead[];
   incomes: IncomeRecord[];
@@ -65,6 +66,10 @@ interface AccountsViewProps {
   onDeleteIncomeHead: (id: string) => Promise<void>;
   onAddIncome: (data: Omit<IncomeRecord, 'id' | 'incomeNo'>) => Promise<IncomeRecord>;
   onDeleteIncome?: (id: string) => Promise<void>;
+  onUpdateExpense?: (
+    id: string,
+    data: Partial<ExpenseRecord> & { removeBillPhoto?: boolean }
+  ) => Promise<any>;
   onDeleteExpense?: (id: string) => Promise<void>;
   onCreateVoucher: (data: Omit<JournalVoucher, 'id' | 'voucherNo' | 'totalDebit' | 'totalCredit' | 'status'>) => Promise<any>;
 }
@@ -89,6 +94,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   invoices = [],
   receipts = [],
   expenses = [],
+  expenseHeads = [],
   odometerLogs = [],
   incomeHeads = [],
   incomes = [],
@@ -96,6 +102,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   onDeleteIncomeHead,
   onAddIncome,
   onDeleteIncome,
+  onUpdateExpense,
   onDeleteExpense,
   onCreateVoucher,
 }) => {
@@ -155,6 +162,75 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   const [fuNextFollowUpDate, setFuNextFollowUpDate] = useState<string>('');
   const [fuRemarks, setFuRemarks] = useState<string>('');
   const [isSavingFollowUp, setIsSavingFollowUp] = useState<boolean>(false);
+
+  // Admin Edit Expense Modal State inside Day Book
+  const [editingDayBookExpense, setEditingDayBookExpense] = useState<ExpenseRecord | null>(null);
+  const [editExpDate, setEditExpDate] = useState<string>(todayStr);
+  const [editExpCampus, setEditExpCampus] = useState<ResolvedCampus>('Sr');
+  const [editExpCategory, setEditExpCategory] = useState<string>('');
+  const [editExpVehicle, setEditExpVehicle] = useState<string>('General');
+  const [editExpAmount, setEditExpAmount] = useState<string>('');
+  const [editExpMode, setEditExpMode] = useState<ExpenseRecord['paymentMode']>('Cash');
+  const [editExpVendor, setEditExpVendor] = useState<string>('');
+  const [editExpBillNo, setEditExpBillNo] = useState<string>('');
+  const [editExpNarration, setEditExpNarration] = useState<string>('');
+  const [editExpOdometer, setEditExpOdometer] = useState<string>('');
+  const [editExpError, setEditExpError] = useState<string | null>(null);
+  const [isSavingEditExp, setIsSavingEditExp] = useState<boolean>(false);
+
+  const openDayBookExpenseEdit = (exp: ExpenseRecord) => {
+    setEditingDayBookExpense(exp);
+    setEditExpDate(exp.date || todayStr);
+    setEditExpCampus(getExpenseCampus(exp, vehicles, routes, students));
+    setEditExpCategory(exp.category || expenseHeads[0]?.name || 'General Operations');
+    setEditExpVehicle(exp.vehicleNumber || 'General');
+    setEditExpAmount(String(exp.amount || ''));
+    setEditExpMode(exp.paymentMode || 'Cash');
+    setEditExpVendor(exp.vendorName || '');
+    setEditExpBillNo(exp.billNumber || '');
+    setEditExpNarration(exp.narration || '');
+    setEditExpOdometer(
+      exp.odometerReading !== undefined && exp.odometerReading !== null && exp.odometerReading > 0
+        ? String(exp.odometerReading)
+        : ''
+    );
+    setEditExpError(null);
+  };
+
+  const handleSaveDayBookExpenseEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDayBookExpense || !onUpdateExpense) return;
+    if (!editExpAmount || Number(editExpAmount) <= 0) {
+      setEditExpError('Amount must be greater than ₹0.');
+      return;
+    }
+    try {
+      setIsSavingEditExp(true);
+      setEditExpError(null);
+      const vehObj = vehicles.find((v) => v.registrationNumber === editExpVehicle);
+      await onUpdateExpense(editingDayBookExpense.id, {
+        date: editExpDate,
+        campus: editExpCampus,
+        category: editExpCategory,
+        vehicleId: editExpVehicle !== 'General' ? vehObj?.id : undefined,
+        vehicleNumber: editExpVehicle,
+        odometerReading:
+          editExpVehicle !== 'General' && editExpOdometer.trim() !== ''
+            ? Number(editExpOdometer)
+            : undefined,
+        amount: Number(editExpAmount),
+        paymentMode: editExpMode,
+        vendorName: editExpVendor.trim() || 'Direct Vendor',
+        billNumber: editExpBillNo,
+        narration: editExpNarration.trim() || editExpCategory,
+      });
+      setEditingDayBookExpense(null);
+    } catch (err: any) {
+      setEditExpError(err?.message || 'Failed to update expense record.');
+    } finally {
+      setIsSavingEditExp(false);
+    }
+  };
 
   useEffect(() => {
     if (lockedCampus) {
@@ -2823,13 +2899,13 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                       <th className="py-2.5 px-2.5">Name</th>
                       <th className="py-2.5 px-2">From</th>
                       <th className="py-2.5 px-3 text-right font-mono">Amount</th>
-                      {isAdmin && onDeleteExpense && <th className="py-2.5 px-2.5 text-right">Action</th>}
+                      {isAdmin && (onUpdateExpense || onDeleteExpense) && <th className="py-2.5 px-2.5 text-right">Action</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {filteredDayBookExpenses.length === 0 ? (
                       <tr>
-                        <td colSpan={isAdmin && onDeleteExpense ? 7 : 6} className="py-8 text-center text-slate-400">
+                        <td colSpan={isAdmin && (onUpdateExpense || onDeleteExpense) ? 7 : 6} className="py-8 text-center text-slate-400">
                           No expense entries for selected date / criteria.
                         </td>
                       </tr>
@@ -2863,16 +2939,30 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                           <td className="py-2.5 px-3 text-right font-mono font-bold text-rose-700">
                             ₹{exp.amount.toLocaleString('en-IN')}
                           </td>
-                          {isAdmin && onDeleteExpense && (
-                            <td className="py-2.5 px-2.5 text-right">
-                              <button
-                                type="button"
-                                onClick={() => onDeleteExpense(exp.id)}
-                                className="p-1 text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
-                                title="Delete Expense Record (Admin)"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                          {isAdmin && (onUpdateExpense || onDeleteExpense) && (
+                            <td className="py-2.5 px-2.5 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1">
+                                {onUpdateExpense && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openDayBookExpenseEdit(exp)}
+                                    className="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md cursor-pointer"
+                                    title="Edit Expense Record (Admin)"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {onDeleteExpense && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onDeleteExpense(exp.id)}
+                                    className="p-1 text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
+                                    title="Delete Expense Record (Admin)"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           )}
                         </tr>
@@ -4898,6 +4988,181 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                   className="px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-bold rounded-xl shadow-xs cursor-pointer"
                 >
                   {isSubmitting ? 'Posting...' : 'Post Balanced Voucher'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Edit Expense Modal (Day Book) */}
+      {editingDayBookExpense && (
+        <div className="fixed inset-0 z-50 bg-slate-950/65 backdrop-blur-xs flex items-start sm:items-center justify-center p-3 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 flex flex-col max-h-[90dvh] my-auto overflow-hidden text-xs">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5 shrink-0">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Edit Expense Bill — {editingDayBookExpense.expenseNo}
+                </h3>
+                <p className="text-[10px] text-slate-500">
+                  Automatically updates Day Book, Cash/Bank balance, Voucher &amp; Vehicle Ledger.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingDayBookExpense(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveDayBookExpenseEdit} className="p-5 space-y-3.5 overflow-y-auto">
+              {editExpError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-semibold">
+                  {editExpError}
+                </div>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Campus *</label>
+                  <select
+                    value={editExpCampus}
+                    onChange={(e) => setEditExpCampus(e.target.value as ResolvedCampus)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
+                  >
+                    <option value="Sr">Senior Campus (Sr)</option>
+                    <option value="Jr">Junior Campus (Jr)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={editExpDate}
+                    onChange={(e) => setEditExpDate(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-mono"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Expense Category *</label>
+                  <select
+                    value={editExpCategory}
+                    onChange={(e) => setEditExpCategory(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
+                  >
+                    {editExpCategory && !expenseHeads.some((h) => h.name === editExpCategory) && (
+                      <option value={editExpCategory}>{editExpCategory}</option>
+                    )}
+                    {expenseHeads.map((h) => (
+                      <option key={h.id} value={h.name}>
+                        {h.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Vehicle</label>
+                  <select
+                    value={editExpVehicle}
+                    onChange={(e) => setEditExpVehicle(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold"
+                  >
+                    <option value="General">General (All Fleet)</option>
+                    {vehicles.map((v) => (
+                      <option key={v.id} value={v.registrationNumber}>
+                        {v.registrationNumber}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Amount (₹) *</label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    step="any"
+                    value={editExpAmount}
+                    onChange={(e) => setEditExpAmount(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Payment Mode *</label>
+                  <select
+                    value={editExpMode}
+                    onChange={(e) => setEditExpMode(e.target.value as ExpenseRecord['paymentMode'])}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
+                  >
+                    <option value="Cash">Cash</option>
+                    <option value="UPI">UPI</option>
+                    <option value="Bank">Bank Transfer</option>
+                    <option value="Fuel Advance">Fuel Advance</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Odometer (km)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="Optional"
+                    value={editExpOdometer}
+                    disabled={editExpVehicle === 'General'}
+                    onChange={(e) => setEditExpOdometer(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-mono disabled:bg-slate-100"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Vendor / Payee *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editExpVendor}
+                    onChange={(e) => setEditExpVendor(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Invoice / Bill No</label>
+                  <input
+                    type="text"
+                    value={editExpBillNo}
+                    onChange={(e) => setEditExpBillNo(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Description *</label>
+                <textarea
+                  rows={2}
+                  required
+                  value={editExpNarration}
+                  onChange={(e) => setEditExpNarration(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingDayBookExpense(null)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 font-semibold text-slate-600 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEditExp}
+                  className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingEditExp ? 'Saving...' : 'Save Changes & Recalculate'}
                 </button>
               </div>
             </form>

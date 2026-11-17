@@ -560,7 +560,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
     if (!raw) {
       return { hasAttachment: false, displayUrl: '', isPlaceholder: false, isPdf: false };
     }
-    if (raw.startsWith('data:application/pdf')) {
+    if (raw.startsWith('data:application/pdf') || raw.includes('type=pdf')) {
       return { hasAttachment: true, displayUrl: raw, isPlaceholder: false, isPdf: true };
     }
     if (
