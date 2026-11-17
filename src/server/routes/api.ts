@@ -571,7 +571,13 @@ apiRouter.get('/students', (req: Request, res: Response) => {
 });
 apiRouter.post('/students', async (req: Request, res: Response) => {
   try {
-    const saved = await sheetsDb.saveStudent(req.body);
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+    const payload = { ...(req.body || {}) };
+    if (callerRole && callerRole !== 'Admin') {
+      delete payload.previousDues;
+      delete payload.previousDuesRemarks;
+    }
+    const saved = await sheetsDb.saveStudent(payload);
     res.json(saved);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -627,6 +633,13 @@ apiRouter.post('/students/:id/suspension-approval', async (req: Request, res: Re
 });
 apiRouter.post('/students/previous-dues/bulk', async (req: Request, res: Response) => {
   try {
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+    if (callerRole !== 'Admin') {
+      res.status(403).json({
+        error: 'Access Denied: Only Admin can add or edit Previous Dues.',
+      });
+      return;
+    }
     const result = await sheetsDb.bulkSetPreviousDues(req.body?.entries || []);
     res.json(result);
   } catch (err: any) {
@@ -635,6 +648,13 @@ apiRouter.post('/students/previous-dues/bulk', async (req: Request, res: Respons
 });
 apiRouter.post('/students/:id/previous-dues', async (req: Request, res: Response) => {
   try {
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+    if (callerRole !== 'Admin') {
+      res.status(403).json({
+        error: 'Access Denied: Only Admin can add or edit Previous Dues.',
+      });
+      return;
+    }
     const { amount, remarks } = req.body || {};
     const updated = await sheetsDb.setStudentPreviousDues(req.params.id, Number(amount) || 0, remarks);
     res.json(updated);
@@ -1067,7 +1087,21 @@ apiRouter.get('/member-requests', (_req: Request, res: Response) => {
 
 apiRouter.post('/member-requests', async (req: Request, res: Response) => {
   try {
-    const created = await sheetsDb.createMemberLifecycleRequest(req.body || {});
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+    const body = { ...(req.body || {}) };
+    if (callerRole !== 'Admin') {
+      if (body.memberPayload && typeof body.memberPayload === 'object') {
+        body.memberPayload = { ...body.memberPayload };
+        delete body.memberPayload.previousDues;
+        delete body.memberPayload.previousDuesRemarks;
+      }
+      if (body.memberData && typeof body.memberData === 'object') {
+        body.memberData = { ...body.memberData };
+        delete body.memberData.previousDues;
+        delete body.memberData.previousDuesRemarks;
+      }
+    }
+    const created = await sheetsDb.createMemberLifecycleRequest(body);
     res.json(created);
   } catch (err: any) {
     res.status(400).json({ error: err.message });

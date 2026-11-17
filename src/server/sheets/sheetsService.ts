@@ -267,7 +267,11 @@ export class SheetsDatabaseManager {
           if (Array.isArray(parsed.tripsMaster)) this.tripsMaster = parsed.tripsMaster;
           if (Array.isArray(parsed.designationsMaster)) this.designationsMaster = parsed.designationsMaster;
           if (Array.isArray(parsed.systemUsers) && parsed.systemUsers.length > 0) {
-            this.systemUsers = parsed.systemUsers;
+            this.systemUsers = parsed.systemUsers.map((u: SystemUser) =>
+              u.id === 'usr-principal' || String(u.username || '').trim().toLowerCase() === 'principal'
+                ? { ...u, role: 'Principal', campus: 'All Campuses' }
+                : u
+            );
           } else {
             this.systemUsers = [...initialSystemUsers];
           }
@@ -1005,22 +1009,28 @@ export class SheetsDatabaseManager {
       const password = String(row[2] || base.password || '').trim();
       if (!username || !password || seenIds.has(id)) continue;
       seenIds.add(id);
+      const isPrincipalAccount =
+        id === 'usr-principal' || username.toLowerCase() === 'principal';
       const roleRaw = String(row[4] || base.role || 'Transport Assistant').trim();
-      const role: UserRole =
-        roleRaw === 'Admin' ||
-        roleRaw === 'Principal' ||
-        roleRaw === 'Transport Coordinator' ||
-        roleRaw === 'Transport Assistant' ||
-        roleRaw === 'Attendance Incharge'
-          ? roleRaw
-          : 'Transport Assistant';
+      const role: UserRole = isPrincipalAccount
+        ? 'Principal'
+        : roleRaw === 'Admin' ||
+          roleRaw === 'Principal' ||
+          roleRaw === 'Transport Coordinator' ||
+          roleRaw === 'Transport Assistant' ||
+          roleRaw === 'Attendance Incharge'
+        ? roleRaw
+        : 'Transport Assistant';
       users.push({
         id,
         username,
         password,
         fullName: String(row[3] || base.fullName || username).trim(),
         role,
-        campus: String(row[5] || base.campus || 'All Campuses').trim(),
+        campus:
+          role === 'Principal'
+            ? 'All Campuses'
+            : String(row[5] || base.campus || 'All Campuses').trim(),
         mobile: String(row[6] || base.mobile || '').trim(),
         status: String(row[7] || base.status || 'Active').trim() === 'Inactive' ? 'Inactive' : 'Active',
         lastLoginAt: row[8] && row[8] !== 'Never' ? String(row[8]) : base.lastLoginAt,
@@ -3059,6 +3069,10 @@ export class SheetsDatabaseManager {
     }
     if (found.status !== 'Active') {
       throw new Error(`Account "${found.username}" is currently disabled. Please contact the Administrator.`);
+    }
+    if (found.id === 'usr-principal' || found.username.trim().toLowerCase() === 'principal') {
+      found.role = 'Principal';
+      found.campus = 'All Campuses';
     }
     found.lastLoginAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
     this.saveLocalSnapshot();
@@ -9380,17 +9394,23 @@ export class SheetsDatabaseManager {
     let changed = false;
     const todayStr = new Date().toISOString().split('T')[0];
 
-    // Ensure default System Users (including Principal, Senior & Junior Attendance Incharge and Assistants) exist
+    // Ensure default System Users (including Principal, Senior & Junior Attendance Incharge and Assistants) exist and Principal role/campus stay intact
     for (const defUser of initialSystemUsers) {
       if (this.explicitlyDeletedIds.has(defUser.id)) continue;
-      const exists = this.systemUsers.some(
+      const existingUser = this.systemUsers.find(
         u =>
           u.id === defUser.id ||
           u.username.trim().toLowerCase() === defUser.username.trim().toLowerCase()
       );
-      if (!exists) {
+      if (!existingUser) {
         this.systemUsers.push({ ...defUser });
         changed = true;
+      } else if (defUser.role === 'Principal') {
+        if (existingUser.role !== 'Principal' || existingUser.campus !== 'All Campuses') {
+          existingUser.role = 'Principal';
+          existingUser.campus = 'All Campuses';
+          changed = true;
+        }
       }
     }
 

@@ -1514,35 +1514,35 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 ]}
               />
 
-              {!isReadOnly && (
-                <>
-                  <button
-                    onClick={() => {
-                      setPrevDuesEdits({});
-                      setIsPrevDuesModalOpen(true);
-                    }}
-                    className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>+ Previous Dues (Old Software)</span>
-                  </button>
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    setPrevDuesEdits({});
+                    setIsPrevDuesModalOpen(true);
+                  }}
+                  className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Previous Dues (Old Software)</span>
+                </button>
+              )}
 
-                  <button
-                    onClick={handleRunBilling}
-                    disabled={isRunningBilling}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-2"
-                  >
-                    <Calendar className="w-4 h-4" />
-                    <span>{isRunningBilling ? 'Running Auto-Due...' : `Run Auto-Due (${selectedMonth})`}</span>
-                  </button>
-                </>
+              {!isReadOnly && (
+                <button
+                  onClick={handleRunBilling}
+                  disabled={isRunningBilling}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-2"
+                >
+                  <Calendar className="w-4 h-4" />
+                  <span>{isRunningBilling ? 'Running Auto-Due...' : `Run Auto-Due (${selectedMonth})`}</span>
+                </button>
               )}
             </>
           )}
 
           {activeTab === 'receipts' && (
             <>
-              {!isReadOnly && (
+              {isAdmin && (
                 <button
                   onClick={() => {
                     setPrevDuesEdits({});
@@ -4658,8 +4658,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
         </div>
       )}
 
-      {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) ENTRY MODAL */}
-      {isPrevDuesModalOpen && (() => {
+      {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) ENTRY MODAL — ADMIN ONLY */}
+      {isAdmin && isPrevDuesModalOpen && (() => {
         const distinctRoutes = Array.from(new Set(scopedStudents.map(s => s.routeCode).filter(Boolean))).sort();
         const filteredForPrevDues = scopedStudents.filter(s => {
           if (prevDuesFilterClass !== 'all' && s.class !== prevDuesFilterClass) return false;

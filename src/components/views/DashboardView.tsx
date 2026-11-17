@@ -984,7 +984,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <th className="py-2.5 px-3">Afternoon Departure</th>
                   <th className="py-2.5 px-3">Discrepancy</th>
                   <th className="py-2.5 px-4 text-right">
-                    Action (Mark Unmarked Only / Request Change)
+                    {isPrincipal
+                      ? 'Inspect Route'
+                      : 'Action (Mark Unmarked Only / Request Change)'}
                   </th>
                 </tr>
               </thead>
@@ -1133,7 +1135,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           }}
                           className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] cursor-pointer"
                         >
-                          Open Route
+                          {isPrincipal ? 'View Route' : 'Open Route'}
                         </button>
                       </div>
                     </td>
@@ -1291,6 +1293,946 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
     );
   };
+
+  // =========================================================================
+  // DEDICATED PRINCIPAL EXECUTIVE DASHBOARD (BOTH CAMPUSES + STRICT VIEW-ONLY)
+  // =========================================================================
+  if (isPrincipal) {
+    const srStudents = students.filter((s) => getStudentCampus(s, routes) === 'Sr');
+    const jrStudents = students.filter((s) => getStudentCampus(s, routes) === 'Jr');
+    const srActiveCount = srStudents.filter((s) => s.transportStatus === 'Active').length;
+    const jrActiveCount = jrStudents.filter((s) => s.transportStatus === 'Active').length;
+    const srSuspendedCount = srStudents.filter((s) => s.transportStatus === 'Suspended').length;
+    const jrSuspendedCount = jrStudents.filter((s) => s.transportStatus === 'Suspended').length;
+
+    const srRoutes = routes.filter((r) => {
+      const rc = normalizeCampus(r.campus);
+      if (rc) return rc === 'Sr';
+      return !r.code?.toLowerCase().startsWith('jr');
+    });
+    const jrRoutes = routes.filter((r) => {
+      const rc = normalizeCampus(r.campus);
+      if (rc) return rc === 'Jr';
+      return Boolean(r.code?.toLowerCase().startsWith('jr'));
+    });
+
+    const todayTripsAll = dailyTrips.filter((t) => !t.date || t.date === today);
+    const getTripCampus = (t: DailyTrip): 'Sr' | 'Jr' => {
+      const matchedRoute = routes.find(
+        (r) => r.id === t.routeId || r.code === t.routeName
+      );
+      if (matchedRoute) {
+        const rc = normalizeCampus(matchedRoute.campus);
+        if (rc) return rc;
+        if (matchedRoute.code?.toLowerCase().startsWith('jr')) return 'Jr';
+      }
+      return String(t.routeName || '').toLowerCase().startsWith('jr') ? 'Jr' : 'Sr';
+    };
+
+    const calcTripsBoarding = (tripList: DailyTrip[]) => {
+      const inPresent = tripList.reduce((sum, t) => {
+        if (typeof t.inStrength === 'number') return sum + t.inStrength;
+        if (!t.inTime) return sum;
+        return (
+          sum +
+          attendanceRecords.filter((a) => a.tripId === t.id && a.driverStatus === 'Present').length
+        );
+      }, 0);
+      const outPresent = tripList.reduce((sum, t) => {
+        if (!t.outTime && typeof t.outStrength !== 'number') return sum;
+        if (typeof t.outStrength === 'number') return sum + t.outStrength;
+        return (
+          sum +
+          attendanceRecords.filter((a) => a.tripId === t.id && a.assistantStatus === 'Present').length
+        );
+      }, 0);
+      const inMarkedRoutes = tripList.filter(
+        (t) => Boolean(t.inTime) || typeof t.inStrength === 'number'
+      ).length;
+      const outMarkedRoutes = tripList.filter(
+        (t) => Boolean(t.outTime) || typeof t.outStrength === 'number'
+      ).length;
+      return { inPresent, outPresent, inMarkedRoutes, outMarkedRoutes };
+    };
+
+    const srBoarding = calcTripsBoarding(todayTripsAll.filter((t) => getTripCampus(t) === 'Sr'));
+    const jrBoarding = calcTripsBoarding(todayTripsAll.filter((t) => getTripCampus(t) === 'Jr'));
+    const scopedTrips =
+      dashCampusScope === 'all'
+        ? todayTripsAll
+        : todayTripsAll.filter((t) => getTripCampus(t) === dashCampusScope);
+    const scopedBoarding = calcTripsBoarding(scopedTrips);
+    const scopedRoutesList =
+      dashCampusScope === 'all'
+        ? routes
+        : dashCampusScope === 'Sr'
+        ? srRoutes
+        : jrRoutes;
+
+    const todayReceiptsSr = feeReceipts
+      .filter((r) => r.date === today && getReceiptCampus(r, students, routes) === 'Sr')
+      .reduce((acc, r) => acc + (r.amountPaid ?? r.amount ?? 0), 0);
+    const todayReceiptsJr = feeReceipts
+      .filter((r) => r.date === today && getReceiptCampus(r, students, routes) === 'Jr')
+      .reduce((acc, r) => acc + (r.amountPaid ?? r.amount ?? 0), 0);
+
+    const scopedOver3Days = absenteeCallingDashboardStats.over3DaysList.filter((item) =>
+      dashCampusScope === 'all'
+        ? true
+        : item.campus.toLowerCase() === dashCampusScope.toLowerCase()
+    );
+
+    const scopedComplaints = complaints.filter((c) => {
+      const cCamp = c.campus || (c.routeCode?.toLowerCase().startsWith('jr') ? 'Jr' : 'Sr');
+      const matchesCampus =
+        dashCampusScope === 'all' || cCamp.toLowerCase() === dashCampusScope.toLowerCase();
+      return (
+        matchesCampus &&
+        c.status === dashComplaintStatusTab &&
+        (dashComplaintSeriousness === 'all' || c.seriousness === dashComplaintSeriousness)
+      );
+    });
+
+    const scopedDiscipline = recentDisciplineRecords.filter((d) => {
+      if (dashCampusScope === 'all') return true;
+      const stu = students.find((s) => s.id === (d.memberId || d.studentId));
+      const dCamp = stu
+        ? getStudentCampus(stu, routes)
+        : String(d.routeName || '').toLowerCase().startsWith('jr')
+        ? 'Jr'
+        : 'Sr';
+      return dCamp === dashCampusScope;
+    });
+
+    return (
+      <div className="space-y-6">
+        {/* Principal Multi-Campus Executive Banner */}
+        <div className="bg-slate-900 text-white rounded-2xl p-6 border border-slate-800 space-y-5">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                <span className="font-semibold text-teal-300">Principal Executive Dashboard</span>
+                <span aria-hidden="true">&middot;</span>
+                <span>Both Campuses (Senior Sr &amp; Junior Jr)</span>
+                <span aria-hidden="true">&middot;</span>
+                <span>Strict View-Only Access</span>
+                <span aria-hidden="true">&middot;</span>
+                <span className="font-mono tabular-nums text-amber-300">{today}</span>
+              </div>
+              <h2 className="text-2xl font-bold tracking-tight">
+                Multi-Campus Transport Overview ({formatCampusLabel(dashCampusScope)})
+              </h2>
+              <p className="text-xs text-slate-400 max-w-2xl">
+                Consolidated view of Senior Campus (Sr) and Junior Campus (Jr) attendance, fleet routes, fee collections, operational expenses, and student welfare registers. Adding, editing, and deleting records are disabled.
+              </p>
+            </div>
+
+            {/* Interactive Campus Scope Switcher */}
+            <div className="flex flex-col sm:items-end gap-2 shrink-0">
+              <span className="text-[11px] font-semibold text-slate-400">
+                Filter Dashboard Campus Scope
+              </span>
+              <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-800 border border-slate-700">
+                {(
+                  [
+                    { id: 'all', label: 'All Campuses (Sr + Jr)' },
+                    { id: 'Sr', label: 'Senior Campus (Sr)' },
+                    { id: 'Jr', label: 'Junior Campus (Jr)' },
+                  ] as { id: CampusFilterValue; label: string }[]
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => {
+                      setDashCampusScope(opt.id);
+                      setTransitCampusFilter(opt.id);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      dashCampusScope === opt.id
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Quick View-Only Navigation Bar */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => onNavigate('operations' as any, 'summary')}
+              className="py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+              <span>Attendance Summary</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('members' as any, 'all')}
+              className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Users className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span>Members Directory</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('fees' as any, 'receipts')}
+              className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <IndianRupee className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Fee Receipts &amp; Dues</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('expenses' as any, 'expenses')}
+              className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <TrendingUp className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <span>Expenses Register</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('accounts' as any, 'day_book')}
+              className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Scale className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>Day Book &amp; Ledgers</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('reports' as any)}
+              className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Bus className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+              <span>Analytics Reports</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Side-by-Side Both Campuses Comparison (Senior Sr vs Junior Jr Always Visible) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Senior Campus (Sr) Card */}
+          <div
+            className={`bg-white rounded-2xl border p-5 space-y-4 transition-colors ${
+              dashCampusScope === 'Sr'
+                ? 'border-slate-900 ring-1 ring-slate-900'
+                : 'border-slate-200'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <div className="text-xs text-slate-500">
+                  Senior Campus (Sr) &middot; {srRoutes.length} Active Routes
+                </div>
+                <h3 className="text-base font-bold text-slate-900 mt-0.5">
+                  Senior Campus (Sr) — Live Snapshot
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = dashCampusScope === 'Sr' ? 'all' : 'Sr';
+                  setDashCampusScope(next);
+                  setTransitCampusFilter(next);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
+                  dashCampusScope === 'Sr'
+                    ? 'bg-slate-900 text-amber-400'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-800'
+                }`}
+              >
+                {dashCampusScope === 'Sr' ? 'Showing Sr Only (Reset All)' : 'Focus Senior (Sr)'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Active Members</div>
+                <div className="mt-1 text-lg font-bold font-mono tabular-nums text-slate-900">
+                  {srActiveCount}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                  {srSuspendedCount} Suspended
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Today Boarding</div>
+                <div className="mt-1 text-sm font-bold font-mono tabular-nums text-emerald-700">
+                  In: {srBoarding.inPresent}/{srActiveCount}
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-indigo-700 mt-0.5">
+                  Out: {srBoarding.outPresent}/{srActiveCount}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Fee Collected</div>
+                <div className="mt-1 text-sm font-bold font-mono tabular-nums text-emerald-700">
+                  ₹{campusFinSr.feeTotal.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5">
+                  Today: ₹{todayReceiptsSr.toLocaleString('en-IN')}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Pending Dues</div>
+                <div className="mt-1 text-sm font-bold font-mono tabular-nums text-rose-700">
+                  ₹{campusFinSr.outstandingDues.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5">
+                  Spend: ₹{campusFinSr.expenseTotal.toLocaleString('en-IN')}
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 font-mono tabular-nums">
+              <span>Cash in Hand: ₹{campusFinSr.netCashBalance.toLocaleString('en-IN')}</span>
+              <span>Online/Bank: ₹{campusFinSr.netOnlineBalance.toLocaleString('en-IN')}</span>
+              <span>
+                Calling: {absenteeCallingDashboardStats.srCalled}/{absenteeCallingDashboardStats.srToCall}
+              </span>
+            </div>
+          </div>
+
+          {/* Junior Campus (Jr) Card */}
+          <div
+            className={`bg-white rounded-2xl border p-5 space-y-4 transition-colors ${
+              dashCampusScope === 'Jr'
+                ? 'border-slate-900 ring-1 ring-slate-900'
+                : 'border-slate-200'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <div className="text-xs text-slate-500">
+                  Junior Campus (Jr) &middot; {jrRoutes.length} Active Routes
+                </div>
+                <h3 className="text-base font-bold text-slate-900 mt-0.5">
+                  Junior Campus (Jr) — Live Snapshot
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = dashCampusScope === 'Jr' ? 'all' : 'Jr';
+                  setDashCampusScope(next);
+                  setTransitCampusFilter(next);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
+                  dashCampusScope === 'Jr'
+                    ? 'bg-slate-900 text-amber-400'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-800'
+                }`}
+              >
+                {dashCampusScope === 'Jr' ? 'Showing Jr Only (Reset All)' : 'Focus Junior (Jr)'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Active Members</div>
+                <div className="mt-1 text-lg font-bold font-mono tabular-nums text-slate-900">
+                  {jrActiveCount}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                  {jrSuspendedCount} Suspended
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Today Boarding</div>
+                <div className="mt-1 text-sm font-bold font-mono tabular-nums text-emerald-700">
+                  In: {jrBoarding.inPresent}/{jrActiveCount}
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-indigo-700 mt-0.5">
+                  Out: {jrBoarding.outPresent}/{jrActiveCount}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Fee Collected</div>
+                <div className="mt-1 text-sm font-bold font-mono tabular-nums text-emerald-700">
+                  ₹{campusFinJr.feeTotal.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5">
+                  Today: ₹{todayReceiptsJr.toLocaleString('en-IN')}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div className="text-slate-500">Pending Dues</div>
+                <div className="mt-1 text-sm font-bold font-mono tabular-nums text-rose-700">
+                  ₹{campusFinJr.outstandingDues.toLocaleString('en-IN')}
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5">
+                  Spend: ₹{campusFinJr.expenseTotal.toLocaleString('en-IN')}
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 font-mono tabular-nums">
+              <span>Cash in Hand: ₹{campusFinJr.netCashBalance.toLocaleString('en-IN')}</span>
+              <span>Online/Bank: ₹{campusFinJr.netOnlineBalance.toLocaleString('en-IN')}</span>
+              <span>
+                Calling: {absenteeCallingDashboardStats.jrCalled}/{absenteeCallingDashboardStats.jrToCall}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Scoped 4-Column Executive KPI Row */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div
+            onClick={() => onNavigate('members' as any, 'all')}
+            className="bg-white p-5 rounded-2xl border border-slate-200 hover:border-slate-300 transition-colors cursor-pointer"
+          >
+            <div className="text-xs font-semibold text-slate-500">
+              Active Members ({dashCampusScope === 'all' ? 'Both Campuses' : dashCampusScope})
+            </div>
+            <div className="mt-2 flex items-baseline gap-2 font-mono tabular-nums">
+              <span className="text-2xl font-bold text-slate-900">{activeStudents}</span>
+              <span className="text-xs text-slate-500">/ {campusScopedStudents.length} total</span>
+            </div>
+            <div className="mt-2 text-xs text-slate-600 tabular-nums">
+              Suspended: <strong className="text-rose-700">{suspendedStudents}</strong> &middot; Sr: {srActiveCount} &middot; Jr: {jrActiveCount}
+            </div>
+          </div>
+
+          <div
+            onClick={() => onNavigate('operations' as any, 'summary')}
+            className="bg-white p-5 rounded-2xl border border-slate-200 hover:border-slate-300 transition-colors cursor-pointer"
+          >
+            <div className="text-xs font-semibold text-slate-500">
+              Today&apos;s Transit Attendance ({dashCampusScope === 'all' ? 'All' : dashCampusScope})
+            </div>
+            <div className="mt-2 flex items-baseline gap-3 font-mono tabular-nums">
+              <span className="text-lg font-bold text-emerald-700">
+                In: {scopedBoarding.inPresent}/{activeStudents}
+              </span>
+              <span className="text-lg font-bold text-indigo-700">
+                Out: {scopedBoarding.outPresent}/{activeStudents}
+              </span>
+            </div>
+            <div className="mt-2 text-xs text-slate-600 tabular-nums">
+              Routes Marked: Arr {scopedBoarding.inMarkedRoutes}/{scopedRoutesList.length} &middot; Dep {scopedBoarding.outMarkedRoutes}/{scopedRoutesList.length}
+            </div>
+          </div>
+
+          <div
+            onClick={() => onNavigate('fees' as any, 'receipts')}
+            className="bg-white p-5 rounded-2xl border border-slate-200 hover:border-slate-300 transition-colors cursor-pointer"
+          >
+            <div className="text-xs font-semibold text-slate-500">
+              Fee Collection &amp; Receivables ({dashCampusScope === 'all' ? 'All' : dashCampusScope})
+            </div>
+            <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-emerald-700">
+              ₹{totalCollected.toLocaleString('en-IN')}
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs font-mono tabular-nums">
+              <span className="text-slate-600">Today: ₹{todayReceipts.toLocaleString('en-IN')}</span>
+              <span className="text-rose-700 font-semibold">
+                Dues: ₹{totalDues.toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+
+          <div
+            onClick={() => onNavigate('expenses' as any, 'expenses')}
+            className="bg-white p-5 rounded-2xl border border-slate-200 hover:border-slate-300 transition-colors cursor-pointer"
+          >
+            <div className="text-xs font-semibold text-slate-500">
+              Approved Spend &amp; Net Position ({dashCampusScope === 'all' ? 'All' : dashCampusScope})
+            </div>
+            <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-slate-900">
+              ₹{totalExpenses.toLocaleString('en-IN')}
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs font-mono tabular-nums">
+              <span className="text-slate-600">Today: ₹{todayExpenses.toLocaleString('en-IN')}</span>
+              <span
+                className={`font-semibold ${
+                  totalCollected - totalExpenses >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                }`}
+              >
+                Net: ₹{(totalCollected - totalExpenses).toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Unmarked & Mismatched Attendance Audit (View-Only, Scoped to All / Sr / Jr) */}
+        {renderUnmarkedAndMismatchDashboardCard(dashCampusScope)}
+
+        {/* Route-Wise & Vehicle-Wise Daily Transit Attendance Breakdown */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+            <div>
+              <div className="text-xs text-slate-500">
+                Fleet &amp; Route Boarding Register &middot; {today}
+              </div>
+              <h3 className="text-base font-bold text-slate-900">
+                Route-Wise &amp; Vehicle-Wise Transit Strength ({formatCampusLabel(dashCampusScope)})
+              </h3>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setTransitGraphMode('routes')}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                    transitGraphMode === 'routes'
+                      ? 'bg-slate-900 text-amber-400'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Routes ({scopedRoutesList.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTransitGraphMode('vehicles')}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                    transitGraphMode === 'vehicles'
+                      ? 'bg-slate-900 text-amber-400'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Vehicles ({vehicles.length})
+                </button>
+              </div>
+
+              <select
+                value={transitVehicleFilter}
+                onChange={(e) => setTransitVehicleFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+              >
+                <option value="all">All Vehicles</option>
+                {vehicles.map((v) => (
+                  <option key={v.id} value={v.registrationNumber}>
+                    {v.registrationNumber}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={() => onNavigate('operations' as any, 'summary')}
+                className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
+              >
+                Open 7- Attendance Summary Sheet &rarr;
+              </button>
+            </div>
+          </div>
+
+          {transitGraphMode === 'routes' ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto pr-1">
+              {scopedRoutesList
+                .filter((r) =>
+                  transitVehicleFilter === 'all' ? true : r.vehicleNumber === transitVehicleFilter
+                )
+                .map((r) => {
+                  const routeMembers = students.filter(
+                    (s) =>
+                      s.transportStatus === 'Active' &&
+                      (s.routeId === r.id || s.routeCode === r.code)
+                  );
+                  const rosterCount = routeMembers.length;
+                  const matchingTrip = dailyTrips.find(
+                    (t) =>
+                      (t.routeId === r.id || t.routeName === r.code) &&
+                      (!t.date || t.date === today)
+                  );
+                  const tripAtt = matchingTrip
+                    ? attendanceRecords.filter((a) => a.tripId === matchingTrip.id)
+                    : [];
+                  const inPresent = matchingTrip
+                    ? typeof matchingTrip.inStrength === 'number'
+                      ? matchingTrip.inStrength
+                      : matchingTrip.inTime
+                      ? tripAtt.filter((a) => a.driverStatus === 'Present').length
+                      : 0
+                    : 0;
+                  const outPresent = matchingTrip
+                    ? typeof matchingTrip.outStrength === 'number'
+                      ? matchingTrip.outStrength
+                      : matchingTrip.outTime
+                      ? tripAtt.filter((a) => a.assistantStatus === 'Present').length
+                      : 0
+                    : 0;
+                  const denom = Math.max(1, rosterCount);
+                  const inPct =
+                    rosterCount > 0 ? Math.min(100, Math.round((inPresent / denom) * 100)) : 0;
+                  const outPct =
+                    rosterCount > 0 ? Math.min(100, Math.round((outPresent / denom) * 100)) : 0;
+
+                  return (
+                    <div
+                      key={r.id}
+                      className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="truncate">
+                          <span className="font-mono font-bold text-slate-900 text-sm">
+                            {r.code}
+                          </span>
+                          <span className="ml-2 text-slate-500 font-mono">
+                            Veh: {r.vehicleNumber}
+                          </span>
+                        </div>
+                        <span className="font-mono tabular-nums font-bold text-slate-800 shrink-0">
+                          Total Members: {rosterCount}
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        <div>
+                          <div className="flex justify-between text-[11px] font-semibold mb-0.5 tabular-nums">
+                            <span className="text-emerald-800">
+                              Morning Arrival {matchingTrip?.inTime ? `@ ${matchingTrip.inTime}` : '(Pending)'}
+                            </span>
+                            <span className="font-mono text-emerald-700">
+                              {inPresent}/{rosterCount} ({inPct}%)
+                            </span>
+                          </div>
+                          <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-emerald-500 rounded-full"
+                              style={{ width: `${inPct}%` }}
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <div className="flex justify-between text-[11px] font-semibold mb-0.5 tabular-nums">
+                            <span className="text-indigo-800">
+                              Evening Departure {matchingTrip?.outTime ? `@ ${matchingTrip.outTime}` : '(Pending)'}
+                            </span>
+                            <span className="font-mono text-indigo-700">
+                              {outPresent}/{rosterCount} ({outPct}%)
+                            </span>
+                          </div>
+                          <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-indigo-600 rounded-full"
+                              style={{ width: `${outPct}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
+              {vehicles
+                .filter((v) =>
+                  transitVehicleFilter === 'all' ? true : v.registrationNumber === transitVehicleFilter
+                )
+                .map((v) => {
+                  const vehRoutes = scopedRoutesList.filter(
+                    (r) => r.vehicleId === v.id || r.vehicleNumber === v.registrationNumber
+                  );
+                  if (dashCampusScope !== 'all' && vehRoutes.length === 0) return null;
+                  const vehRouteIds = new Set(vehRoutes.map((r) => r.id));
+                  const vehRouteCodes = new Set(vehRoutes.map((r) => r.code));
+                  const vehMembers = students.filter(
+                    (s) =>
+                      s.transportStatus === 'Active' &&
+                      (vehRouteIds.has(s.routeId) || vehRouteCodes.has(s.routeCode))
+                  );
+                  const vehTrips = scopedTrips.filter(
+                    (t) => t.vehicleId === v.id || t.vehicleNumber === v.registrationNumber
+                  );
+                  const vehBoarding = calcTripsBoarding(vehTrips);
+                  const roster = vehMembers.length;
+                  const denom = Math.max(1, roster);
+                  const inPct =
+                    roster > 0
+                      ? Math.min(100, Math.round((vehBoarding.inPresent / denom) * 100))
+                      : 0;
+                  const outPct =
+                    roster > 0
+                      ? Math.min(100, Math.round((vehBoarding.outPresent / denom) * 100))
+                      : 0;
+
+                  return (
+                    <div
+                      key={v.id}
+                      className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-bold text-slate-900 text-sm">
+                          {v.registrationNumber}
+                        </span>
+                        <span className="font-mono tabular-nums font-bold text-slate-800">
+                          Total Members: {roster}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 truncate">
+                        Routes: {vehRoutes.map((r) => r.code).join(', ') || 'None'}
+                      </div>
+                      <div className="space-y-1.5 tabular-nums">
+                        <div className="flex justify-between text-[11px] font-semibold text-emerald-800">
+                          <span>Arrival (In)</span>
+                          <span className="font-mono">
+                            {vehBoarding.inPresent}/{roster} ({inPct}%)
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[11px] font-semibold text-indigo-800">
+                          <span>Departure (Out)</span>
+                          <span className="font-mono">
+                            {vehBoarding.outPresent}/{roster} ({outPct}%)
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+
+        {/* Absentee Calling Status & >3 Consecutive Days Monitor (Read-Only) */}
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-slate-900 text-sm">
+                Absentee Parent Calling &amp; &gt;3 Consecutive Days Absence Monitor
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
+                Overall Called Today: {absenteeCallingDashboardStats.totalCalledToday}/{absenteeCallingDashboardStats.totalToCallToday} &middot; Senior (Sr): {absenteeCallingDashboardStats.srCalled}/{absenteeCallingDashboardStats.srToCall} &middot; Junior (Jr): {absenteeCallingDashboardStats.jrCalled}/{absenteeCallingDashboardStats.jrToCall}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onNavigate('operations', 'call_absentees')}
+              className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl cursor-pointer whitespace-nowrap"
+            >
+              View Calling Register &rarr;
+            </button>
+          </div>
+
+          {scopedOver3Days.length === 0 ? (
+            <div className="p-6 text-center text-xs text-slate-500">
+              No active members pending absentee follow-up or &gt;3 consecutive days absent in {formatCampusLabel(dashCampusScope)}.
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-72 overflow-y-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-[11px] uppercase">
+                    <th className="py-2.5 px-4">Student &amp; Campus</th>
+                    <th className="py-2.5 px-3">Route &amp; Mobile</th>
+                    <th className="py-2.5 px-3 text-right">Consecutive Days</th>
+                    <th className="py-2.5 px-3">Assistant / Coordinator Remarks</th>
+                    <th className="py-2.5 px-4 text-right">Profile</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {scopedOver3Days.slice(0, 12).map((item) => (
+                    <tr key={item.student.id} className="hover:bg-slate-50">
+                      <td className="py-2.5 px-4">
+                        <div className="font-bold text-slate-900">
+                          {item.student.name}{' '}
+                          <span className="font-mono text-[11px] text-slate-500">
+                            ({item.student.admissionNo})
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Campus: {item.campus} &middot; {item.student.class}-{item.student.section}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-slate-700">
+                        <div>{item.student.routeCode}</div>
+                        <div className="text-[11px] text-slate-500">{item.student.mobile}</div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-rose-700">
+                        {item.consecutiveDays}d
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-700">
+                        {item.coordinatorRemarks || item.assistantRemarks || (
+                          <span className="text-slate-400">Call remark pending</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenMemberProfile && onOpenMemberProfile(item.student.id)
+                          }
+                          className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg font-semibold text-[11px] cursor-pointer whitespace-nowrap"
+                        >
+                          View Profile
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Executive Row: Complaints, Discipline & Statutory Fleet Renewals (View-Only) */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Complaints & Feedback Summary */}
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm">
+                  Complaints &amp; Feedback ({scopedComplaints.length})
+                </h3>
+                <div className="flex items-center gap-2 mt-1">
+                  {(['Pending', 'Resolved'] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setDashComplaintStatusTab(st)}
+                      className={`text-[11px] font-semibold cursor-pointer ${
+                        dashComplaintStatusTab === st
+                          ? 'text-slate-900 underline'
+                          : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate('members', 'complaints')}
+                className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer whitespace-nowrap"
+              >
+                View Register &rarr;
+              </button>
+            </div>
+            <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto flex-1">
+              {scopedComplaints.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-400">
+                  No {dashComplaintStatusTab.toLowerCase()} complaints in {formatCampusLabel(dashCampusScope)}.
+                </div>
+              ) : (
+                scopedComplaints.slice(0, 6).map((c) => (
+                  <div key={c.id} className="p-4 text-xs space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onOpenMemberProfile && onOpenMemberProfile(c.memberId)}
+                        className="font-bold text-slate-900 hover:underline text-left cursor-pointer"
+                      >
+                        {c.memberName} ({c.campus || 'Sr'})
+                      </button>
+                      <span className="font-mono text-[11px] text-slate-500">{c.date}</span>
+                    </div>
+                    <p className="text-slate-700">&ldquo;{c.wordsOfMember}&rdquo;</p>
+                    {c.actionTaken && (
+                      <p className="text-[11px] text-emerald-700">Resolution: {c.actionTaken}</p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Transit Behaviour & Discipline Summary */}
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-2">
+              <h3 className="font-bold text-slate-900 text-sm">
+                Discipline &amp; Behaviour Log ({scopedDiscipline.length})
+              </h3>
+              <button
+                type="button"
+                onClick={() => onNavigate('members' as any, 'discipline')}
+                className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer whitespace-nowrap"
+              >
+                View All &rarr;
+              </button>
+            </div>
+            <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto flex-1">
+              {scopedDiscipline.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-400">
+                  No recent discipline records in {formatCampusLabel(dashCampusScope)}.
+                </div>
+              ) : (
+                scopedDiscipline.slice(0, 6).map((d) => (
+                  <div key={d.id} className="p-4 text-xs space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenMemberProfile &&
+                          onOpenMemberProfile(d.memberId || d.studentId || '')
+                        }
+                        className="font-bold text-slate-900 hover:underline text-left cursor-pointer"
+                      >
+                        {d.memberName || d.studentName}
+                      </button>
+                      <span className="font-mono text-[11px] text-slate-500">{d.date}</span>
+                    </div>
+                    <p className="text-rose-800">{d.concern}</p>
+                    <p className="text-[11px] text-slate-500">Action: {d.actionTaken}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Approvals & Statutory Vehicle Compliance Summary */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-slate-900 text-sm">
+                Fleet Compliance &amp; Pending Queues
+              </h3>
+              <button
+                type="button"
+                onClick={() => onNavigate('vehicles' as any, 'odometer')}
+                className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer whitespace-nowrap"
+              >
+                View Fleet &rarr;
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5 text-xs font-mono tabular-nums">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="font-sans text-slate-500">Pending Expenses</div>
+                <div className="text-base font-bold text-slate-900 mt-0.5">
+                  {pendingExpensesCount}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="font-sans text-slate-500">Pending Work Orders</div>
+                <div className="text-base font-bold text-slate-900 mt-0.5">
+                  {pendingWorkOrdersCount}
+                </div>
+              </div>
+            </div>
+            <div className="space-y-2 max-h-40 overflow-y-auto pt-1">
+              {expiringVehicles.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  All vehicles have valid Fitness, Insurance, PUC &amp; Road Tax certificates.
+                </p>
+              ) : (
+                expiringVehicles.slice(0, 5).map((v) => (
+                  <div
+                    key={v.id}
+                    className="p-2.5 rounded-xl bg-rose-50/60 border border-rose-100 flex items-center justify-between text-xs"
+                  >
+                    <div>
+                      <div className="font-mono font-bold text-slate-900">
+                        {v.registrationNumber}
+                      </div>
+                      <div className="text-[11px] text-slate-600 font-mono tabular-nums">
+                        Fit: {v.fitnessUpto || '—'} &middot; PUC: {v.pollutionUpto || '—'}
+                      </div>
+                    </div>
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // =========================================================================
   // DEDICATED ATTENDANCE INCHARGE DASHBOARD (100% FINANCE-FREE, CAMPUS-SCOPED)

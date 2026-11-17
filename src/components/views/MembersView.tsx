@@ -977,8 +977,12 @@ export const MembersView: React.FC<MembersViewProps> = ({
         routeCode: resolvedRouteCode,
         monthlyFee: effectiveFee,
         concessionAmount: isAdmin ? Number(concessionAmount) || 0 : 0,
-        previousDues: Number(previousDues) || 0,
-        previousDuesRemarks: previousDuesRemarks.trim() || undefined,
+        ...(isAdmin
+          ? {
+              previousDues: Number(previousDues) || 0,
+              previousDuesRemarks: previousDuesRemarks.trim() || undefined,
+            }
+          : {}),
         transportStatus: memberStatusInput,
         documents: updatedDocs,
       };
@@ -3574,7 +3578,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                         {' '}— Included in Outstanding &amp; collectible in Fee Collection.
                       </p>
                     </div>
-                    {!isReadOnly && (
+                    {isAdmin ? (
                       <form
                         onSubmit={async e => {
                           e.preventDefault();
@@ -3627,6 +3631,10 @@ export const MembersView: React.FC<MembersViewProps> = ({
                           {submitting ? 'Saving...' : 'Save Previous Dues'}
                         </button>
                       </form>
+                    ) : (
+                      <div className="text-[11px] font-semibold text-amber-900/80 shrink-0">
+                        View-only &middot; Admin access required to add or edit Previous Dues
+                      </div>
                     )}
                   </div>
 
@@ -5193,34 +5201,36 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   </div>
                 </div>
 
-                {/* Previous Dues (Old Software Opening Arrears Head) */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-amber-200/80">
-                  <div>
-                    <label className="block text-xs font-bold text-amber-950 mb-1">
-                      Previous Dues Head — Old Software Arrears (₹)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={previousDues}
-                      onChange={e => setPreviousDues(Number(e.target.value))}
-                      placeholder="0"
-                      className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs font-bold text-slate-900"
-                    />
+                {/* Previous Dues (Old Software Opening Arrears Head — Admin Only) */}
+                {isAdmin && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-amber-200/80">
+                    <div>
+                      <label className="block text-xs font-bold text-amber-950 mb-1">
+                        Previous Dues Head — Old Software Arrears (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={previousDues}
+                        onChange={e => setPreviousDues(Number(e.target.value))}
+                        placeholder="0"
+                        className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-amber-950 mb-1">
+                        Previous Dues Remark / Session Period
+                      </label>
+                      <input
+                        type="text"
+                        value={previousDuesRemarks}
+                        onChange={e => setPreviousDuesRemarks(e.target.value)}
+                        placeholder="e.g. Old Software Dues up to Mid-Session"
+                        className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-bold text-amber-950 mb-1">
-                      Previous Dues Remark / Session Period
-                    </label>
-                    <input
-                      type="text"
-                      value={previousDuesRemarks}
-                      onChange={e => setPreviousDuesRemarks(e.target.value)}
-                      placeholder="e.g. Old Software Dues up to Mid-Session"
-                      className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs"
-                    />
-                  </div>
-                </div>
+                )}
               </div>
 
               <div className="flex justify-end gap-2 pt-3">
@@ -5525,8 +5535,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
         </div>
       )}
 
-      {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) MODAL */}
-      {showPrevDuesModal && (
+      {/* PREVIOUS DUES (OLD SOFTWARE ARREARS HEAD) MODAL — ADMIN ONLY */}
+      {isAdmin && showPrevDuesModal && (
         <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">

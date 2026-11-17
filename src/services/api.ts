@@ -136,6 +136,12 @@ function getActiveSessionUserRole(): string {
     const raw = localStorage.getItem('tms_authenticated_user_v2');
     if (!raw) return '';
     const parsed = JSON.parse(raw);
+    if (
+      parsed?.id === 'usr-principal' ||
+      String(parsed?.username || '').trim().toLowerCase() === 'principal'
+    ) {
+      return 'Principal';
+    }
     return typeof parsed?.role === 'string' ? parsed.role : '';
   } catch {
     return '';
@@ -597,6 +603,10 @@ export const api = {
     amount: number,
     remarks?: string
   ): Promise<StudentMember> => {
+    const role = getActiveSessionUserRole();
+    if (role && role !== 'Admin') {
+      throw new Error('Only Admin is authorized to add or edit Previous Dues.');
+    }
     const res = await fetch(`/api/students/${encodeURIComponent(id)}/previous-dues`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -607,6 +617,10 @@ export const api = {
   bulkSetPreviousDues: async (
     entries: { studentId: string; amount: number; remarks?: string }[]
   ): Promise<{ updatedCount: number; totalPreviousDuesAdded: number }> => {
+    const role = getActiveSessionUserRole();
+    if (role && role !== 'Admin') {
+      throw new Error('Only Admin is authorized to add or edit Previous Dues.');
+    }
     const res = await fetch('/api/students/previous-dues/bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

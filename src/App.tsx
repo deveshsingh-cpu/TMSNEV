@@ -108,7 +108,25 @@ export function App() {
       const saved = localStorage.getItem(AUTH_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed && parsed.username && parsed.role) return parsed;
+        if (parsed && parsed.username && parsed.role) {
+          if (
+            parsed.id === 'usr-principal' ||
+            String(parsed.username).trim().toLowerCase() === 'principal'
+          ) {
+            const fixed: SystemUser = {
+              ...parsed,
+              role: 'Principal',
+              campus: 'All Campuses',
+            };
+            try {
+              localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(fixed));
+            } catch {
+              // ignore storage errors
+            }
+            return fixed;
+          }
+          return parsed;
+        }
       }
     } catch {
       // ignore storage errors
@@ -340,6 +358,34 @@ export function App() {
       setDesignations(mastersData?.designations || []);
       if (Array.isArray(mastersData?.users)) {
         setUsers(mastersData.users);
+        setCurrentUser((prev) => {
+          if (!prev) return prev;
+          const matched = (mastersData.users as SystemUser[]).find(
+            (u) =>
+              u.id === prev.id ||
+              u.username.trim().toLowerCase() === prev.username.trim().toLowerCase()
+          );
+          if (
+            matched &&
+            (matched.role !== prev.role ||
+              matched.campus !== prev.campus ||
+              matched.fullName !== prev.fullName)
+          ) {
+            const synced: SystemUser = {
+              ...prev,
+              role: matched.role,
+              campus: matched.campus,
+              fullName: matched.fullName,
+            };
+            try {
+              localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(synced));
+            } catch {
+              // ignore storage errors
+            }
+            return synced;
+          }
+          return prev;
+        });
       }
       const rawVills: Village[] = mastersData?.villages || [];
       const vills: Village[] = [...rawVills]

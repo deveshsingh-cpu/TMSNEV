@@ -88,17 +88,35 @@ interface DailyOperationsViewProps {
 }
 
 interface SummaryTimingOverride {
-  inTime1?: string;
-  inStrength1?: string;
-  outTime1?: string;
-  outStrength1?: string;
-  remark1?: string;
-  inTime2?: string;
-  inStrength2?: string;
-  outTime2?: string;
-  outStrength2?: string;
-  remark2?: string;
+  inTime?: string;
+  inStrength?: string;
+  outTime?: string;
+  outStrength?: string;
+  remark?: string;
 }
+
+const formatTripOrdinal = (num: number): string => {
+  const mod100 = num % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${num}th`;
+  switch (num % 10) {
+    case 1:
+      return `${num}st`;
+    case 2:
+      return `${num}nd`;
+    case 3:
+      return `${num}rd`;
+    default:
+      return `${num}th`;
+  }
+};
+
+const cleanAttendanceNoteForSummary = (raw?: string): string => {
+  if (!raw) return '';
+  return raw
+    .replace(/Auto-marked Leave\s*\(Tentative return:\s*([^)]+)\)/gi, 'Leave till $1')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
 
 const getCurrentSystemTimeHHMM = (): string => {
   const now = new Date();
@@ -2313,7 +2331,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     );
   };
 
-  // --- Transport Timings & Attendance Summary Sheet Rows (per Vehicle, 1st & 2nd Trip, Campus-Aware) ---
+  // --- Transport Timings & Attendance Summary Sheet Rows (per Vehicle, All Trips 1st/2nd/3rd+, Total Route Members & Full Remarks) ---
   const targetSummaryCampus = lockedCampus || normalizeCampusCode(summaryCampus);
   const summaryCampusDisplayLabel = targetSummaryCampus
     ? getCampusLabel(targetSummaryCampus)
@@ -2346,6 +2364,20 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     );
   });
 
+  const updateOverride = (
+    overrideSlotKey: string,
+    field: keyof SummaryTimingOverride,
+    val: string
+  ) => {
+    setTimingOverrides((prev) => ({
+      ...prev,
+      [overrideSlotKey]: {
+        ...(prev[overrideSlotKey] || {}),
+        [field]: val,
+      },
+    }));
+  };
+
   const summaryRows = filteredSummaryVehicles.map((veh, idx) => {
     const vehTrips = trips.filter(
       (t) =>
@@ -2372,146 +2404,384 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       );
     };
 
-    const campusMatchingTrips = vehTrips.filter(doesTripMatchSummaryCampus);
-    const trip1 =
-      campusMatchingTrips.find((t) => t.tripNumber === 1) ||
-      (campusMatchingTrips.length === 1 && campusMatchingTrips[0].tripNumber !== 2
-        ? campusMatchingTrips[0]
-        : undefined);
-    const trip2 = campusMatchingTrips.find((t) => t.tripNumber === 2);
+    const campusMatchingRoutes = vehRoutes
+      .filter((r) => !targetSummaryCampus || routeHasMembersForCampus(r, targetSummaryCampus))
+      .sort((a, b) => (a.tripNumber || 1) - (b.tripNumber || 1) || a.code.localeCompare(b.code));
 
-    const getTripSummaryStats = (t: DailyTrip | undefined) => {
-      if (!t) {
-        return { inTime: '', inStr: '', outTime: '', outStr: '', remark: '' };
+    const campusMatchingTrips = vehTrips.filter(doesTripMatchSummaryCampus);
+
+    // Pair all routes & trips for this vehicle so 1st, 2nd, 3rd, 4th+ trips are ALL counted
+    const usedTripIds = new Set<string>();
+    const rawEntries: Array<{ tripNumber: number; route?: Route; trip?: DailyTrip }> = [];
+
+    for (const r of campusMatchingRoutes) {
+      const matchedTrip =
+        campusMatchingTrips.find(
+          (t) => !usedTripIds.has(t.id) && (t.routeId === r.id || t.routeName === r.code)
+        ) ||
+        vehTrips.find(
+          (t) => !usedTripIds.has(t.id) && (t.routeId === r.id || t.routeName === r.code)
+        );
+      if (matchedTrip) usedTripIds.add(matchedTrip.id);
+      rawEntries.push({
+        tripNumber: Number(r.tripNumber || matchedTrip?.tripNumber || 1),
+        route: r,
+        trip: matchedTrip,
+      });
+    }
+
+    for (const t of campusMatchingTrips) {
+      if (usedTripIds.has(t.id)) continue;
+      usedTripIds.add(t.id);
+      const matchedRoute = vehRoutes.find((r) => r.id === t.routeId || r.code === t.routeName);
+      rawEntries.push({
+        tripNumber: Number(t.tripNumber || matchedRoute?.tripNumber || 1),
+        route: matchedRoute,
+        trip: t,
+      });
+    }
+
+    rawEntries.sort((a, b) => a.tripNumber - b.tripNumber);
+
+    const maxTripNum = Math.max(2, ...rawEntries.map((e) => e.tripNumber));
+    const orderedSlotDefs: Array<{
+      slotKey: string;
+      tripNumber: number;
+      tripLabel: string;
+      route?: Route;
+      trip?: DailyTrip;
+    }> = [];
+
+    for (let num = 1; num <= maxTripNum; num++) {
+      const matchingForNum = rawEntries.filter((e) => e.tripNumber === num);
+      if (matchingForNum.length === 0) {
+        orderedSlotDefs.push({
+          slotKey: `empty-${num}`,
+          tripNumber: num,
+          tripLabel: formatTripOrdinal(num),
+        });
+      } else {
+        matchingForNum.forEach((entry, subIdx) => {
+          orderedSlotDefs.push({
+            slotKey: entry.route?.id || entry.trip?.id || `trip-${num}-${subIdx}`,
+            tripNumber: num,
+            tripLabel:
+              matchingForNum.length > 1
+                ? `${formatTripOrdinal(num)} (${String.fromCharCode(65 + subIdx)})`
+                : formatTripOrdinal(num),
+            route: entry.route,
+            trip: entry.trip,
+          });
+        });
       }
+    }
+
+    const getSlotSummaryStats = (slotDef: (typeof orderedSlotDefs)[number]) => {
+      const { route: r, trip: t } = slotDef;
+      const rawRouteMembers = r ? getAllMembersForRouteRaw(r) : [];
+      const scopedRouteMembers = targetSummaryCampus
+        ? rawRouteMembers.filter((s) => getStudentCampusCode(s) === targetSummaryCampus)
+        : rawRouteMembers;
+      const totalMembersCount = r
+        ? scopedRouteMembers.length
+        : t?.rosterCount !== undefined
+        ? t.rosterCount
+        : null;
+
+      if (!r && !t) {
+        return {
+          routeCode: '',
+          totalMembersCount: null as number | null,
+          totalMembersDisplay: '',
+          inTime: '',
+          inStr: '',
+          outTime: '',
+          outStr: '',
+          remark: '',
+        };
+      }
+
+      const expectedRouteTripId = r && summaryDate ? `dt-${r.id}-${summaryDate}` : '';
       const rawTripAtts = attendanceRecords.filter(
-        (a) => a.tripId === t.id && (!summaryDate || a.date === summaryDate)
+        (a) =>
+          (!summaryDate || a.date === summaryDate) &&
+          ((t && a.tripId === t.id) || (expectedRouteTripId && a.tripId === expectedRouteTripId))
       );
       const tAtts = targetSummaryCampus
-        ? rawTripAtts.filter(
-            (a) => studentCampusByIdMap.get(a.studentId) === targetSummaryCampus
-          )
+        ? rawTripAtts.filter((a) => studentCampusByIdMap.get(a.studentId) === targetSummaryCampus)
         : rawTripAtts;
 
       const hasArrAtt = tAtts.some((a) => a.driverStatus && a.driverStatus !== 'Pending');
       const arrPres = tAtts.filter((a) => a.driverStatus === 'Present').length;
       const hasDepAtt = tAtts.some((a) => a.assistantStatus && a.assistantStatus !== 'Pending');
       const depPres = tAtts.filter((a) => a.assistantStatus === 'Present').length;
+      const allHoliday =
+        tAtts.length > 0 &&
+        tAtts.every(
+          (a) =>
+            String(a.driverStatus || '') === 'Holiday' ||
+            String(a.assistantStatus || '') === 'Holiday'
+        );
 
       const tripNativeMatchesCampus =
-        !targetSummaryCampus || normalizeCampusCode(t.campus) === targetSummaryCampus;
+        !targetSummaryCampus ||
+        normalizeCampusCode(t?.campus || r?.campus) === targetSummaryCampus;
 
-      // Arrival (In) Time & Strength only from Arrival (scoped to selected campus when campus filter is active)
-      const inTime = t.inTime || '';
-      const inStr = hasArrAtt
+      // Arrival (In) Time & Strength
+      const inTime = t?.inTime || '';
+      const inStr = allHoliday
+        ? 'H'
+        : hasArrAtt
         ? String(arrPres).padStart(2, '0')
-        : t.inTime && t.inStrength !== undefined && tripNativeMatchesCampus
+        : t?.inTime && t?.inStrength !== undefined && tripNativeMatchesCampus
         ? String(t.inStrength).padStart(2, '0')
         : '';
 
-      // Departure (Out) Time & Strength strictly from Departure
-      const outTime = t.outTime || '';
-      const outStr = hasDepAtt
+      // Departure (Out) Time & Strength
+      const outTime = t?.outTime || '';
+      const outStr = allHoliday
+        ? 'H'
+        : hasDepAtt
         ? String(depPres).padStart(2, '0')
-        : t.outTime && t.outStrength !== undefined && hasDepAtt && tripNativeMatchesCampus
+        : t?.outTime && t?.outStrength !== undefined && tripNativeMatchesCampus
         ? String(t.outStrength).padStart(2, '0')
         : '';
 
-      const memberRemarks = tAtts
-        .filter(
-          (a) =>
-            a.driverStatus &&
-            a.driverStatus !== 'Pending' &&
-            a.assistantStatus &&
-            a.assistantStatus !== 'Pending' &&
-            a.driverStatus !== a.assistantStatus &&
-            (a.resolutionReason || a.notes)
-        )
-        .map((a) => `${a.studentName.split(' ')[0]}: ${a.resolutionReason || a.notes}`)
-        .join('; ');
+      // Collect complete, untruncated remarks from Trip, Attendance Records, Mismatches & Absentee Calls
+      const remarkParts: string[] = [];
+      const addUniqueRemark = (val?: string) => {
+        const cleaned = cleanAttendanceNoteForSummary(val);
+        if (!cleaned) return;
+        if (
+          !remarkParts.some(
+            (existing) =>
+              existing.toLowerCase().includes(cleaned.toLowerCase()) ||
+              cleaned.toLowerCase().includes(existing.toLowerCase())
+          )
+        ) {
+          remarkParts.push(cleaned);
+        }
+      };
 
-      const rawRemark =
-        (tripNativeMatchesCampus ? t.strengthMismatchRemark : '') || memberRemarks || '';
+      if (allHoliday) {
+        addUniqueRemark('Route Holiday');
+      }
+
+      if (tripNativeMatchesCampus && t?.strengthMismatchRemark) {
+        addUniqueRemark(t.strengthMismatchRemark);
+      }
+
+      if (
+        tripNativeMatchesCampus &&
+        t?.notes &&
+        !/^(Arrived|Departed)\s+at\s+\d{1,2}:\d{2}/i.test(t.notes.trim())
+      ) {
+        addUniqueRemark(t.notes);
+      }
+
+      for (const a of tAtts) {
+        const arr = String(a.driverStatus || 'Pending');
+        const dep = String(a.assistantStatus || 'Pending');
+        const noteText = cleanAttendanceNoteForSummary(a.resolutionReason || a.notes);
+        const firstName = (a.studentName || '').trim().split(/\s+/)[0] || a.studentName || 'Member';
+
+        if (
+          arr !== 'Pending' &&
+          dep !== 'Pending' &&
+          arr !== dep &&
+          arr !== 'Holiday' &&
+          dep !== 'Holiday'
+        ) {
+          addUniqueRemark(
+            noteText
+              ? `${firstName} (${arr[0]}→${dep[0]}): ${noteText}`
+              : `${firstName} (${arr[0]}→${dep[0]})`
+          );
+        } else if (noteText && noteText.toLowerCase() !== 'school holiday') {
+          addUniqueRemark(`${firstName}: ${noteText}`);
+        }
+      }
+
+      if (summaryDate && scopedRouteMembers.length > 0 && absenteeCalls.length > 0) {
+        const routeMemberIds = new Set(scopedRouteMembers.map((m) => m.id));
+        for (const call of absenteeCalls) {
+          if (call.date === summaryDate && routeMemberIds.has(call.studentId)) {
+            const callNote = cleanAttendanceNoteForSummary(
+              call.coordinatorRemarks ||
+                call.assistantRemarks ||
+                call.expectedReturnReason ||
+                call.earlyArrivalRemarks ||
+                call.attendanceRemarks
+            );
+            if (callNote) {
+              const firstName =
+                (call.studentName || '').trim().split(/\s+/)[0] || call.studentName || 'Member';
+              addUniqueRemark(`${firstName}: ${callNote}`);
+            }
+          }
+        }
+      }
+
       return {
+        routeCode: r?.code || t?.routeName || '',
+        totalMembersCount,
+        totalMembersDisplay:
+          totalMembersCount !== null ? String(totalMembersCount).padStart(2, '0') : '',
         inTime,
         inStr,
         outTime,
         outStr,
-        remark: summarizeRemarkForTable(rawRemark, 26),
-        fullRemark: rawRemark,
+        remark: remarkParts.join('; '),
       };
     };
 
-    const stats1 = getTripSummaryStats(trip1);
-    const stats2 = getTripSummaryStats(trip2);
-    const overrideKey = `${veh.id}:${targetSummaryCampus || 'ALL'}`;
-    const ov = timingOverrides[overrideKey] || timingOverrides[veh.id] || {};
+    const tripSlots = orderedSlotDefs.map((slotDef) => {
+      const stats = getSlotSummaryStats(slotDef);
+      const overrideSlotKey = `${veh.id}:${targetSummaryCampus || 'ALL'}:${summaryDate || 'ALL'}:${slotDef.slotKey}`;
+      const ov = timingOverrides[overrideSlotKey] || {};
+      return {
+        slotKey: slotDef.slotKey,
+        overrideSlotKey,
+        tripNumber: slotDef.tripNumber,
+        tripLabel: slotDef.tripLabel,
+        routeCode: stats.routeCode,
+        hasRouteOrTrip: Boolean(slotDef.route || slotDef.trip),
+        totalMembersCount: stats.totalMembersCount,
+        totalMembersDisplay: stats.totalMembersDisplay,
+        inTime: ov.inTime !== undefined ? ov.inTime : stats.inTime,
+        inStrength: ov.inStrength !== undefined ? ov.inStrength : stats.inStr,
+        outTime: ov.outTime !== undefined ? ov.outTime : stats.outTime,
+        outStrength: ov.outStrength !== undefined ? ov.outStrength : stats.outStr,
+        remark: ov.remark !== undefined ? ov.remark : stats.remark,
+      };
+    });
+
+    const routeDriverName =
+      veh.assignedDriverName ||
+      orderedSlotDefs.find((s) => s.trip?.driverName)?.trip?.driverName ||
+      orderedSlotDefs.find((s) => s.route?.driverName)?.route?.driverName ||
+      '—';
 
     return {
       sl: idx + 1,
       vehicleId: veh.id,
-      overrideKey,
-      vehicleLabel: veh.nickname ? `${veh.nickname} (${veh.registrationNumber.slice(-4)})` : veh.registrationNumber,
+      vehicleLabel: veh.nickname
+        ? `${veh.nickname} (${veh.registrationNumber.slice(-4)})`
+        : veh.registrationNumber,
       registrationNumber: veh.registrationNumber,
-      driverName: veh.assignedDriverName || trip1?.driverName || trip2?.driverName || '—',
-      inTime1: ov.inTime1 !== undefined ? ov.inTime1 : stats1.inTime,
-      inStrength1: ov.inStrength1 !== undefined ? ov.inStrength1 : stats1.inStr,
-      outTime1: ov.outTime1 !== undefined ? ov.outTime1 : stats1.outTime,
-      outStrength1: ov.outStrength1 !== undefined ? ov.outStrength1 : stats1.outStr,
-      remark1: ov.remark1 !== undefined ? ov.remark1 : stats1.remark,
-      fullRemark1: stats1.fullRemark || stats1.remark,
-      inTime2: ov.inTime2 !== undefined ? ov.inTime2 : stats2.inTime,
-      inStrength2: ov.inStrength2 !== undefined ? ov.inStrength2 : stats2.inStr,
-      outTime2: ov.outTime2 !== undefined ? ov.outTime2 : stats2.outTime,
-      outStrength2: ov.outStrength2 !== undefined ? ov.outStrength2 : stats2.outStr,
-      remark2: ov.remark2 !== undefined ? ov.remark2 : stats2.remark,
-      fullRemark2: stats2.fullRemark || stats2.remark,
+      driverName: routeDriverName,
+      tripSlots,
     };
   });
 
+  const summarySheetTotals = React.useMemo(() => {
+    let activeTripsCount = 0;
+    let totalAttachedMembers = 0;
+    let totalMorningArrived = 0;
+    let totalEveningDeparted = 0;
+    let morningReportedTrips = 0;
+    let eveningReportedTrips = 0;
+
+    for (const row of summaryRows) {
+      for (const slot of row.tripSlots) {
+        if (slot.hasRouteOrTrip) {
+          activeTripsCount += 1;
+        }
+        if (slot.totalMembersCount !== null && !Number.isNaN(slot.totalMembersCount)) {
+          totalAttachedMembers += slot.totalMembersCount;
+        }
+        const inNum = parseInt(String(slot.inStrength || '').trim(), 10);
+        if (!Number.isNaN(inNum)) {
+          totalMorningArrived += inNum;
+          morningReportedTrips += 1;
+        }
+        const outNum = parseInt(String(slot.outStrength || '').trim(), 10);
+        if (!Number.isNaN(outNum)) {
+          totalEveningDeparted += outNum;
+          eveningReportedTrips += 1;
+        }
+      }
+    }
+
+    return {
+      activeTripsCount,
+      totalAttachedMembers,
+      totalMorningArrived,
+      totalEveningDeparted,
+      morningReportedTrips,
+      eveningReportedTrips,
+    };
+  }, [summaryRows]);
+
+  const summaryExportRows = React.useMemo(
+    () =>
+      summaryRows.flatMap((row) =>
+        row.tripSlots
+          .filter((slot) => slot.hasRouteOrTrip || slot.inTime || slot.outTime || slot.remark)
+          .map((slot) => ({
+            sl: row.sl,
+            vehicle: row.registrationNumber,
+            driver: row.driverName,
+            trip: slot.tripLabel,
+            route: slot.routeCode || '—',
+            totalMembers: slot.totalMembersCount ?? '—',
+            inTime: slot.inTime || '—',
+            inStrength: slot.inStrength || '—',
+            outTime: slot.outTime || '—',
+            outStrength: slot.outStrength || '—',
+            remark: slot.remark || '—',
+          }))
+      ),
+    [summaryRows]
+  );
+
   const autoCombinedSummaryRemarks = summaryRows
-    .flatMap((r) => {
-      const items: string[] = [];
-      if (r.remark1) items.push(`${r.registrationNumber}(1st): ${r.remark1}`);
-      if (r.remark2) items.push(`${r.registrationNumber}(2nd): ${r.remark2}`);
-      return items;
-    })
+    .flatMap((r) =>
+      r.tripSlots
+        .filter((s) => Boolean(s.remark && s.remark.trim()))
+        .map(
+          (s) =>
+            `${r.registrationNumber} (${s.tripLabel}${s.routeCode ? ` - ${s.routeCode}` : ''}): ${s.remark.trim()}`
+        )
+    )
     .join(' | ');
 
-  const updateOverride = (vehId: string, field: keyof SummaryTimingOverride, val: string) => {
-    setTimingOverrides((prev) => ({
-      ...prev,
-      [vehId]: {
-        ...(prev[vehId] || {}),
-        [field]: val,
-      },
-    }));
-  };
-
   const handlePrintSummarySheet = () => {
+    const esc = (val: string | number | undefined | null): string =>
+      String(val ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
     const rowsHtml = summaryRows
-      .map(
-        (r) => `
+      .map((r) => {
+        const span = r.tripSlots.length;
+        return r.tripSlots
+          .map(
+            (slot, sIdx) => `
         <tr>
-          <td rowspan="2" style="text-align:center;font-weight:700;">${r.sl}</td>
-          <td rowspan="2" style="font-weight:700;">${r.vehicleLabel}<br/><span style="font-size:10px;font-weight:400;">${r.registrationNumber}</span></td>
-          <td rowspan="2">${r.driverName}</td>
-          <td style="text-align:center;font-weight:600;">1 St</td>
-          <td style="text-align:center;">${r.inTime1 || '—'}</td>
-          <td style="text-align:center;">${r.inStrength1 || '—'}</td>
-          <td style="text-align:center;">${r.outTime1 || '—'}</td>
-          <td style="text-align:center;">${r.outStrength1 || '—'}</td>
-          <td style="font-size:10px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${summarizeRemarkForTable(r.remark1, 26) || '—'}</td>
-        </tr>
-        <tr>
-          <td style="text-align:center;font-weight:600;">2nd</td>
-          <td style="text-align:center;">${r.inTime2 || '—'}</td>
-          <td style="text-align:center;">${r.inStrength2 || '—'}</td>
-          <td style="text-align:center;">${r.outTime2 || '—'}</td>
-          <td style="text-align:center;">${r.outStrength2 || '—'}</td>
-          <td style="font-size:10px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${summarizeRemarkForTable(r.remark2, 26) || '—'}</td>
+          ${
+            sIdx === 0
+              ? `<td rowspan="${span}" style="text-align:center;font-weight:700;">${esc(r.sl)}</td>
+                 <td rowspan="${span}" style="font-weight:700;">${esc(r.vehicleLabel)}<br/><span style="font-size:10px;font-weight:400;color:#475569;">${esc(r.registrationNumber)}</span></td>
+                 <td rowspan="${span}">${esc(r.driverName)}</td>`
+              : ''
+          }
+          <td style="text-align:center;font-weight:700;">
+            <div>${esc(slot.tripLabel)}</div>
+            ${slot.routeCode ? `<div style="font-size:9px;font-weight:600;color:#475569;">${esc(slot.routeCode)}</div>` : ''}
+          </td>
+          <td style="text-align:center;font-weight:700;background:#f8fafc;">${esc(slot.totalMembersDisplay || '—')}</td>
+          <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.inTime || '—')}</td>
+          <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.inStrength || '—')}</td>
+          <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.outTime || '—')}</td>
+          <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.outStrength || '—')}</td>
+          <td style="font-size:10.5px;line-height:1.35;white-space:pre-wrap;word-break:break-word;">${esc(slot.remark || '—')}</td>
         </tr>`
-      )
+          )
+          .join('');
+      })
       .join('');
 
     const effectiveFooterRemark = summaryRemarks || autoCombinedSummaryRemarks || '—';
@@ -2519,32 +2789,50 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     const html = `<!DOCTYPE html>
       <html>
         <head>
-          <title>Transport Timings - ${schoolName || 'Narendra Edu Valley'}</title>
+          <title>Transport Timings - ${esc(schoolName || 'Narendra Edu Valley')}</title>
           <style>
-            body { font-family: Arial, sans-serif; padding: 20px; color: #0f172a; }
-            table { width: 100%; border-collapse: collapse; border: 2px solid #0f172a; font-size: 12px; table-layout: fixed; }
-            th, td { border: 1px solid #0f172a; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; }
-            @media print { body { padding: 0; } }
+            body { font-family: Arial, sans-serif; padding: 14px; color: #0f172a; }
+            table { width: 100%; border-collapse: collapse; border: 2px solid #0f172a; font-size: 11.5px; }
+            th, td { border: 1px solid #0f172a; padding: 5px 7px; vertical-align: middle; word-wrap: break-word; overflow-wrap: break-word; }
+            @media print { body { padding: 0; } tr { page-break-inside: avoid; } }
           </style>
         </head>
         <body>
           <table>
             <thead>
-              <tr><th colspan="9" style="font-size:22px;font-weight:800;text-align:center;padding:10px;">${schoolName || 'Narendra Edu Valley'}</th></tr>
-              <tr><th colspan="9" style="font-size:12px;text-transform:uppercase;text-align:center;background:#f8fafc;">Transport Timings & Attendance Summary</th></tr>
+              <tr><th colspan="10" style="font-size:20px;font-weight:800;text-align:center;padding:8px;">${esc(schoolName || 'Narendra Edu Valley')}</th></tr>
+              <tr><th colspan="10" style="font-size:11.5px;text-transform:uppercase;text-align:center;background:#f8fafc;">Transport Timings &amp; Attendance Summary</th></tr>
               <tr>
-                <th colspan="5" style="text-align:left;">Campus : ${summaryCampusDisplayLabel}</th>
-                <th colspan="4" style="text-align:left;">Date :- ${formattedSummaryDate}</th>
+                <th colspan="6" style="text-align:left;">Campus : ${esc(summaryCampusDisplayLabel)}</th>
+                <th colspan="4" style="text-align:left;">Date :- ${esc(formattedSummaryDate)}</th>
               </tr>
               <tr style="background:#f1f5f9;">
-                <th style="width:36px;">Sl</th><th style="width:110px;">Vehicle</th><th style="width:120px;">Driver</th><th style="width:52px;">Trip</th><th style="width:74px;">In Time</th><th style="width:68px;">Strength</th><th style="width:74px;">Out Time</th><th style="width:68px;">Strength</th><th style="width:135px;">Remarks</th>
+                <th style="width:32px;">Sl</th>
+                <th style="width:96px;">Vehicle</th>
+                <th style="width:105px;">Driver</th>
+                <th style="width:74px;">Trip / Route</th>
+                <th style="width:66px;">Total Members</th>
+                <th style="width:64px;">In Time</th>
+                <th style="width:62px;">In Strength</th>
+                <th style="width:64px;">Out Time</th>
+                <th style="width:62px;">Out Strength</th>
+                <th>Remarks</th>
               </tr>
             </thead>
             <tbody>
               ${rowsHtml}
-              <tr><td colspan="5"><strong>Campus Incharge:</strong> ${campusInchargeName || '________________'}</td><td colspan="4"><strong>Filled By:</strong> ${filledByName || '________________'}</td></tr>
-              <tr><td colspan="5" style="padding:14px 8px;">Signature:</td><td colspan="4" style="padding:14px 8px;">Signature:</td></tr>
-              <tr><td colspan="9" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><strong>Remarks:</strong> ${summarizeRemarkForTable(effectiveFooterRemark, 110)}</td></tr>
+              <tr style="background:#f8fafc;font-weight:800;">
+                <td colspan="4" style="text-align:right;">TOTAL (${esc(summarySheetTotals.activeTripsCount)} Active Trips)</td>
+                <td style="text-align:center;font-family:monospace;">${esc(summarySheetTotals.totalAttachedMembers)}</td>
+                <td style="text-align:center;color:#64748b;">Morning</td>
+                <td style="text-align:center;font-family:monospace;color:#047857;">${esc(summarySheetTotals.totalMorningArrived)}</td>
+                <td style="text-align:center;color:#64748b;">Evening</td>
+                <td style="text-align:center;font-family:monospace;color:#1d4ed8;">${esc(summarySheetTotals.totalEveningDeparted)}</td>
+                <td style="font-size:10px;font-weight:600;color:#334155;">Arrived: ${esc(summarySheetTotals.totalMorningArrived)}/${esc(summarySheetTotals.totalAttachedMembers)} • Departed: ${esc(summarySheetTotals.totalEveningDeparted)}/${esc(summarySheetTotals.totalAttachedMembers)}</td>
+              </tr>
+              <tr><td colspan="6"><strong>Campus Incharge:</strong> ${esc(campusInchargeName || '________________')}</td><td colspan="4"><strong>Filled By:</strong> ${esc(filledByName || '________________')}</td></tr>
+              <tr><td colspan="6" style="padding:12px 8px;">Signature:</td><td colspan="4" style="padding:12px 8px;">Signature:</td></tr>
+              <tr><td colspan="10" style="white-space:pre-wrap;word-break:break-word;line-height:1.45;"><strong>Remarks:</strong> ${esc(effectiveFooterRemark)}</td></tr>
             </tbody>
           </table>
         </body>
@@ -2552,7 +2840,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
 
     openHtmlPrintPreview({
       title: `Transport Timings & Attendance Summary — ${formattedSummaryDate}`,
-      subtitle: `Campus: ${summaryCampusDisplayLabel} • Vehicles: ${summaryRows.length}`,
+      subtitle: `Campus: ${summaryCampusDisplayLabel} • Vehicles: ${summaryRows.length} • Active Trips: ${summarySheetTotals.activeTripsCount} • Total Members: ${summarySheetTotals.totalAttachedMembers}`,
       html,
     });
   };
@@ -2588,7 +2876,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             {activeSubView === 'unmarked_mismatch' && `Attendance Audit`}
             {activeSubView === 'mark_holiday' && `Route Holiday`}
             {activeSubView === 'calendar' && `${routes.length} Routes`}
-            {activeSubView === 'summary' && `${summaryRows.length} Vehicles`}
+            {activeSubView === 'summary' &&
+              `${summaryRows.length} Vehicles · ${summarySheetTotals.activeTripsCount} Trips`}
             {activeSubView === 'pack' && `Route Sheet`}
             {activeSubView === 'call_absentees' &&
               `${mainCallingQueue.length} To Call • ${scheduledReturnQueue.length} Scheduled Return`}
@@ -2729,18 +3018,20 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 title={`Transport Timings Summary (${formattedSummaryDate})`}
                 filename="transport_timings_summary"
                 schoolName={schoolName}
-                filteredData={summaryRows}
-                allData={summaryRows}
+                filteredData={summaryExportRows}
+                allData={summaryExportRows}
                 columns={[
                   { header: 'Sl', accessor: (r) => r.sl },
-                  { header: 'Vehicle', accessor: (r) => r.registrationNumber },
-                  { header: 'Driver', accessor: (r) => r.driverName },
-                  { header: '1st In Time', accessor: (r) => r.inTime1 || '—' },
-                  { header: '1st In Str', accessor: (r) => r.inStrength1 || '—' },
-                  { header: '1st Out Time', accessor: (r) => r.outTime1 || '—' },
-                  { header: '1st Out Str', accessor: (r) => r.outStrength1 || '—' },
-                  { header: '2nd In Time', accessor: (r) => r.inTime2 || '—' },
-                  { header: '2nd Out Time', accessor: (r) => r.outTime2 || '—' },
+                  { header: 'Vehicle', accessor: (r) => r.vehicle },
+                  { header: 'Driver', accessor: (r) => r.driver },
+                  { header: 'Trip', accessor: (r) => r.trip },
+                  { header: 'Route', accessor: (r) => r.route },
+                  { header: 'Total Members', accessor: (r) => r.totalMembers },
+                  { header: 'In Time', accessor: (r) => r.inTime },
+                  { header: 'Morning Strength', accessor: (r) => r.inStrength },
+                  { header: 'Out Time', accessor: (r) => r.outTime },
+                  { header: 'Evening Strength', accessor: (r) => r.outStrength },
+                  { header: 'Remarks', accessor: (r) => r.remark },
                 ]}
               />
               <button
@@ -4084,6 +4375,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 </label>
                 <input
                   type="text"
+                  readOnly={isReadOnly}
                   value={campusInchargeName}
                   onChange={(e) => setCampusInchargeName(e.target.value)}
                   placeholder="Enter Campus Incharge"
@@ -4096,6 +4388,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 </label>
                 <input
                   type="text"
+                  readOnly={isReadOnly}
                   value={filledByName}
                   onChange={(e) => setFilledByName(e.target.value)}
                   placeholder="Enter Assistant Name"
@@ -4114,14 +4407,60 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             </button>
           </div>
 
+          {/* Quick Fleet Strength Overview Bar (All 1st, 2nd & 3rd+ Trips Included) */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 print:hidden">
+            <div className="bg-white rounded-xl border border-slate-200 p-3.5">
+              <div className="text-[11px] font-semibold text-slate-500">Vehicles &amp; Active Trips</div>
+              <div className="mt-1 text-lg font-bold text-slate-900 font-mono tabular-nums">
+                {summaryRows.length} Vehicles · {summarySheetTotals.activeTripsCount} Trips
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Includes 1st, 2nd &amp; 3rd+ trips
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 p-3.5">
+              <div className="text-[11px] font-semibold text-slate-500">Total Route Members</div>
+              <div className="mt-1 text-lg font-bold text-slate-900 font-mono tabular-nums">
+                {summarySheetTotals.totalAttachedMembers}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Attached across {summaryCampusDisplayLabel}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 p-3.5">
+              <div className="text-[11px] font-semibold text-slate-500">Morning Arrived</div>
+              <div className="mt-1 text-lg font-bold text-emerald-700 font-mono tabular-nums">
+                {summarySheetTotals.totalMorningArrived}{' '}
+                <span className="text-xs font-semibold text-slate-500">
+                  / {summarySheetTotals.totalAttachedMembers}
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {summarySheetTotals.morningReportedTrips} of {summarySheetTotals.activeTripsCount} trips marked
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 p-3.5">
+              <div className="text-[11px] font-semibold text-slate-500">Evening Departed</div>
+              <div className="mt-1 text-lg font-bold text-blue-700 font-mono tabular-nums">
+                {summarySheetTotals.totalEveningDeparted}{' '}
+                <span className="text-xs font-semibold text-slate-500">
+                  / {summarySheetTotals.totalAttachedMembers}
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {summarySheetTotals.eveningReportedTrips} of {summarySheetTotals.activeTripsCount} trips marked
+              </div>
+            </div>
+          </div>
+
           {/* Printable Sheet Container matching Narendra Edu Valley Transport Timings */}
-          <div className="bg-white rounded-2xl border-2 border-slate-800 p-6 shadow-xs max-w-5xl mx-auto print:border-black print:shadow-none print:p-2">
-            <table className="w-full border-collapse border-2 border-slate-800 text-xs text-slate-900 table-fixed">
+          <div className="bg-white rounded-2xl border-2 border-slate-800 p-4 sm:p-6 shadow-xs max-w-7xl mx-auto overflow-x-auto print:overflow-visible print:border-black print:shadow-none print:p-2">
+            <table className="w-full min-w-[940px] print:min-w-0 border-collapse border-2 border-slate-800 text-xs text-slate-900">
               <thead>
                 {/* Row 1: Institute Header */}
                 <tr>
                   <th
-                    colSpan={9}
+                    colSpan={10}
                     className="border-2 border-slate-800 py-2.5 px-4 text-center text-2xl font-extrabold tracking-wide text-slate-900"
                   >
                     {schoolName || 'Narendra Edu Valley'}
@@ -4130,16 +4469,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 {/* Row 2: Sub-header "Transport Timings" */}
                 <tr>
                   <th
-                    colSpan={9}
+                    colSpan={10}
                     className="border border-slate-800 py-1 px-4 text-center text-xs font-bold uppercase tracking-wider text-slate-800 bg-slate-50"
                   >
-                    Transport Timings
+                    Transport Timings &amp; Attendance Summary
                   </th>
                 </tr>
                 {/* Row 3: Campus & Date */}
                 <tr>
                   <th
-                    colSpan={5}
+                    colSpan={6}
                     className="border border-slate-800 py-1.5 px-3 text-left font-bold text-xs"
                   >
                     Campus : <span className="font-semibold ml-1">{summaryCampusDisplayLabel}</span>
@@ -4154,156 +4493,165 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                 {/* Row 4: Table Column Headers */}
                 <tr className="bg-slate-100 font-bold text-slate-900">
                   <th className="border border-slate-800 py-2 px-2 w-10 text-center">Sl</th>
-                  <th className="border border-slate-800 py-2 px-3 w-32 text-left">Vehicle</th>
-                  <th className="border border-slate-800 py-2 px-3 w-36 text-left">Driver</th>
-                  <th className="border border-slate-800 py-2 px-2 w-14 text-center">Trip</th>
+                  <th className="border border-slate-800 py-2 px-2.5 w-28 text-left">Vehicle</th>
+                  <th className="border border-slate-800 py-2 px-2.5 w-32 text-left">Driver</th>
+                  <th className="border border-slate-800 py-2 px-2 w-24 text-center">Trip / Route</th>
+                  <th className="border border-slate-800 py-2 px-2 w-20 text-center bg-slate-200/60">
+                    Total Members
+                  </th>
                   <th className="border border-slate-800 py-2 px-2 w-20 text-center">In Time</th>
-                  <th className="border border-slate-800 py-2 px-2 w-18 text-center">Strength</th>
+                  <th className="border border-slate-800 py-2 px-2 w-20 text-center">In Strength</th>
                   <th className="border border-slate-800 py-2 px-2 w-20 text-center">Out Time</th>
-                  <th className="border border-slate-800 py-2 px-2 w-18 text-center">Strength</th>
-                  <th className="border border-slate-800 py-2 px-2 w-36 text-left">Remarks</th>
+                  <th className="border border-slate-800 py-2 px-2 w-20 text-center">Out Strength</th>
+                  <th className="border border-slate-800 py-2 px-2.5 min-w-[220px] text-left">Remarks</th>
                 </tr>
               </thead>
               <tbody>
-                {summaryRows.map((row) => (
-                  <React.Fragment key={row.vehicleId}>
-                    {/* 1st Trip Row */}
-                    <tr>
-                      <td
-                        rowSpan={2}
-                        className="border border-slate-800 py-2 px-2 text-center font-bold align-middle"
-                      >
-                        {row.sl}
-                      </td>
-                      <td
-                        rowSpan={2}
-                        className="border border-slate-800 py-2 px-3 font-bold align-middle truncate"
-                      >
-                        <div className="truncate">{row.vehicleLabel}</div>
-                        <div className="text-[10px] font-mono text-slate-600 font-normal truncate">
-                          {row.registrationNumber}
-                        </div>
-                      </td>
-                      <td
-                        rowSpan={2}
-                        className="border border-slate-800 py-2 px-3 font-medium align-middle truncate"
-                      >
-                        {row.driverName}
-                      </td>
-                      <td className="border border-slate-800 py-1.5 px-2 text-center font-semibold">
-                        1 St
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.inTime1}
-                          onChange={(e) => updateOverride(row.vehicleId, 'inTime1', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.inStrength1}
-                          onChange={(e) => updateOverride(row.vehicleId, 'inStrength1', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.outTime1}
-                          onChange={(e) => updateOverride(row.vehicleId, 'outTime1', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.outStrength1}
-                          onChange={(e) => updateOverride(row.vehicleId, 'outStrength1', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td
-                        className="border border-slate-800 p-1 text-left overflow-hidden"
-                        title={row.fullRemark1 || 'Summarized strength mismatch remark'}
-                      >
-                        <input
-                          type="text"
-                          maxLength={32}
-                          value={row.remark1}
-                          onChange={(e) => updateOverride(row.vehicleId, 'remark1', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-[11px] font-medium text-slate-800 bg-transparent truncate focus:outline-hidden"
-                        />
-                      </td>
-                    </tr>
-                    {/* 2nd Trip Row */}
-                    <tr>
-                      <td className="border border-slate-800 py-1.5 px-2 text-center font-semibold">
-                        2nd
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.inTime2}
-                          onChange={(e) => updateOverride(row.vehicleId, 'inTime2', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.inStrength2}
-                          onChange={(e) => updateOverride(row.vehicleId, 'inStrength2', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.outTime2}
-                          onChange={(e) => updateOverride(row.vehicleId, 'outTime2', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td className="border border-slate-800 p-1 text-center">
-                        <input
-                          type="text"
-                          value={row.outStrength2}
-                          onChange={(e) => updateOverride(row.vehicleId, 'outStrength2', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-center font-mono font-bold text-xs bg-transparent focus:outline-hidden"
-                        />
-                      </td>
-                      <td
-                        className="border border-slate-800 p-1 text-left overflow-hidden"
-                        title={row.fullRemark2 || 'Summarized strength mismatch remark'}
-                      >
-                        <input
-                          type="text"
-                          maxLength={32}
-                          value={row.remark2}
-                          onChange={(e) => updateOverride(row.vehicleId, 'remark2', e.target.value)}
-                          placeholder="—"
-                          className="w-full text-[11px] font-medium text-slate-800 bg-transparent truncate focus:outline-hidden"
-                        />
-                      </td>
-                    </tr>
-                  </React.Fragment>
-                ))}
+                {summaryRows.map((row) => {
+                  const span = row.tripSlots.length;
+                  return (
+                    <React.Fragment key={row.vehicleId}>
+                      {row.tripSlots.map((slot, slotIdx) => {
+                        const remarkLineCount = Math.max(
+                          1,
+                          Math.min(4, Math.ceil((slot.remark?.length || 1) / 34))
+                        );
+                        return (
+                          <tr
+                            key={`${row.vehicleId}-${slot.slotKey}`}
+                            className={slot.tripNumber >= 3 ? 'bg-amber-50/35' : undefined}
+                          >
+                            {slotIdx === 0 && (
+                              <>
+                                <td
+                                  rowSpan={span}
+                                  className="border border-slate-800 py-2 px-2 text-center font-bold align-middle font-mono tabular-nums"
+                                >
+                                  {row.sl}
+                                </td>
+                                <td
+                                  rowSpan={span}
+                                  className="border border-slate-800 py-2 px-2.5 font-bold align-middle whitespace-normal break-words"
+                                >
+                                  <div>{row.vehicleLabel}</div>
+                                  <div className="text-[10px] font-mono text-slate-600 font-normal">
+                                    {row.registrationNumber}
+                                  </div>
+                                </td>
+                                <td
+                                  rowSpan={span}
+                                  className="border border-slate-800 py-2 px-2.5 font-medium align-middle whitespace-normal break-words"
+                                >
+                                  {row.driverName}
+                                </td>
+                              </>
+                            )}
+                            <td className="border border-slate-800 py-1.5 px-2 text-center align-middle">
+                              <div className="font-bold text-slate-900">{slot.tripLabel}</div>
+                              {slot.routeCode && (
+                                <div className="text-[10px] font-mono font-semibold text-slate-600">
+                                  {slot.routeCode}
+                                </div>
+                              )}
+                            </td>
+                            <td className="border border-slate-800 py-1.5 px-2 text-center align-middle bg-slate-50/80 font-mono font-bold tabular-nums text-slate-900">
+                              {slot.totalMembersDisplay || '—'}
+                            </td>
+                            <td className="border border-slate-800 p-1 text-center align-middle">
+                              <input
+                                type="text"
+                                readOnly={isReadOnly}
+                                value={slot.inTime}
+                                onChange={(e) =>
+                                  updateOverride(slot.overrideSlotKey, 'inTime', e.target.value)
+                                }
+                                placeholder="—"
+                                className="w-full text-center font-mono font-bold tabular-nums text-xs bg-transparent focus:outline-hidden"
+                              />
+                            </td>
+                            <td className="border border-slate-800 p-1 text-center align-middle">
+                              <input
+                                type="text"
+                                readOnly={isReadOnly}
+                                value={slot.inStrength}
+                                onChange={(e) =>
+                                  updateOverride(slot.overrideSlotKey, 'inStrength', e.target.value)
+                                }
+                                placeholder="—"
+                                className="w-full text-center font-mono font-bold tabular-nums text-xs text-emerald-800 bg-transparent focus:outline-hidden"
+                              />
+                            </td>
+                            <td className="border border-slate-800 p-1 text-center align-middle">
+                              <input
+                                type="text"
+                                readOnly={isReadOnly}
+                                value={slot.outTime}
+                                onChange={(e) =>
+                                  updateOverride(slot.overrideSlotKey, 'outTime', e.target.value)
+                                }
+                                placeholder="—"
+                                className="w-full text-center font-mono font-bold tabular-nums text-xs bg-transparent focus:outline-hidden"
+                              />
+                            </td>
+                            <td className="border border-slate-800 p-1 text-center align-middle">
+                              <input
+                                type="text"
+                                readOnly={isReadOnly}
+                                value={slot.outStrength}
+                                onChange={(e) =>
+                                  updateOverride(slot.overrideSlotKey, 'outStrength', e.target.value)
+                                }
+                                placeholder="—"
+                                className="w-full text-center font-mono font-bold tabular-nums text-xs text-blue-800 bg-transparent focus:outline-hidden"
+                              />
+                            </td>
+                            <td className="border border-slate-800 p-1.5 text-left align-middle min-w-[220px]">
+                              <textarea
+                                rows={remarkLineCount}
+                                readOnly={isReadOnly}
+                                value={slot.remark}
+                                onChange={(e) =>
+                                  updateOverride(slot.overrideSlotKey, 'remark', e.target.value)
+                                }
+                                placeholder="—"
+                                className="w-full text-[11px] leading-snug font-medium text-slate-800 bg-transparent whitespace-pre-wrap break-words resize-y focus:outline-hidden"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
+                  );
+                })}
+
+                {/* Fleet Totals Row */}
+                <tr className="bg-slate-100 font-bold text-slate-900">
+                  <td colSpan={4} className="border border-slate-800 py-2 px-3 text-right uppercase tracking-wide text-[11px]">
+                    Total ({summarySheetTotals.activeTripsCount} Active Trips)
+                  </td>
+                  <td className="border border-slate-800 py-2 px-2 text-center font-mono font-extrabold tabular-nums bg-slate-200/70">
+                    {summarySheetTotals.totalAttachedMembers}
+                  </td>
+                  <td className="border border-slate-800 py-2 px-2 text-center text-[11px] text-slate-600">
+                    Arrived
+                  </td>
+                  <td className="border border-slate-800 py-2 px-2 text-center font-mono font-extrabold tabular-nums text-emerald-800">
+                    {summarySheetTotals.totalMorningArrived}
+                  </td>
+                  <td className="border border-slate-800 py-2 px-2 text-center text-[11px] text-slate-600">
+                    Departed
+                  </td>
+                  <td className="border border-slate-800 py-2 px-2 text-center font-mono font-extrabold tabular-nums text-blue-800">
+                    {summarySheetTotals.totalEveningDeparted}
+                  </td>
+                  <td className="border border-slate-800 py-2 px-2.5 text-[11px] font-semibold text-slate-700">
+                    Morning: {summarySheetTotals.totalMorningArrived} / {summarySheetTotals.totalAttachedMembers} · Evening: {summarySheetTotals.totalEveningDeparted} / {summarySheetTotals.totalAttachedMembers}
+                  </td>
+                </tr>
 
                 {/* Footer Sign-Off Block matching uploaded manual sheet */}
                 <tr>
-                  <td colSpan={5} className="border border-slate-800 py-1.5 px-3 font-bold">
+                  <td colSpan={6} className="border border-slate-800 py-1.5 px-3 font-bold">
                     Campus Incharge
                   </td>
                   <td colSpan={4} className="border border-slate-800 py-1.5 px-3 font-bold">
@@ -4311,7 +4659,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   </td>
                 </tr>
                 <tr>
-                  <td colSpan={5} className="border border-slate-800 py-2 px-3 font-semibold">
+                  <td colSpan={6} className="border border-slate-800 py-2 px-3 font-semibold">
                     Name :- <span className="ml-2 font-bold">{campusInchargeName}</span>
                   </td>
                   <td colSpan={4} className="border border-slate-800 py-2 px-3 font-semibold">
@@ -4319,7 +4667,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   </td>
                 </tr>
                 <tr>
-                  <td colSpan={5} className="border border-slate-800 py-3 px-3 font-semibold">
+                  <td colSpan={6} className="border border-slate-800 py-3 px-3 font-semibold">
                     Signature
                   </td>
                   <td colSpan={4} className="border border-slate-800 py-3 px-3 font-semibold">
@@ -4327,16 +4675,24 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   </td>
                 </tr>
                 <tr>
-                  <td colSpan={9} className="border border-slate-800 py-2.5 px-3 font-semibold">
-                    <div className="flex items-center gap-2">
-                      <span className="shrink-0">Remarks :-</span>
-                      <input
-                        type="text"
-                        maxLength={110}
+                  <td colSpan={10} className="border border-slate-800 py-2.5 px-3 font-semibold">
+                    <div className="flex items-start gap-2">
+                      <span className="shrink-0 pt-0.5 font-bold">Remarks :-</span>
+                      <textarea
+                        rows={Math.max(
+                          2,
+                          Math.min(
+                            6,
+                            Math.ceil(
+                              ((summaryRemarks || autoCombinedSummaryRemarks).length || 1) / 85
+                            )
+                          )
+                        )}
+                        readOnly={isReadOnly}
                         value={summaryRemarks || autoCombinedSummaryRemarks}
                         onChange={(e) => setSummaryRemarks(e.target.value)}
-                        placeholder="Summarized remarks (auto-filled from Attendance window)..."
-                        className="flex-1 bg-transparent focus:outline-hidden font-normal truncate"
+                        placeholder="Summarized remarks across all vehicle trips (auto-filled from Attendance window)..."
+                        className="flex-1 bg-transparent focus:outline-hidden font-normal text-xs leading-relaxed whitespace-pre-wrap break-words resize-y"
                       />
                     </div>
                   </td>
