@@ -129,8 +129,8 @@ export type VehicleAvailability = 'Available' | 'In-Service' | 'Maintenance' | '
 
 export type AccountClass = 'Asset' | 'Liability' | 'Equity' | 'Income' | 'Expense';
 
-// 4 Multi-Login Designations / Roles
-export type UserRole = 'Admin' | 'Transport Coordinator' | 'Transport Assistant' | 'Attendance Incharge';
+// 5 Multi-Login Designations / Roles
+export type UserRole = 'Admin' | 'Principal' | 'Transport Coordinator' | 'Transport Assistant' | 'Attendance Incharge';
 
 export interface RolePermissions {
   manageMasters: boolean;

@@ -112,7 +112,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <span>Transport ERP Sign In</span>
             </h2>
             <p className="text-xs text-slate-500 mt-1">
-              Sign in with your authorized staff credentials (Admin, Transport Coordinator, Transport Assistant, or Attendance Incharge).
+              Sign in with your authorized staff credentials (Admin, Principal, Transport Coordinator, Transport Assistant, or Attendance Incharge).
             </p>
           </div>
 

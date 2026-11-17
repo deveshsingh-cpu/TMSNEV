@@ -124,7 +124,8 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     }
   };
 
-  // Campus scoping for Transport Assistant vs Coordinator/Admin
+  // Campus scoping for Transport Assistant vs Coordinator/Principal/Admin
+  const isReadOnly = currentRole === 'Principal';
   const isAssistant = currentRole === 'Transport Assistant';
   const lockedCampus: ResolvedCampus | null = isAssistant
     ? normalizeCampus(userCampus) || 'Sr'
@@ -2333,20 +2334,22 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                 ]}
               />
 
-              <button
-                type="button"
-                onClick={() =>
-                  setIncomeSubView(incomeSubView === 'income_list' ? 'income_heads' : 'income_list')
-                }
-                className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <Tag className="w-3.5 h-3.5" />
-                <span>
-                  {incomeSubView === 'income_list'
-                    ? `Manage Income Heads (${incomeHeads.length})`
-                    : 'Back to Income Records'}
-                </span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setIncomeSubView(incomeSubView === 'income_list' ? 'income_heads' : 'income_list')
+                  }
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <Tag className="w-3.5 h-3.5" />
+                  <span>
+                    {incomeSubView === 'income_list'
+                      ? `Manage Income Heads (${incomeHeads.length})`
+                      : 'Back to Income Records'}
+                  </span>
+                </button>
+              )}
             </>
           )}
 
@@ -3057,50 +3060,52 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           {incomeSubView === 'income_heads' ? (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Left: Add Income Head */}
-              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs h-fit space-y-4">
-                <div className="border-b border-slate-100 pb-3">
-                  <h3 className="text-sm font-bold text-slate-900">Add Income Head</h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Create custom income heads for non-fee transport revenues (e.g., Bus Charter, Scrap Sale, Event Hire).
-                  </p>
+              {!isReadOnly && (
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs h-fit space-y-4">
+                  <div className="border-b border-slate-100 pb-3">
+                    <h3 className="text-sm font-bold text-slate-900">Add Income Head</h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Create custom income heads for non-fee transport revenues (e.g., Bus Charter, Scrap Sale, Event Hire).
+                    </p>
+                  </div>
+                  <form onSubmit={handleCreateIncomeHead} className="space-y-3.5 text-xs">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">
+                        Income Head <span className="text-rose-600">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. Excursion / Tour Bus Charter"
+                        value={newIncomeHeadName}
+                        onChange={(e) => setNewIncomeHeadName(e.target.value)}
+                        className="w-full p-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50 focus:bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Description</label>
+                      <textarea
+                        rows={3}
+                        placeholder="Optional description..."
+                        value={newIncomeHeadDesc}
+                        onChange={(e) => setNewIncomeHeadDesc(e.target.value)}
+                        className="w-full p-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50 focus:bg-white"
+                      />
+                    </div>
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        type="submit"
+                        className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-xs cursor-pointer"
+                      >
+                        Save Income Head
+                      </button>
+                    </div>
+                  </form>
                 </div>
-                <form onSubmit={handleCreateIncomeHead} className="space-y-3.5 text-xs">
-                  <div>
-                    <label className="block text-slate-700 font-bold mb-1">
-                      Income Head <span className="text-rose-600">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Excursion / Tour Bus Charter"
-                      value={newIncomeHeadName}
-                      onChange={(e) => setNewIncomeHeadName(e.target.value)}
-                      className="w-full p-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50 focus:bg-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-slate-700 font-bold mb-1">Description</label>
-                    <textarea
-                      rows={3}
-                      placeholder="Optional description..."
-                      value={newIncomeHeadDesc}
-                      onChange={(e) => setNewIncomeHeadDesc(e.target.value)}
-                      className="w-full p-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50 focus:bg-white"
-                    />
-                  </div>
-                  <div className="pt-2 flex justify-end">
-                    <button
-                      type="submit"
-                      className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-xs cursor-pointer"
-                    >
-                      Save Income Head
-                    </button>
-                  </div>
-                </form>
-              </div>
+              )}
 
               {/* Right: Income Head List */}
-              <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className={`${isReadOnly ? 'lg:col-span-3' : 'lg:col-span-2'} bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden`}>
                 <div className="p-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-sm font-bold text-slate-900">Income Head List ({incomeHeads.length})</h3>
                 </div>
@@ -3143,194 +3148,196 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Left Form: Add Income (matching image_33cbb816.png) */}
-              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs h-fit space-y-4">
-                <div className="border-b border-slate-100 pb-3">
-                  <h3 className="text-sm font-bold text-slate-900">Add Income</h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Fee income is automatically recorded. Record any other transport income here.
-                  </p>
-                </div>
-
-                <form onSubmit={handleSaveIncomeSubmit} className="space-y-3 text-xs">
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="font-bold text-slate-700">
-                        Income Head <span className="text-rose-600">*</span>
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => setShowInlineHeadForm(!showInlineHeadForm)}
-                        className="text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer"
-                      >
-                        {showInlineHeadForm ? 'Cancel' : '+ Create Income Head'}
-                      </button>
-                    </div>
-                    <select
-                      value={selectedIncomeHead}
-                      onChange={(e) => setSelectedIncomeHead(e.target.value)}
-                      required
-                      className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-medium"
-                    >
-                      {incomeHeads.map(h => (
-                        <option key={h.id} value={h.name}>{h.name}</option>
-                      ))}
-                    </select>
+              {!isReadOnly && (
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs h-fit space-y-4">
+                  <div className="border-b border-slate-100 pb-3">
+                    <h3 className="text-sm font-bold text-slate-900">Add Income</h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Fee income is automatically recorded. Record any other transport income here.
+                    </p>
                   </div>
 
-                  {showInlineHeadForm && (
-                    <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-2">
-                      <span className="text-[11px] font-bold text-indigo-950 block">Quick Create Income Head</span>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          placeholder="New Income Head Name..."
-                          value={newIncomeHeadName}
-                          onChange={(e) => setNewIncomeHeadName(e.target.value)}
-                          className="flex-1 p-2 border border-indigo-200 rounded-lg text-xs bg-white"
-                        />
+                  <form onSubmit={handleSaveIncomeSubmit} className="space-y-3 text-xs">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="font-bold text-slate-700">
+                          Income Head <span className="text-rose-600">*</span>
+                        </label>
                         <button
                           type="button"
-                          onClick={handleCreateIncomeHead}
-                          className="px-3 py-1.5 bg-indigo-600 text-white font-bold rounded-lg text-xs cursor-pointer"
+                          onClick={() => setShowInlineHeadForm(!showInlineHeadForm)}
+                          className="text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer"
                         >
-                          Add
+                          {showInlineHeadForm ? 'Cancel' : '+ Create Income Head'}
                         </button>
                       </div>
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        To (Cash / UPI) <span className="text-rose-600">*</span>
-                      </label>
                       <select
-                        value={receivedTo}
-                        onChange={(e) => setReceivedTo(e.target.value as any)}
-                        className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold"
+                        value={selectedIncomeHead}
+                        onChange={(e) => setSelectedIncomeHead(e.target.value)}
+                        required
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-medium"
                       >
-                        <option value="Cash">Cash</option>
-                        <option value="UPI">UPI</option>
-                        <option value="Bank">Bank</option>
+                        {incomeHeads.map(h => (
+                          <option key={h.id} value={h.name}>{h.name}</option>
+                        ))}
                       </select>
                     </div>
 
+                    {showInlineHeadForm && (
+                      <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-2">
+                        <span className="text-[11px] font-bold text-indigo-950 block">Quick Create Income Head</span>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            placeholder="New Income Head Name..."
+                            value={newIncomeHeadName}
+                            onChange={(e) => setNewIncomeHeadName(e.target.value)}
+                            className="flex-1 p-2 border border-indigo-200 rounded-lg text-xs bg-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleCreateIncomeHead}
+                            className="px-3 py-1.5 bg-indigo-600 text-white font-bold rounded-lg text-xs cursor-pointer"
+                          >
+                            Add
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          To (Cash / UPI) <span className="text-rose-600">*</span>
+                        </label>
+                        <select
+                          value={receivedTo}
+                          onChange={(e) => setReceivedTo(e.target.value as any)}
+                          className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold"
+                        >
+                          <option value="Cash">Cash</option>
+                          <option value="UPI">UPI</option>
+                          <option value="Bank">Bank</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Campus <span className="text-rose-600">*</span>
+                        </label>
+                        <select
+                          value={lockedCampus || incomeCampus}
+                          disabled={Boolean(lockedCampus)}
+                          onChange={(e) => setIncomeCampus(e.target.value as ResolvedCampus)}
+                          className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold disabled:bg-slate-100"
+                        >
+                          <option value="Sr">Senior (Sr)</option>
+                          <option value="Jr">Junior (Jr)</option>
+                        </select>
+                      </div>
+                    </div>
+
                     <div>
                       <label className="block font-bold text-slate-700 mb-1">
-                        Campus <span className="text-rose-600">*</span>
+                        Name <span className="text-rose-600">*</span>
                       </label>
-                      <select
-                        value={lockedCampus || incomeCampus}
-                        disabled={Boolean(lockedCampus)}
-                        onChange={(e) => setIncomeCampus(e.target.value as ResolvedCampus)}
-                        className="w-full p-2 border border-slate-300 rounded-xl text-xs bg-white font-bold disabled:bg-slate-100"
-                      >
-                        <option value="Sr">Senior (Sr)</option>
-                        <option value="Jr">Junior (Jr)</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">
-                      Name <span className="text-rose-600">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="Payer / Organization Name"
-                      value={payerName}
-                      onChange={(e) => setPayerName(e.target.value)}
-                      className="w-full p-2 border border-slate-300 rounded-xl text-xs"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">Invoice Number</label>
                       <input
                         type="text"
-                        placeholder="e.g. INV-2025-11"
-                        value={incomeInvoiceNo}
-                        onChange={(e) => setIncomeInvoiceNo(e.target.value)}
-                        className="w-full p-2 border border-slate-300 rounded-xl text-xs font-mono"
+                        required
+                        placeholder="Payer / Organization Name"
+                        value={payerName}
+                        onChange={(e) => setPayerName(e.target.value)}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs"
                       />
                     </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">Invoice Number</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. INV-2025-11"
+                          value={incomeInvoiceNo}
+                          onChange={(e) => setIncomeInvoiceNo(e.target.value)}
+                          className="w-full p-2 border border-slate-300 rounded-xl text-xs font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Date <span className="text-rose-600">*</span>
+                        </label>
+                        <input
+                          type="date"
+                          required
+                          value={isAdmin ? incomeDate : todayStr}
+                          readOnly={!isAdmin}
+                          onChange={(e) => {
+                            if (isAdmin) setIncomeDate(e.target.value);
+                          }}
+                          className={`w-full p-2 border rounded-xl text-xs font-mono ${
+                            isAdmin
+                              ? 'border-slate-300 bg-white text-slate-900'
+                              : 'border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed'
+                          }`}
+                        />
+                      </div>
+                    </div>
+
                     <div>
                       <label className="block font-bold text-slate-700 mb-1">
-                        Date <span className="text-rose-600">*</span>
+                        Amount (₹) <span className="text-rose-600">*</span>
                       </label>
                       <input
-                        type="date"
+                        type="number"
                         required
-                        value={isAdmin ? incomeDate : todayStr}
-                        readOnly={!isAdmin}
-                        onChange={(e) => {
-                          if (isAdmin) setIncomeDate(e.target.value);
-                        }}
-                        className={`w-full p-2 border rounded-xl text-xs font-mono ${
-                          isAdmin
-                            ? 'border-slate-300 bg-white text-slate-900'
-                            : 'border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed'
-                        }`}
+                        min={1}
+                        placeholder="e.g. 4500"
+                        value={incomeAmount}
+                        onChange={(e) => setIncomeAmount(e.target.value)}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-900"
                       />
                     </div>
-                  </div>
 
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">
-                      Amount (₹) <span className="text-rose-600">*</span>
-                    </label>
-                    <input
-                      type="number"
-                      required
-                      min={1}
-                      placeholder="e.g. 4500"
-                      value={incomeAmount}
-                      onChange={(e) => setIncomeAmount(e.target.value)}
-                      className="w-full p-2 border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-900"
-                    />
-                  </div>
-
-                  <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <span className="font-bold text-slate-700 block text-[11px]">Attach Document</span>
-                      <span className="text-[10px] text-slate-500">
-                        {incomeAttachmentName || 'Upload receipt / UPI screenshot'}
-                      </span>
+                    <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-slate-700 block text-[11px]">Attach Document</span>
+                        <span className="text-[10px] text-slate-500">
+                          {incomeAttachmentName || 'Upload receipt / UPI screenshot'}
+                        </span>
+                      </div>
+                      <label className="px-2.5 py-1.5 bg-slate-900 text-white rounded-lg text-[11px] font-semibold cursor-pointer flex items-center gap-1">
+                        <Upload className="w-3 h-3 text-amber-400" />
+                        <span>Upload</span>
+                        <input type="file" accept="image/*,.pdf" onChange={handleIncomeAttachmentUpload} className="hidden" />
+                      </label>
                     </div>
-                    <label className="px-2.5 py-1.5 bg-slate-900 text-white rounded-lg text-[11px] font-semibold cursor-pointer flex items-center gap-1">
-                      <Upload className="w-3 h-3 text-amber-400" />
-                      <span>Upload</span>
-                      <input type="file" accept="image/*,.pdf" onChange={handleIncomeAttachmentUpload} className="hidden" />
-                    </label>
-                  </div>
 
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Description</label>
-                    <textarea
-                      rows={2}
-                      placeholder="Details about this income..."
-                      value={incomeDescription}
-                      onChange={(e) => setIncomeDescription(e.target.value)}
-                      className="w-full p-2 border border-slate-300 rounded-xl text-xs"
-                    />
-                  </div>
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">Description</label>
+                      <textarea
+                        rows={2}
+                        placeholder="Details about this income..."
+                        value={incomeDescription}
+                        onChange={(e) => setIncomeDescription(e.target.value)}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs"
+                      />
+                    </div>
 
-                  <div className="pt-2 flex justify-end">
-                    <button
-                      type="submit"
-                      disabled={isSavingIncome}
-                      className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl shadow-xs cursor-pointer"
-                    >
-                      {isSavingIncome ? 'Saving...' : 'Save'}
-                    </button>
-                  </div>
-                </form>
-              </div>
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={isSavingIncome}
+                        className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl shadow-xs cursor-pointer"
+                      >
+                        {isSavingIncome ? 'Saving...' : 'Save'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
 
               {/* Right Column: Income List */}
-              <div className="lg:col-span-2 space-y-4">
+              <div className={`${isReadOnly ? 'lg:col-span-3' : 'lg:col-span-2'} space-y-4`}>
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
                     <h3 className="text-sm font-bold text-slate-900">Other Income List ({filteredOtherIncomes.length})</h3>
@@ -4249,7 +4256,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                                                     className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer"
                                                   >
                                                     <PhoneCall className="w-3 h-3" />
-                                                    <span>Follow-up ({stats.followUps.length})</span>
+                                                    <span>{isReadOnly ? 'History' : 'Follow-up'} ({stats.followUps.length})</span>
                                                   </button>
                                                 </div>
                                               </td>
@@ -4598,7 +4605,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                                 className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                               >
                                 <PhoneCall className="w-3.5 h-3.5" />
-                                <span>Follow-up ({stats.followUps.length})</span>
+                                <span>{isReadOnly ? 'History' : 'Follow-up'} ({stats.followUps.length})</span>
                               </button>
                             </div>
                           </td>
@@ -4683,7 +4690,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
                     </div>
 
                     {/* Log New Phone Follow-up Form */}
-                    {onAddFollowUp && (
+                    {!isReadOnly && onAddFollowUp && (
                       <form
                         onSubmit={handleSaveFollowUpSubmit}
                         className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-3"

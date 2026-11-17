@@ -231,6 +231,17 @@ export const initialSystemUsers: SystemUser[] = [
     createdAt: '2026-04-01',
   },
   {
+    id: 'usr-principal',
+    username: 'principal',
+    password: 'principal123',
+    fullName: 'School Principal',
+    role: 'Principal',
+    campus: 'All Campuses',
+    mobile: '',
+    status: 'Active',
+    createdAt: '2026-11-17',
+  },
+  {
     id: 'usr-coord',
     username: 'coordinator',
     password: 'coord123',

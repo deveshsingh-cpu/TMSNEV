@@ -6,6 +6,7 @@ import { api } from '../../services/api.js';
 
 interface RoutesViewProps {
   schoolName?: string;
+  isReadOnly?: boolean;
   campuses?: CampusMaster[];
   routes: Route[];
   services: ScheduledService[];
@@ -24,6 +25,7 @@ interface RoutesViewProps {
 
 export const RoutesView: React.FC<RoutesViewProps> = ({
   schoolName,
+  isReadOnly = false,
   campuses = [],
   routes,
   services,
@@ -1415,19 +1417,21 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                                       <Clock className="w-3.5 h-3.5 text-amber-600" />
                                       <span>{currentDep} &rarr; {currentArr}</span>
                                     </div>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingTimingServiceId(svc.id);
-                                        setEditDepartureTime(currentDep);
-                                        setEditArrivalTime(currentArr);
-                                      }}
-                                      className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
-                                      title="Change Route / Trip Timings"
-                                    >
-                                      <Edit2 className="w-3 h-3 text-amber-600" />
-                                      <span>Change Timing</span>
-                                    </button>
+                                    {!isReadOnly && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingTimingServiceId(svc.id);
+                                          setEditDepartureTime(currentDep);
+                                          setEditArrivalTime(currentArr);
+                                        }}
+                                        className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
+                                        title="Change Route / Trip Timings"
+                                      >
+                                        <Edit2 className="w-3 h-3 text-amber-600" />
+                                        <span>Change Timing</span>
+                                      </button>
+                                    )}
                                   </>
                                 )}
                               </div>

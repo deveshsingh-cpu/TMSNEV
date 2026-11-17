@@ -557,7 +557,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
             </>
           )}
 
-          {activeTab === 'expenses' && (
+          {activeTab === 'expenses' && currentRole !== 'Principal' && (
             <button
               onClick={handleOpenAddModal}
               className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer whitespace-nowrap"
@@ -618,13 +618,15 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                   {expenseHeads.filter((h) => h.requiresApproval).length} / {expenseHeads.length}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setActiveTab('expense_heads')}
-                className="text-xs font-bold text-indigo-600 hover:underline cursor-pointer"
-              >
-                Configure Categories →
-              </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('expense_heads')}
+                  className="text-xs font-bold text-indigo-600 hover:underline cursor-pointer"
+                >
+                  Configure Categories →
+                </button>
+              )}
             </div>
           </div>
 

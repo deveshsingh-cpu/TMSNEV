@@ -12,6 +12,7 @@ interface ResumesViewProps {
   resumes: CandidateResume[];
   designations: DesignationMaster[];
   isAdmin?: boolean;
+  isReadOnly?: boolean;
   onSaveResume: (resume: Partial<CandidateResume>) => Promise<void>;
   onDeleteResume?: (id: string) => Promise<void>;
   onHireResume: (resumeId: string, salaryOverride?: number, designationIdOverride?: string) => Promise<void>;
@@ -22,6 +23,7 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
   resumes,
   designations,
   isAdmin = true,
+  isReadOnly = false,
   onSaveResume,
   onDeleteResume,
   onHireResume,
@@ -331,13 +333,15 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
               { header: 'Status', accessor: r => r.status },
             ]}
           />
-          <button
-            onClick={openAddModal}
-            className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Resume</span>
-          </button>
+          {!isReadOnly && (
+            <button
+              onClick={openAddModal}
+              className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Resume</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -450,21 +454,35 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
                   </td>
 
                   <td className="py-3.5 px-4">
-                    <select
-                      value={r.status}
-                      onChange={e => handleQuickStatusChange(r, e.target.value as ResumeStatus)}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${
-                        r.status === 'Eligible'
-                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          : r.status === 'Not eligible'
-                          ? 'bg-rose-50 text-rose-800 border-rose-200'
-                          : 'bg-amber-50 text-amber-800 border-amber-200'
-                      }`}
-                    >
-                      <option value="Resume received">Resume received</option>
-                      <option value="Eligible">Eligible</option>
-                      <option value="Not eligible">Not eligible</option>
-                    </select>
+                    {isReadOnly ? (
+                      <span
+                        className={`inline-block px-2.5 py-1 rounded-lg text-xs font-bold border ${
+                          r.status === 'Eligible'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : r.status === 'Not eligible'
+                            ? 'bg-rose-50 text-rose-800 border-rose-200'
+                            : 'bg-amber-50 text-amber-800 border-amber-200'
+                        }`}
+                      >
+                        {r.status}
+                      </span>
+                    ) : (
+                      <select
+                        value={r.status}
+                        onChange={e => handleQuickStatusChange(r, e.target.value as ResumeStatus)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${
+                          r.status === 'Eligible'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : r.status === 'Not eligible'
+                            ? 'bg-rose-50 text-rose-800 border-rose-200'
+                            : 'bg-amber-50 text-amber-800 border-amber-200'
+                        }`}
+                      >
+                        <option value="Resume received">Resume received</option>
+                        <option value="Eligible">Eligible</option>
+                        <option value="Not eligible">Not eligible</option>
+                      </select>
+                    )}
                   </td>
 
                   <td className="py-3.5 px-4 text-right">
@@ -472,6 +490,10 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
                       {r.hiredEmployeeId ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-[11px] font-bold">
                           <CheckCircle className="w-3.5 h-3.5" /> Onboarded
+                        </span>
+                      ) : isReadOnly ? (
+                        <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-500 text-[11px] font-semibold">
+                          View-Only
                         </span>
                       ) : r.status === 'Eligible' ? (
                         isAdmin ? (
@@ -500,15 +522,17 @@ export const ResumesView: React.FC<ResumesViewProps> = ({
                         </span>
                       )}
 
-                      <button
-                        onClick={() => openEditModal(r)}
-                        className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer"
-                        title="Edit Candidate Resume"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          onClick={() => openEditModal(r)}
+                          className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer"
+                          title="Edit Candidate Resume"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                      )}
 
-                      {onDeleteResume && !r.hiredEmployeeId && (
+                      {!isReadOnly && onDeleteResume && !r.hiredEmployeeId && (
                         <button
                           onClick={async () => {
                             try {

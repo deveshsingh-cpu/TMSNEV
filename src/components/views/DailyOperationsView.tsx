@@ -160,6 +160,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   onSaveAbsenteeCall,
   onConfirmEarlyArrival,
 }) => {
+  const isReadOnly = currentRole === 'Principal';
   const isAssistant = currentRole === 'Transport Assistant';
   const isAttendanceIncharge = currentRole === 'Attendance Incharge';
   const isCoordinator = currentRole === 'Transport Coordinator';
@@ -177,7 +178,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     | 'unmarked_mismatch'
     | 'mark_holiday' => {
     if (tab === 'unmarked_mismatch') return 'unmarked_mismatch';
-    if (tab === 'mark_holiday') return 'mark_holiday';
+    if (tab === 'mark_holiday') return isReadOnly ? 'board' : 'mark_holiday';
     if (tab === 'summary') return 'summary';
     if (tab === 'calendar') return 'calendar';
     if (tab === 'call_absentees') return 'call_absentees';
@@ -1019,6 +1020,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   };
 
   const handleMarkAllHoliday = async () => {
+    if (isReadOnly) return;
     // Arrival and departure time is NOT applicable in case of Holiday — never prompt for time here.
     const alreadySavedNonHoliday = tripAttendanceList.filter((rec) => {
       const savedSt = getSavedStatusForMode(rec, boardMode);
@@ -1056,6 +1058,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   };
 
   const handleMarkPendingAsPresentInDraft = () => {
+    if (isReadOnly) return;
     if (boardMode === 'arrival' && !isArrivalTimeMarked) {
       setTripInTime((prev) => prev || getCurrentSystemTimeHHMM());
       setTimeRequiredPrompt({
@@ -1282,6 +1285,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
     newStatus: string
   ) => {
     // Ignore accidental tap if finger slid/scrolled across the screen
+    if (isReadOnly) return;
     if (touchMovedRef.current) {
       touchMovedRef.current = false;
       return;
@@ -2785,10 +2789,16 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                     className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                       isAdmin
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : isReadOnly
+                        ? 'bg-teal-50 text-teal-800 border border-teal-200'
                         : 'bg-amber-50 text-amber-800 border border-amber-200'
                     }`}
                   >
-                    {isAdmin ? 'Admin: Full Edit' : `${currentRole}: Mark Unmarked Only`}
+                    {isAdmin
+                      ? 'Admin: Full Edit'
+                      : isReadOnly
+                      ? 'Principal: View-Only'
+                      : `${currentRole}: Mark Unmarked Only`}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
@@ -2939,33 +2949,39 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                       >
                         {isArrivalTimeMarked
                           ? `✓ Arrival Time: ${effectiveInTime}`
+                          : isReadOnly
+                          ? 'Arrival Time: Not Marked'
                           : '⚠ Mark Arrival Time First'}
                       </span>
-                      <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
-                        <span className="text-[10px] font-bold text-slate-500 uppercase">Arrival (In) Time:</span>
-                        <input
-                          type="time"
-                          value={tripInTime}
-                          onChange={(e) => setTripInTime(e.target.value)}
-                          className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setTripInTime(getCurrentSystemTimeHHMM())}
-                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
-                          title="Auto-select current system time"
-                        >
-                          Now
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleMarkTripArrivalOrDeparture('Arrived')}
-                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-2xs"
-                      >
-                        <ArrowDownLeft className="w-3.5 h-3.5" />
-                        <span>{isArrivalTimeMarked ? 'Update Arrival Time' : 'Mark Arrival'}</span>
-                      </button>
+                      {!isReadOnly && (
+                        <>
+                          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase">Arrival (In) Time:</span>
+                            <input
+                              type="time"
+                              value={tripInTime}
+                              onChange={(e) => setTripInTime(e.target.value)}
+                              className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setTripInTime(getCurrentSystemTimeHHMM())}
+                              className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
+                              title="Auto-select current system time"
+                            >
+                              Now
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleMarkTripArrivalOrDeparture('Arrived')}
+                            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-2xs"
+                          >
+                            <ArrowDownLeft className="w-3.5 h-3.5" />
+                            <span>{isArrivalTimeMarked ? 'Update Arrival Time' : 'Mark Arrival'}</span>
+                          </button>
+                        </>
+                      )}
                     </>
                   ) : (
                     <>
@@ -2978,33 +2994,39 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                       >
                         {isDepartureTimeMarked
                           ? `✓ Departure Time: ${effectiveOutTime}`
+                          : isReadOnly
+                          ? 'Departure Time: Not Marked'
                           : '⚠ Mark Departure Time First'}
                       </span>
-                      <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
-                        <span className="text-[10px] font-bold text-slate-500 uppercase">Departure (Out) Time:</span>
-                        <input
-                          type="time"
-                          value={tripOutTime}
-                          onChange={(e) => setTripOutTime(e.target.value)}
-                          className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setTripOutTime(getCurrentSystemTimeHHMM())}
-                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
-                          title="Auto-select current system time"
-                        >
-                          Now
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleMarkTripArrivalOrDeparture('Departed')}
-                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-2xs"
-                      >
-                        <ArrowUpRight className="w-3.5 h-3.5" />
-                        <span>{isDepartureTimeMarked ? 'Update Departure Time' : 'Mark Departure'}</span>
-                      </button>
+                      {!isReadOnly && (
+                        <>
+                          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase">Departure (Out) Time:</span>
+                            <input
+                              type="time"
+                              value={tripOutTime}
+                              onChange={(e) => setTripOutTime(e.target.value)}
+                              className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setTripOutTime(getCurrentSystemTimeHHMM())}
+                              className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
+                              title="Auto-select current system time"
+                            >
+                              Now
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleMarkTripArrivalOrDeparture('Departed')}
+                            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-2xs"
+                          >
+                            <ArrowUpRight className="w-3.5 h-3.5" />
+                            <span>{isDepartureTimeMarked ? 'Update Departure Time' : 'Mark Departure'}</span>
+                          </button>
+                        </>
+                      )}
                     </>
                   )}
                 </div>
@@ -3033,13 +3055,15 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             <div className="bg-indigo-50/70 rounded-xl border border-indigo-200 px-4 py-3 shadow-2xs flex items-center justify-between">
               <div>
                 <span className="text-xs font-semibold text-indigo-900 block">Holiday (H): {holidayCount}</span>
-                <button
-                  type="button"
-                  onClick={handleMarkAllHoliday}
-                  className="text-[10px] font-bold text-indigo-700 underline hover:text-indigo-900 cursor-pointer"
-                >
-                  Mark All Holiday (H)
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={handleMarkAllHoliday}
+                    className="text-[10px] font-bold text-indigo-700 underline hover:text-indigo-900 cursor-pointer"
+                  >
+                    Mark All Holiday (H)
+                  </button>
+                )}
               </div>
               <span className="text-xs font-mono text-slate-500">Pend: {pendingCount}</span>
             </div>
@@ -3090,105 +3114,115 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 flex-1 max-w-xl">
-              <input
-                type="text"
-                maxLength={80}
-                value={tripMismatchRemarkInput}
-                onChange={(e) => setTripMismatchRemarkInput(e.target.value)}
-                placeholder={
-                  autoDerivedMismatchSummary
-                    ? `Summary: ${autoDerivedMismatchSummary}`
-                    : 'Write Strength Mismatch / Trip Remark (reflected in Transport Timings)...'
-                }
-                className="flex-1 min-w-[220px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-xs text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
-              />
-              <button
-                type="button"
-                onClick={handleSaveTripStrengthRemark}
-                className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs cursor-pointer shrink-0"
-              >
-                Save Remark
-              </button>
-            </div>
+            {!isReadOnly ? (
+              <div className="flex flex-wrap items-center gap-2 flex-1 max-w-xl">
+                <input
+                  type="text"
+                  maxLength={80}
+                  value={tripMismatchRemarkInput}
+                  onChange={(e) => setTripMismatchRemarkInput(e.target.value)}
+                  placeholder={
+                    autoDerivedMismatchSummary
+                      ? `Summary: ${autoDerivedMismatchSummary}`
+                      : 'Write Strength Mismatch / Trip Remark (reflected in Transport Timings)...'
+                  }
+                  className="flex-1 min-w-[220px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-xs text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveTripStrengthRemark}
+                  className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-xs cursor-pointer shrink-0"
+                >
+                  Save Remark
+                </button>
+              </div>
+            ) : (
+              (tripMismatchRemarkInput || autoDerivedMismatchSummary) && (
+                <div className="text-xs text-slate-700 font-medium">
+                  Remark: <strong>{tripMismatchRemarkInput || autoDerivedMismatchSummary}</strong>
+                </div>
+              )
+            )}
           </div>
 
           {/* Save & Finalize Attendance Action Bar (Top) */}
-          <div
-            className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
-              unsavedDraftEntriesForCurrentBoard.length > 0
-                ? 'bg-amber-50 border-amber-300 shadow-xs'
-                : savedRecordsOnCurrentBoardCount > 0 &&
-                  savedRecordsOnCurrentBoardCount === tripAttendanceList.length
-                ? 'bg-emerald-50/80 border-emerald-200'
-                : 'bg-white border-slate-200'
-            }`}
-          >
-            <div className="flex flex-wrap items-center gap-2.5 text-xs">
-              {unsavedDraftEntriesForCurrentBoard.length > 0 ? (
-                <>
-                  <span className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-black uppercase tracking-wide text-[11px]">
-                    ● {unsavedDraftEntriesForCurrentBoard.length} Unsaved
+          {!isReadOnly && (
+            <div
+              className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
+                unsavedDraftEntriesForCurrentBoard.length > 0
+                  ? 'bg-amber-50 border-amber-300 shadow-xs'
+                  : savedRecordsOnCurrentBoardCount > 0 &&
+                    savedRecordsOnCurrentBoardCount === tripAttendanceList.length
+                  ? 'bg-emerald-50/80 border-emerald-200'
+                  : 'bg-white border-slate-200'
+              }`}
+            >
+              <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                {unsavedDraftEntriesForCurrentBoard.length > 0 ? (
+                  <>
+                    <span className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-black uppercase tracking-wide text-[11px]">
+                      ● {unsavedDraftEntriesForCurrentBoard.length} Unsaved
+                    </span>
+                    <span className="font-semibold text-amber-950">
+                      Click <strong>Save Attendance</strong> to finalize.
+                    </span>
+                  </>
+                ) : savedRecordsOnCurrentBoardCount > 0 ? (
+                  <span className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px] flex items-center gap-1">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    <span>
+                      Saved: {savedRecordsOnCurrentBoardCount}/{tripAttendanceList.length} Finalized
+                    </span>
                   </span>
-                  <span className="font-semibold text-amber-950">
-                    Click <strong>Save Attendance</strong> to finalize.
+                ) : (
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-200 text-slate-700 font-bold text-[11px]">
+                    Not Saved Yet
                   </span>
-                </>
-              ) : savedRecordsOnCurrentBoardCount > 0 ? (
-                <span className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px] flex items-center gap-1">
-                  <CheckCircle className="w-3.5 h-3.5" />
-                  <span>
-                    Saved: {savedRecordsOnCurrentBoardCount}/{tripAttendanceList.length} Finalized
-                  </span>
-                </span>
-              ) : (
-                <span className="px-2.5 py-1 rounded-lg bg-slate-200 text-slate-700 font-bold text-[11px]">
-                  Not Saved Yet
-                </span>
-              )}
-            </div>
+                )}
+              </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {pendingCount > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                {pendingCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleMarkPendingAsPresentInDraft}
+                    className="px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs cursor-pointer transition-colors"
+                  >
+                    Mark Pending ({pendingCount}) as Present
+                  </button>
+                )}
+                {unsavedDraftEntriesForCurrentBoard.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={isSavingAttendanceBatch}
+                    onClick={handleDiscardDraftAttendance}
+                    className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer transition-colors"
+                  >
+                    Back / Discard ({unsavedDraftEntriesForCurrentBoard.length})
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={handleMarkPendingAsPresentInDraft}
-                  className="px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs cursor-pointer transition-colors"
+                  disabled={unsavedDraftEntriesForCurrentBoard.length === 0 || isSavingAttendanceBatch}
+                  onClick={handleSaveAttendanceClick}
+                  className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
+                    unsavedDraftEntriesForCurrentBoard.length > 0
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
+                      : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                  }`}
                 >
-                  Mark Pending ({pendingCount}) as Present
+                  <Check className="w-4 h-4" />
+                  <span>
+                    {isSavingAttendanceBatch
+                      ? 'Saving Attendance...'
+                      : unsavedDraftEntriesForCurrentBoard.length > 0
+                      ? `Save Attendance (${unsavedDraftEntriesForCurrentBoard.length})`
+                      : 'Save Attendance'}
+                  </span>
                 </button>
-              )}
-              {unsavedDraftEntriesForCurrentBoard.length > 0 && (
-                <button
-                  type="button"
-                  disabled={isSavingAttendanceBatch}
-                  onClick={handleDiscardDraftAttendance}
-                  className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer transition-colors"
-                >
-                  Back / Discard ({unsavedDraftEntriesForCurrentBoard.length})
-                </button>
-              )}
-              <button
-                type="button"
-                disabled={unsavedDraftEntriesForCurrentBoard.length === 0 || isSavingAttendanceBatch}
-                onClick={handleSaveAttendanceClick}
-                className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
-                  unsavedDraftEntriesForCurrentBoard.length > 0
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
-                    : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                }`}
-              >
-                <Check className="w-4 h-4" />
-                <span>
-                  {isSavingAttendanceBatch
-                    ? 'Saving Attendance...'
-                    : unsavedDraftEntriesForCurrentBoard.length > 0
-                    ? `Save Attendance (${unsavedDraftEntriesForCurrentBoard.length})`
-                    : 'Save Attendance'}
-                </span>
-              </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Clean Attendance Table — Separate for Arrival vs Departure */}
           <div
@@ -3208,7 +3242,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                       <th className="py-3 px-3">Arrival Attendance</th>
                     )}
                     <th className="py-3 px-4 text-right">
-                      {boardMode === 'departure'
+                      {isReadOnly
+                        ? boardMode === 'departure'
+                          ? 'Departure Attendance Status'
+                          : 'Arrival Attendance Status'
+                        : boardMode === 'departure'
                         ? 'Mark Departure Attendance (P / A / L / H)'
                         : 'Mark Arrival Attendance (P / A / L / H)'}
                     </th>
@@ -3370,14 +3408,19 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                   <button
                                     key={stVal}
                                     type="button"
+                                    disabled={isReadOnly}
                                     onTouchStart={handleAttendanceTouchStart}
                                     onTouchMove={handleAttendanceTouchMove}
                                     onClick={() => handleAttendanceButtonClick(rec, boardMode, stVal)}
-                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors touch-manipulation select-none ${
+                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors touch-manipulation select-none ${
+                                      isReadOnly ? 'cursor-default' : 'cursor-pointer'
+                                    } ${
                                       isSelected
                                         ? `${activeColor} ${
                                             isDraftModified ? 'ring-2 ring-amber-400 ring-offset-1' : ''
                                           }`
+                                        : isReadOnly
+                                        ? 'bg-slate-100 text-slate-400 opacity-60'
                                         : hoverColor
                                     }`}
                                   >
@@ -3396,7 +3439,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             </div>
 
             {/* Bottom Save Attendance Footer Bar */}
-            {tripAttendanceList.length > 0 && (
+            {tripAttendanceList.length > 0 && !isReadOnly && (
               <div className="bg-slate-50 border-t border-slate-200 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="text-xs text-slate-600 font-medium">
                   {unsavedDraftEntriesForCurrentBoard.length > 0 ? (
@@ -4793,26 +4836,28 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         {item.expectedReturnReason || 'Informed Leave'}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        if (onConfirmEarlyArrival) {
-                          await onConfirmEarlyArrival({
-                            studentId: item.student.id,
-                            date: absenteeDate,
-                            confirmedBy: currentRole,
-                            remarks: `Confirmed early arrival on ${absenteeDate} (Tentative date was ${item.expectedReturnDate})`,
-                          });
-                          setStatusFeedback(
-                            `Confirmed early arrival for ${item.student.name} and cleared Tentative Date of Arrival.`
-                          );
-                          setTimeout(() => setStatusFeedback(null), 3500);
-                        }
-                      }}
-                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg cursor-pointer shrink-0"
-                    >
-                      Confirm Early Arrival
-                    </button>
+                    {!isReadOnly && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (onConfirmEarlyArrival) {
+                            await onConfirmEarlyArrival({
+                              studentId: item.student.id,
+                              date: absenteeDate,
+                              confirmedBy: currentRole,
+                              remarks: `Confirmed early arrival on ${absenteeDate} (Tentative date was ${item.expectedReturnDate})`,
+                            });
+                            setStatusFeedback(
+                              `Confirmed early arrival for ${item.student.name} and cleared Tentative Date of Arrival.`
+                            );
+                            setTimeout(() => setStatusFeedback(null), 3500);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg cursor-pointer shrink-0"
+                      >
+                        Confirm Early Arrival
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -5101,14 +5146,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                           </td>
 
                           <td className="p-3 text-right">
-                            <button
-                              type="button"
-                              onClick={() => openAbsenteeCallModal(item)}
-                              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                            >
-                              <Phone className="w-3.5 h-3.5 text-amber-400" />
-                              <span>Call &amp; Remarks</span>
-                            </button>
+                            {isReadOnly ? (
+                              <span className="text-[11px] font-semibold text-slate-400">View Only</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => openAbsenteeCallModal(item)}
+                                className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                              >
+                                <Phone className="w-3.5 h-3.5 text-amber-400" />
+                                <span>Call &amp; Remarks</span>
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -6133,40 +6182,42 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                     </select>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleBulkMarkRouteUnmarkedAsPresent(discrepancyRouteId, 'both')}
-                      className="flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl cursor-pointer shadow-2xs"
-                      title="Marks only Pending entries as Present; already-marked members are untouched"
-                    >
-                      Mark Only Unmarked as Present
-                    </button>
-                    {onAcknowledgeUnmarkedAttendance && (
+                  {!isReadOnly && (
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          onAcknowledgeUnmarkedAttendance({
-                            date: discrepancyDate,
-                            routeId: discrepancyRouteId === 'all' ? 'ALL' : discrepancyRouteId,
-                            routeCode:
-                              discrepancyRouteId === 'all'
-                                ? 'All Routes'
-                                : routes.find((r) => r.id === discrepancyRouteId)?.code || 'Route',
-                            campus: effectiveCampusScope === 'all' ? 'All' : effectiveCampusScope,
-                            note: `Acknowledged that ${discrepancyDate} unmarked/mismatched attendances were reviewed by ${currentRole}.`,
-                          });
-                          setStatusFeedback(
-                            `✓ Acknowledged unmarked/mismatched attendance for ${discrepancyDate}.`
-                          );
-                          setTimeout(() => setStatusFeedback(null), 3500);
-                        }}
-                        className="py-2.5 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl cursor-pointer shadow-2xs"
+                        onClick={() => handleBulkMarkRouteUnmarkedAsPresent(discrepancyRouteId, 'both')}
+                        className="flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl cursor-pointer shadow-2xs"
+                        title="Marks only Pending entries as Present; already-marked members are untouched"
                       >
-                        Acknowledge ({discrepancyDate})
+                        Mark Only Unmarked as Present
                       </button>
-                    )}
-                  </div>
+                      {onAcknowledgeUnmarkedAttendance && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onAcknowledgeUnmarkedAttendance({
+                              date: discrepancyDate,
+                              routeId: discrepancyRouteId === 'all' ? 'ALL' : discrepancyRouteId,
+                              routeCode:
+                                discrepancyRouteId === 'all'
+                                  ? 'All Routes'
+                                  : routes.find((r) => r.id === discrepancyRouteId)?.code || 'Route',
+                              campus: effectiveCampusScope === 'all' ? 'All' : effectiveCampusScope,
+                              note: `Acknowledged that ${discrepancyDate} unmarked/mismatched attendances were reviewed by ${currentRole}.`,
+                            });
+                            setStatusFeedback(
+                              `✓ Acknowledged unmarked/mismatched attendance for ${discrepancyDate}.`
+                            );
+                            setTimeout(() => setStatusFeedback(null), 3500);
+                          }}
+                          className="py-2.5 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl cursor-pointer shadow-2xs"
+                        >
+                          Acknowledge ({discrepancyDate})
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 4 Separate Category Tabs */}
@@ -6311,7 +6362,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                               }}
                               className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] cursor-pointer"
                             >
-                              Mark Remaining Arrival ({pm.arrivalPendingCount})
+                              {isReadOnly ? `View Arrival (${pm.arrivalPendingCount} Pend)` : `Mark Remaining Arrival (${pm.arrivalPendingCount})`}
                             </button>
                           )}
                           {pm.departurePendingCount > 0 && (
@@ -6326,7 +6377,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                               }}
                               className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] cursor-pointer"
                             >
-                              Mark Remaining Departure ({pm.departurePendingCount})
+                              {isReadOnly ? `View Departure (${pm.departurePendingCount} Pend)` : `Mark Remaining Departure (${pm.departurePendingCount})`}
                             </button>
                           )}
                         </div>
@@ -6443,7 +6494,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                     >
                                       {arrPending ? 'NOT MARKED' : item.arrivalStatus}
                                     </span>
-                                    {arrPending && (
+                                    {!isReadOnly && arrPending && (
                                       <div className="flex items-center justify-center gap-1 mt-1">
                                         {(['Present', 'Absent', 'Leave'] as const).map((st) => (
                                           <button
@@ -6479,7 +6530,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                     >
                                       {depPending ? 'NOT MARKED' : item.departureStatus}
                                     </span>
-                                    {depPending && (
+                                    {!isReadOnly && depPending && (
                                       <div className="flex items-center justify-center gap-1 mt-1">
                                         {(['Present', 'Absent', 'Leave'] as const).map((st) => (
                                           <button
@@ -6560,7 +6611,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                         </button>
                                       )}
 
-                                      {(!arrPending || !depPending) && (
+                                      {!isReadOnly && (!arrPending || !depPending) && (
                                         <button
                                           type="button"
                                           onClick={() =>

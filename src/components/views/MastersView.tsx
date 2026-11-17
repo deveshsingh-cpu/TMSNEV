@@ -2238,7 +2238,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                   Role-Based Access Control (RBAC) &amp; Login Credentials
                 </span>
                 <h3 className="text-base font-bold text-white mt-0.5">
-                  Manage Usernames, Full Names &amp; Passwords for All 4 System Roles
+                  Manage Usernames, Full Names &amp; Passwords for All 5 System Roles
                 </h3>
               </div>
               <span className="px-3 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
@@ -2246,27 +2246,33 @@ export const MastersView: React.FC<MastersViewProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-amber-500/30 space-y-1">
                 <div className="font-bold text-amber-300">1. Admin Role</div>
                 <p className="text-slate-300 text-[11px]">
                   Full access to all modules: Executive Dashboard, Masters &amp; Users, Approvals (Suspensions, Work Orders, Expenses), Payroll, Chart of Accounts, Trial Balance, and Reports.
                 </p>
               </div>
+              <div className="p-3.5 rounded-xl bg-slate-800/80 border border-teal-500/30 space-y-1">
+                <div className="font-bold text-teal-300">2. Principal Role (View-Only)</div>
+                <p className="text-slate-300 text-[11px]">
+                  Executive View-Only access across both Senior &amp; Junior campuses (or All Campuses combined): Dashboard, Members, Employees, Routes, Attendance, Fees, Expenses, Ledgers &amp; Reports. Cannot add, edit, or delete any record.
+                </p>
+              </div>
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-sky-500/30 space-y-1">
-                <div className="font-bold text-sky-300">2. Transport Coordinator Role</div>
+                <div className="font-bold text-sky-300">3. Transport Coordinator Role</div>
                 <p className="text-slate-300 text-[11px]">
                   Operational &amp; collection access (no Masters access): Member Directory, Fee Collection &amp; Follow-ups, Active Routes, Vehicles, Staff Attendance, and submitting Work Orders / Suspensions for Admin approval.
                 </p>
               </div>
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-emerald-500/30 space-y-1">
-                <div className="font-bold text-emerald-300">3. Transport Assistant Role</div>
+                <div className="font-bold text-emerald-300">4. Transport Assistant Role</div>
                 <p className="text-slate-300 text-[11px]">
                   Authorized for Fee Receipts, Dues Follow-ups, Work Order Requests, Route &amp; Staff Attendance, 24-Hr Vehicle Log Book, Expense Entries, Adding New Members, and Receiving Candidate Resumes (no Masters access).
                 </p>
               </div>
               <div className="p-3.5 rounded-xl bg-slate-800/80 border border-violet-500/30 space-y-1">
-                <div className="font-bold text-violet-300">4. Attendance Incharge Role</div>
+                <div className="font-bold text-violet-300">5. Attendance Incharge Role</div>
                 <p className="text-slate-300 text-[11px]">
                   Strictly restricted to marking campus Arrival &amp; Departure Attendance (including cross-campus routes carrying their campus members) and printing their campus Attendance Summary Sheet.
                 </p>
@@ -2330,6 +2336,7 @@ export const MastersView: React.FC<MastersViewProps> = ({
                     className="w-full p-2.5 border border-slate-300 rounded-xl font-bold bg-slate-50"
                   >
                     <option value="Admin">Admin (Full Control &amp; Approvals)</option>
+                    <option value="Principal">Principal (View-Only — Both Campuses)</option>
                     <option value="Transport Coordinator">Transport Coordinator (Operations &amp; Fees)</option>
                     <option value="Transport Assistant">Transport Assistant (Gate &amp; Log Book Only)</option>
                     <option value="Attendance Incharge">Attendance Incharge (Arrival/Departure Attendance &amp; Summary Only)</option>
@@ -2470,6 +2477,8 @@ export const MastersView: React.FC<MastersViewProps> = ({
                               className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
                                 u.role === 'Admin'
                                   ? 'bg-amber-100 text-amber-900'
+                                  : u.role === 'Principal'
+                                  ? 'bg-teal-100 text-teal-900'
                                   : u.role === 'Transport Coordinator'
                                   ? 'bg-sky-100 text-sky-900'
                                   : u.role === 'Attendance Incharge'

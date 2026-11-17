@@ -193,6 +193,7 @@ export function App() {
 
   const activeRole: UserRole = currentUser?.role || 'Admin';
   const isAdmin = activeRole === 'Admin';
+  const isPrincipal = activeRole === 'Principal';
 
   // Cross-view deep links
   const [externalOpenMemberId, setExternalOpenMemberId] = useState<string | null>(null);
@@ -449,6 +450,13 @@ export function App() {
   };
 
   const handleSelectRouteForDate = async (date: string, routeId: string) => {
+    if (isPrincipal) {
+      const existingTrip = dailyTrips.find((t) => t.date === date && t.routeId === routeId);
+      if (existingTrip) {
+        setSelectedTripId(existingTrip.id);
+      }
+      return;
+    }
     const res = await api.getOrCreateTripForRoute(date, routeId);
     setSelectedTripId(res.trip.id);
     if (Array.isArray(res.attendance) && res.attendance.length > 0) {
@@ -567,6 +575,14 @@ export function App() {
     } else if (activeRole === 'Transport Coordinator') {
       if (normalizedKey === 'staff' && targetSubTab === 'payroll') {
         targetSubTab = 'employees';
+      } else if (normalizedKey === 'accounts' && !targetSubTab) {
+        targetSubTab = 'day_book';
+      }
+    } else if (activeRole === 'Principal') {
+      if (normalizedKey === 'operations' && targetSubTab === 'mark_holiday') {
+        targetSubTab = 'arrival';
+      } else if (normalizedKey === 'expenses' && targetSubTab === 'expense_heads') {
+        targetSubTab = 'expenses';
       } else if (normalizedKey === 'accounts' && !targetSubTab) {
         targetSubTab = 'day_book';
       }
@@ -1838,6 +1854,8 @@ export function App() {
                 className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
                   activeRole === 'Admin'
                     ? 'bg-amber-500 text-slate-950'
+                    : activeRole === 'Principal'
+                    ? 'bg-teal-600 text-white'
                     : activeRole === 'Transport Coordinator'
                     ? 'bg-sky-600 text-white'
                     : activeRole === 'Attendance Incharge'
@@ -1847,6 +1865,11 @@ export function App() {
               >
                 {activeRole}
               </span>
+              {isPrincipal && (
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-teal-50 text-teal-800 border border-teal-200">
+                  All Campuses • View-Only
+                </span>
+              )}
               {currentUser.campus && currentUser.campus !== 'All Campuses' && (
                 <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
                   Campus: {currentUser.campus}
@@ -1889,7 +1912,29 @@ export function App() {
         </header>
 
         {/* Main Workspace Container */}
-        <main className="flex-1 p-3 sm:p-6 max-w-[1600px] w-full mx-auto">
+        <main
+          onSubmitCapture={(e) => {
+            if (isPrincipal) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }}
+          className="flex-1 p-3 sm:p-6 max-w-[1600px] w-full mx-auto"
+        >
+          {isPrincipal && (
+            <div className="mb-4 px-4 py-2.5 rounded-xl bg-teal-50 border border-teal-200 text-teal-900 flex flex-wrap items-center justify-between gap-2 text-xs print:hidden">
+              <div className="flex items-center gap-2 font-semibold">
+                <Shield className="w-4 h-4 text-teal-700 shrink-0" />
+                <span>
+                  View-Only Mode (Principal): Full viewing, print &amp; export access across All Campuses, Senior (Sr), and Junior (Jr). Adding, editing, and deleting records are disabled.
+                </span>
+              </div>
+              <span className="px-2 py-0.5 rounded bg-teal-700 text-white font-bold text-[10px] uppercase tracking-wider">
+                Read-Only Access
+              </span>
+            </div>
+          )}
+
           {error && (
             <div className="mb-6 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 flex items-center justify-between gap-4 text-xs">
               <div className="flex items-center gap-2.5">
@@ -1941,20 +1986,20 @@ export function App() {
                   onNavigate={handleNavigate as any}
                   onOpenMemberProfile={handleOpenMemberProfileFromAnywhere}
                   onSelectRouteForAttendance={handleSelectRouteForAttendance}
-                  onBatchSaveAttendance={handleBatchSaveAttendance}
+                  onBatchSaveAttendance={isPrincipal ? undefined : handleBatchSaveAttendance}
                   attendanceChangeRequests={attendanceChangeRequests}
                   attendanceAcknowledgements={attendanceAcknowledgements}
-                  onSubmitAttendanceChangeRequest={handleSubmitAttendanceChangeRequest}
-                  onReviewAttendanceChangeRequest={handleReviewAttendanceChangeRequest}
-                  onAcknowledgeUnmarkedAttendance={handleAcknowledgeUnmarkedAttendance}
-                  onUpdateExpenseApproval={handleUpdateExpenseApproval}
-                  onUpdateMaintenanceStatus={handleUpdateMaintenanceStatus}
-                  onAddMaintenance={handleAddMaintenance}
-                  onReviewSuspensionRequest={handleReviewSuspensionRequest}
-                  onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
-                  onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
-                  onResolveComplaint={handleResolveComplaint}
-                  onSaveAbsenteeCall={handleSaveAbsenteeCall}
+                  onSubmitAttendanceChangeRequest={isPrincipal ? undefined : handleSubmitAttendanceChangeRequest}
+                  onReviewAttendanceChangeRequest={isPrincipal ? undefined : handleReviewAttendanceChangeRequest}
+                  onAcknowledgeUnmarkedAttendance={isPrincipal ? undefined : handleAcknowledgeUnmarkedAttendance}
+                  onUpdateExpenseApproval={isPrincipal ? undefined : handleUpdateExpenseApproval}
+                  onUpdateMaintenanceStatus={isPrincipal ? undefined : handleUpdateMaintenanceStatus}
+                  onAddMaintenance={isPrincipal ? undefined : handleAddMaintenance}
+                  onReviewSuspensionRequest={isPrincipal ? undefined : handleReviewSuspensionRequest}
+                  onCoordinatorReviewMemberRequest={isPrincipal ? undefined : handleCoordinatorReviewMemberRequest}
+                  onAdminReviewMemberRequest={isPrincipal ? undefined : handleAdminReviewMemberRequest}
+                  onResolveComplaint={isPrincipal ? undefined : handleResolveComplaint}
+                  onSaveAbsenteeCall={isPrincipal ? undefined : handleSaveAbsenteeCall}
                 />
               )}
 
@@ -2031,10 +2076,10 @@ export function App() {
                   complaints={complaints}
                   memberRequests={memberRequests}
                   onCreateMemberRequest={handleCreateMemberRequest}
-                  onCoordinatorReviewMemberRequest={handleCoordinatorReviewMemberRequest}
-                  onAdminReviewMemberRequest={handleAdminReviewMemberRequest}
-                  onSaveComplaint={handleSaveComplaint}
-                  onResolveComplaint={handleResolveComplaint}
+                  onCoordinatorReviewMemberRequest={isPrincipal ? undefined : handleCoordinatorReviewMemberRequest}
+                  onAdminReviewMemberRequest={isPrincipal ? undefined : handleAdminReviewMemberRequest}
+                  onSaveComplaint={isPrincipal ? undefined : handleSaveComplaint}
+                  onResolveComplaint={isPrincipal ? undefined : handleResolveComplaint}
                   onDeleteComplaint={handleDeleteComplaint}
                   initialStatusFilter={
                     activeSubTab === 'Suspended' || activeSubTab === 'suspended'
@@ -2053,14 +2098,14 @@ export function App() {
                   onDeleteStudent={handleDeleteStudent}
                   onReactivateStudent={handleReactivateStudent}
                   onGrantPermissionLetter={handleGrantPermissionLetter}
-                  onSuspendStudent={handleSuspendStudent}
-                  onReviewSuspensionRequest={handleReviewSuspensionRequest}
-                  onChangeMemberStatus={handleChangeMemberStatus}
-                  onAddFeeFollowUp={handleAddFeeFollowUp as any}
-                  onDeleteFeeFollowUp={handleDeleteFeeFollowUp}
-                  onAddDisciplineRecord={handleAddDisciplineRecord as any}
-                  onDeleteDisciplineRecord={handleDeleteDisciplineRecord}
-                  onQuickCollectFeeForMember={handleQuickCollectFeeForMember}
+                  onSuspendStudent={isPrincipal ? undefined : handleSuspendStudent}
+                  onReviewSuspensionRequest={isPrincipal ? undefined : handleReviewSuspensionRequest}
+                  onChangeMemberStatus={isPrincipal ? undefined : handleChangeMemberStatus}
+                  onAddFeeFollowUp={isPrincipal ? undefined : (handleAddFeeFollowUp as any)}
+                  onDeleteFeeFollowUp={isPrincipal ? undefined : handleDeleteFeeFollowUp}
+                  onAddDisciplineRecord={isPrincipal ? undefined : (handleAddDisciplineRecord as any)}
+                  onDeleteDisciplineRecord={isPrincipal ? undefined : handleDeleteDisciplineRecord}
+                  onQuickCollectFeeForMember={isPrincipal ? undefined : handleQuickCollectFeeForMember}
                   onNavigateToMasters={() => handleNavigate('masters')}
                   onAddClass={handleAddClass}
                   onAddSection={handleAddSection}
@@ -2074,6 +2119,7 @@ export function App() {
                   resumes={resumes}
                   designations={designations}
                   isAdmin={isAdmin}
+                  isReadOnly={isPrincipal}
                   onSaveResume={handleSaveResume}
                   onDeleteResume={isAdmin ? handleDeleteResume : undefined}
                   onHireResume={handleHireResume}
@@ -2096,15 +2142,15 @@ export function App() {
                   holidays={holidays}
                   initialSubTab={activeSubTab || undefined}
                   onSaveEmployee={handleSaveEmployee}
-                  onDeleteEmployee={handleDeleteEmployee}
+                  onDeleteEmployee={isPrincipal ? undefined : handleDeleteEmployee}
                   onSaveResume={handleSaveResume}
-                  onDeleteResume={handleDeleteResume}
+                  onDeleteResume={isPrincipal ? undefined : handleDeleteResume}
                   onHireResume={handleHireResume}
-                  onMarkStaffAttendance={handleMarkStaffAttendance}
-                  onDeclareHoliday={handleDeclareHoliday}
-                  onRemoveHoliday={handleRemoveHoliday}
-                  onGiveStaffAdvance={handleGiveStaffAdvance}
-                  onFinalizePayroll={handleFinalizePayroll}
+                  onMarkStaffAttendance={isPrincipal ? undefined : handleMarkStaffAttendance}
+                  onDeclareHoliday={isPrincipal ? undefined : handleDeclareHoliday}
+                  onRemoveHoliday={isPrincipal ? undefined : handleRemoveHoliday}
+                  onGiveStaffAdvance={isPrincipal ? undefined : handleGiveStaffAdvance}
+                  onFinalizePayroll={isPrincipal ? undefined : handleFinalizePayroll}
                   onNavigateToResumes={() => handleNavigate('resumes')}
                 />
               )}
@@ -2119,6 +2165,7 @@ export function App() {
                   stops={stops}
                   vehicles={vehicles}
                   students={students}
+                  isReadOnly={isPrincipal}
                   initialSubTab={activeSubTab || 'routes'}
                   onOpenPrintPack={handleOpenPrintPack}
                 />
@@ -2159,13 +2206,13 @@ export function App() {
                   onClearExternalTargetRoute={() => setExternalTargetRoute(null)}
                   attendanceChangeRequests={attendanceChangeRequests}
                   attendanceAcknowledgements={attendanceAcknowledgements}
-                  onSubmitAttendanceChangeRequest={handleSubmitAttendanceChangeRequest}
-                  onReviewAttendanceChangeRequest={handleReviewAttendanceChangeRequest}
-                  onAcknowledgeUnmarkedAttendance={handleAcknowledgeUnmarkedAttendance}
+                  onSubmitAttendanceChangeRequest={isPrincipal ? undefined : handleSubmitAttendanceChangeRequest}
+                  onReviewAttendanceChangeRequest={isPrincipal ? undefined : handleReviewAttendanceChangeRequest}
+                  onAcknowledgeUnmarkedAttendance={isPrincipal ? undefined : handleAcknowledgeUnmarkedAttendance}
                   onSelectTrip={handleSelectTrip}
                   onSelectRouteForDate={handleSelectRouteForDate}
                   onMarkAttendance={handleMarkAttendance}
-                  onBatchSaveAttendance={handleBatchSaveAttendance}
+                  onBatchSaveAttendance={isPrincipal ? undefined : handleBatchSaveAttendance}
                   onResolveMismatch={handleResolveMismatch}
                   onVerifyTrip={handleVerifyTrip}
                   onCancelTrip={handleCancelTrip}
@@ -2192,16 +2239,16 @@ export function App() {
                   warningLetters={warningLetters}
                   students={students}
                   initialSubTab={activeSubTab || 'collect'}
-                  preselectedStudentIdForCollect={preselectedFeeMemberId}
+                  preselectedStudentIdForCollect={isPrincipal ? null : preselectedFeeMemberId}
                   onClearPreselectedStudent={() => setPreselectedFeeMemberId(null)}
                   onRunBilling={handleRunBilling}
                   onRecordReceipt={handleRecordReceipt}
-                  onDeleteReceipt={handleDeleteReceipt}
-                  onAddFollowUp={handleAddFeeFollowUp}
-                  onDeleteFollowUp={handleDeleteFeeFollowUp}
-                  onIssueWarningLetter={handleIssueWarningLetter}
+                  onDeleteReceipt={isPrincipal ? undefined : handleDeleteReceipt}
+                  onAddFollowUp={isPrincipal ? undefined : handleAddFeeFollowUp}
+                  onDeleteFollowUp={isPrincipal ? undefined : handleDeleteFeeFollowUp}
+                  onIssueWarningLetter={isPrincipal ? undefined : handleIssueWarningLetter}
                   onEvaluateSuspensions={handleEvaluateSuspensions}
-                  onSuspendStudent={handleSuspendStudent}
+                  onSuspendStudent={isPrincipal ? undefined : handleSuspendStudent}
                   onPrintReceipt={() => window.print()}
                   onPrintWarningLetter={() => window.print()}
                   onOpenStudentProfile={(studentId) => handleOpenMemberProfileFromAnywhere(studentId)}
@@ -2216,16 +2263,16 @@ export function App() {
                   userCampus={currentUser?.campus}
                   routes={routes}
                   students={students}
-                  initialTab={activeSubTab === 'expense_heads' ? 'expense_heads' : 'expenses'}
+                  initialTab={activeSubTab === 'expense_heads' && isAdmin ? 'expense_heads' : 'expenses'}
                   expenses={expenses}
                   expenseHeads={expenseHeads}
                   vehicles={vehicles}
                   onSaveExpenseHead={handleSaveExpenseHead}
                   onDeleteExpenseHead={handleDeleteExpenseHead}
                   onAddExpense={handleAddExpense}
-                  onUpdateExpense={handleUpdateExpense}
-                  onUpdateExpenseApproval={handleUpdateExpenseApproval}
-                  onDeleteExpense={handleDeleteExpense}
+                  onUpdateExpense={isPrincipal ? undefined : handleUpdateExpense}
+                  onUpdateExpenseApproval={isPrincipal ? undefined : handleUpdateExpenseApproval}
+                  onDeleteExpense={isPrincipal ? undefined : handleDeleteExpense}
                 />
               )}
 
@@ -2240,7 +2287,7 @@ export function App() {
                   sections={sections}
                   routes={routes}
                   followUps={feeFollowUps}
-                  onAddFollowUp={handleAddFeeFollowUp}
+                  onAddFollowUp={isPrincipal ? undefined : handleAddFeeFollowUp}
                   initialTab={
                     activeSubTab === 'income'
                       ? 'income'
@@ -2269,9 +2316,9 @@ export function App() {
                   onSaveIncomeHead={handleSaveIncomeHead}
                   onDeleteIncomeHead={handleDeleteIncomeHead}
                   onAddIncome={handleAddOtherIncome}
-                  onDeleteIncome={handleDeleteOtherIncome}
-                  onUpdateExpense={handleUpdateExpense}
-                  onDeleteExpense={handleDeleteExpense}
+                  onDeleteIncome={isPrincipal ? undefined : handleDeleteOtherIncome}
+                  onUpdateExpense={isPrincipal ? undefined : handleUpdateExpense}
+                  onDeleteExpense={isPrincipal ? undefined : handleDeleteExpense}
                   onCreateVoucher={handleCreateVoucher}
                 />
               )}
@@ -2315,6 +2362,7 @@ export function App() {
 
       {/* App Startup Popup: Partially Marked Routes & Yesterday Unmarked/Mismatched Attendance */}
       {!loading &&
+        !isPrincipal &&
         !isStartupAttendancePopupDismissed &&
         (() => {
           const todayStr = new Date().toISOString().split('T')[0];

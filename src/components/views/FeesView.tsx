@@ -88,6 +88,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
   onOpenStudentProfile,
 }) => {
   const isAdmin = currentRole === 'Admin';
+  const isReadOnly = currentRole === 'Principal';
   const isCoordinator = currentRole === 'Transport Coordinator';
   const isAssistant = currentRole === 'Transport Assistant';
   const canDiscountLateFine = isAdmin || isCoordinator || isAssistant;
@@ -262,7 +263,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
   // Open Collect Fee Modal if preselectedStudentIdForCollect is passed
   useEffect(() => {
-    if (preselectedStudentIdForCollect) {
+    if (preselectedStudentIdForCollect && !isReadOnly) {
       const targetStu = scopedStudents.find((s) => s.id === preselectedStudentIdForCollect);
       if (targetStu) {
         setSelectedStudentId(preselectedStudentIdForCollect);
@@ -270,7 +271,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
       }
       if (onClearPreselectedStudent) onClearPreselectedStudent();
     }
-  }, [preselectedStudentIdForCollect, scopedStudents.length]);
+  }, [preselectedStudentIdForCollect, scopedStudents.length, isReadOnly]);
 
   // Narrowed down member list for Collect Fee modal (Strictly scoped to campus! Matches ID, Name, Phone, Father, Route, Stop)
   const narrowedMembers = scopedStudents.filter((s) => {
@@ -1268,7 +1269,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
             }`}
           >
             <IndianRupee className="w-3.5 h-3.5" />
-            <span>Collect Fees &amp; Receipts</span>
+            <span>{isReadOnly ? 'Fee Receipts & Register' : 'Collect Fees & Receipts'}</span>
           </button>
 
           <button
@@ -1461,6 +1462,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
               ? 'Demand Slip & Phone Fee Follow-up'
               : activeTab === 'monthly_matrix'
               ? 'Month-wise Outstanding, Collection & Previous Dues (Separate Breakdown)'
+              : isReadOnly
+              ? 'Fee Receipts & Collection Register'
               : 'Collect Fees & Receipts'}
           </h2>
           <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
@@ -1511,40 +1514,46 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 ]}
               />
 
-              <button
-                onClick={() => {
-                  setPrevDuesEdits({});
-                  setIsPrevDuesModalOpen(true);
-                }}
-                className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
-              >
-                <Plus className="w-4 h-4" />
-                <span>+ Previous Dues (Old Software)</span>
-              </button>
+              {!isReadOnly && (
+                <>
+                  <button
+                    onClick={() => {
+                      setPrevDuesEdits({});
+                      setIsPrevDuesModalOpen(true);
+                    }}
+                    className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>+ Previous Dues (Old Software)</span>
+                  </button>
 
-              <button
-                onClick={handleRunBilling}
-                disabled={isRunningBilling}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-2"
-              >
-                <Calendar className="w-4 h-4" />
-                <span>{isRunningBilling ? 'Running Auto-Due...' : `Run Auto-Due (${selectedMonth})`}</span>
-              </button>
+                  <button
+                    onClick={handleRunBilling}
+                    disabled={isRunningBilling}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center gap-2"
+                  >
+                    <Calendar className="w-4 h-4" />
+                    <span>{isRunningBilling ? 'Running Auto-Due...' : `Run Auto-Due (${selectedMonth})`}</span>
+                  </button>
+                </>
+              )}
             </>
           )}
 
           {activeTab === 'receipts' && (
             <>
-              <button
-                onClick={() => {
-                  setPrevDuesEdits({});
-                  setIsPrevDuesModalOpen(true);
-                }}
-                className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>+ Previous Dues (Old Software)</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => {
+                    setPrevDuesEdits({});
+                    setIsPrevDuesModalOpen(true);
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Previous Dues (Old Software)</span>
+                </button>
+              )}
               <PrintExportToolbar
                 title={`Transport Fee Receipts & Collections Register (${formatCampusLabel(selectedCampus)})`}
                 filename="fee_receipts"
@@ -1568,16 +1577,18 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 ]}
               />
 
-              <button
-                onClick={() => {
-                  setPaymentDate(todayStr);
-                  setIsReceiptModalOpen(true);
-                }}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <IndianRupee className="w-4 h-4" />
-                <span>+ Collect Fee &amp; Issue Receipt</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => {
+                    setPaymentDate(todayStr);
+                    setIsReceiptModalOpen(true);
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <IndianRupee className="w-4 h-4" />
+                  <span>+ Collect Fee &amp; Issue Receipt</span>
+                </button>
+              )}
             </>
           )}
 
@@ -1602,13 +1613,15 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 ]}
               />
 
-              <button
-                onClick={() => setIsFollowUpModalOpen(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <Phone className="w-4 h-4" />
-                <span>+ Log Call Follow-up</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => setIsFollowUpModalOpen(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <Phone className="w-4 h-4" />
+                  <span>+ Log Call Follow-up</span>
+                </button>
+              )}
             </>
           )}
         </div>
@@ -1721,7 +1734,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                               </button>
                             );
                           }
-                          if (rec.paymentMode === 'UPI' || rec.paymentMode === 'Bank') {
+                          if (!isReadOnly && (rec.paymentMode === 'UPI' || rec.paymentMode === 'Bank')) {
                             return (
                               <label
                                 className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 text-[10px] font-bold cursor-pointer"
@@ -1854,16 +1867,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
                       </td>
                       <td className="py-3 px-4 text-right">
                         {inv.balanceDue > 0 ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedStudentId(inv.studentId);
-                              setIsReceiptModalOpen(true);
-                            }}
-                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-bold cursor-pointer"
-                          >
-                            Collect Fee
-                          </button>
+                          isReadOnly ? (
+                            <span className="text-rose-600 font-bold text-[11px]">Pending</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedStudentId(inv.studentId);
+                                setIsReceiptModalOpen(true);
+                              }}
+                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                            >
+                              Collect Fee
+                            </button>
+                          )
                         ) : (
                           <span className="text-emerald-600 font-bold text-[11px]">Cleared</span>
                         )}
@@ -1885,8 +1902,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
           {/* Interactive Recovery Action Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div
-              onClick={() => setIsFollowUpModalOpen(true)}
-              className="bg-white hover:bg-amber-50/50 rounded-2xl border-2 border-amber-200 hover:border-amber-400 p-4 shadow-2xs space-y-2 cursor-pointer transition-all"
+              onClick={() => {
+                if (!isReadOnly) setIsFollowUpModalOpen(true);
+              }}
+              className={`bg-white rounded-2xl border-2 border-amber-200 p-4 shadow-2xs space-y-2 transition-all ${
+                isReadOnly ? '' : 'hover:bg-amber-50/50 hover:border-amber-400 cursor-pointer'
+              }`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-amber-700 uppercase">Stage 1: 10th of Month</span>
@@ -1896,22 +1917,28 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <p className="text-slate-600 text-xs leading-relaxed">
                 Record date, person talked to, response received, and next follow-up / promised payment date.
               </p>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsFollowUpModalOpen(true);
-                }}
-                className="mt-2 w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1.5"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Log Fee Follow-up Call</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsFollowUpModalOpen(true);
+                  }}
+                  className="mt-2 w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Log Fee Follow-up Call</span>
+                </button>
+              )}
             </div>
 
             <div
-              onClick={() => setIsWarningModalOpen(true)}
-              className="bg-white hover:bg-rose-50/50 rounded-2xl border-2 border-rose-200 hover:border-rose-400 p-4 shadow-2xs space-y-2 cursor-pointer transition-all"
+              onClick={() => {
+                if (!isReadOnly) setIsWarningModalOpen(true);
+              }}
+              className={`bg-white rounded-2xl border-2 border-rose-200 p-4 shadow-2xs space-y-2 transition-all ${
+                isReadOnly ? '' : 'hover:bg-rose-50/50 hover:border-rose-400 cursor-pointer'
+              }`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-rose-700 uppercase">Stage 2: 15th of Month</span>
@@ -1921,18 +1948,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <p className="text-slate-600 text-xs leading-relaxed">
                 Auto-fetches Guardian Name, Address, Phone, Dues History table, 20th deadline, and Tear-off Acknowledgement Slip.
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setIsWarningModalOpen(true);
-                  }}
-                  className="py-2 px-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Single Letter</span>
-                </button>
+              <div className={`grid grid-cols-1 ${isReadOnly ? '' : 'sm:grid-cols-2'} gap-2 pt-1`}>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsWarningModalOpen(true);
+                    }}
+                    className="py-2 px-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Single Letter</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1948,8 +1977,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
             </div>
 
             <div
-              onClick={handleTriggerSuspension}
-              className="bg-white hover:bg-rose-50/50 rounded-2xl border-2 border-rose-200 hover:border-rose-400 p-4 shadow-2xs space-y-2 cursor-pointer transition-all"
+              onClick={() => {
+                if (!isReadOnly) handleTriggerSuspension();
+              }}
+              className={`bg-white rounded-2xl border-2 border-rose-200 p-4 shadow-2xs space-y-2 transition-all ${
+                isReadOnly ? '' : 'hover:bg-rose-50/50 hover:border-rose-400 cursor-pointer'
+              }`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-rose-800 uppercase">Stage 3: 20th of Month</span>
@@ -1957,19 +1990,21 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
               <h4 className="font-bold text-slate-900 text-sm">Individual Suspension Selection</h4>
               <p className="text-slate-600 text-xs leading-relaxed">
-                Suspension is never auto-triggered. Choose individually from {eligibleForManualSuspension.length} member(s) with unpaid dues &amp; no permission letter.
+                Suspension is never auto-triggered. {eligibleForManualSuspension.length} member(s) currently have unpaid dues &amp; no permission letter.
               </p>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleTriggerSuspension();
-                }}
-                className="mt-2 w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1.5"
-              >
-                <UserX className="w-3.5 h-3.5" />
-                <span>Select Members for Suspension ({eligibleForManualSuspension.length})</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleTriggerSuspension();
+                  }}
+                  className="mt-2 w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <UserX className="w-3.5 h-3.5" />
+                  <span>Select Members for Suspension ({eligibleForManualSuspension.length})</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1983,14 +2018,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     Missed promise dates trigger automatic recall alerts on Dashboard
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsFollowUpModalOpen(true)}
-                  className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer flex items-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Follow-up</span>
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => setIsFollowUpModalOpen(true)}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Follow-up</span>
+                  </button>
+                )}
               </div>
 
               <div className="space-y-3">
@@ -2709,7 +2746,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
                               className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
                               <PhoneCall className="w-3.5 h-3.5" />
-                              <span>Follow-up ({r.stuFollowUps.length})</span>
+                              <span>
+                                {isReadOnly ? 'History' : 'Follow-up'} ({r.stuFollowUps.length})
+                              </span>
                             </button>
                           </div>
                         </td>
@@ -3266,119 +3305,121 @@ export const FeesView: React.FC<FeesViewProps> = ({
             </div>
 
             <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto text-xs">
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  if (!onAddFollowUp) return;
-                  await onAddFollowUp({
-                    studentId: demandFollowUpStudent.id,
-                    date: isAdmin ? folDate : todayStr,
-                    callDate: isAdmin ? folDate : todayStr,
-                    studentName: demandFollowUpStudent.name,
-                    admissionNo: demandFollowUpStudent.admissionNo,
-                    contactPerson:
-                      folContactPerson ||
-                      demandFollowUpStudent.fatherName ||
-                      demandFollowUpStudent.parentName ||
-                      'Parent',
-                    contactedPerson:
-                      folContactPerson ||
-                      demandFollowUpStudent.fatherName ||
-                      demandFollowUpStudent.parentName ||
-                      'Parent',
-                    phone:
-                      folPhone ||
-                      demandFollowUpStudent.parentPhone ||
-                      demandFollowUpStudent.mobile ||
-                      '',
-                    overdueAmount: demandFollowUpStudent.balanceDue,
-                    promiseDate: folPromiseDate || undefined,
-                    promisedPayDate: folPromiseDate || undefined,
-                    outcome: folOutcome,
-                    callOutcome: folOutcome as any,
-                    notes: folNotes || 'Phone follow-up from Demand Slip screen',
-                    remarks: folNotes || 'Phone follow-up from Demand Slip screen',
-                    officerName: currentRole,
-                    recordedBy: currentRole,
-                  });
-                  setFolNotes('');
-                  setFolPromiseDate('');
-                }}
-                className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-3"
-              >
-                <div className="font-bold text-indigo-950 flex items-center justify-between">
-                  <span>Record Phone Call Follow-up</span>
-                  <a
-                    href={`tel:${demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile || ''}`}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-mono font-bold text-[11px] inline-flex items-center gap-1"
-                  >
-                    <PhoneCall className="w-3 h-3" />
-                    <span>Call {demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile}</span>
-                  </a>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {!isReadOnly && onAddFollowUp && (
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!onAddFollowUp) return;
+                    await onAddFollowUp({
+                      studentId: demandFollowUpStudent.id,
+                      date: isAdmin ? folDate : todayStr,
+                      callDate: isAdmin ? folDate : todayStr,
+                      studentName: demandFollowUpStudent.name,
+                      admissionNo: demandFollowUpStudent.admissionNo,
+                      contactPerson:
+                        folContactPerson ||
+                        demandFollowUpStudent.fatherName ||
+                        demandFollowUpStudent.parentName ||
+                        'Parent',
+                      contactedPerson:
+                        folContactPerson ||
+                        demandFollowUpStudent.fatherName ||
+                        demandFollowUpStudent.parentName ||
+                        'Parent',
+                      phone:
+                        folPhone ||
+                        demandFollowUpStudent.parentPhone ||
+                        demandFollowUpStudent.mobile ||
+                        '',
+                      overdueAmount: demandFollowUpStudent.balanceDue,
+                      promiseDate: folPromiseDate || undefined,
+                      promisedPayDate: folPromiseDate || undefined,
+                      outcome: folOutcome,
+                      callOutcome: folOutcome as any,
+                      notes: folNotes || 'Phone follow-up from Demand Slip screen',
+                      remarks: folNotes || 'Phone follow-up from Demand Slip screen',
+                      officerName: currentRole,
+                      recordedBy: currentRole,
+                    });
+                    setFolNotes('');
+                    setFolPromiseDate('');
+                  }}
+                  className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-3"
+                >
+                  <div className="font-bold text-indigo-950 flex items-center justify-between">
+                    <span>Record Phone Call Follow-up</span>
+                    <a
+                      href={`tel:${demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile || ''}`}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-mono font-bold text-[11px] inline-flex items-center gap-1"
+                    >
+                      <PhoneCall className="w-3 h-3" />
+                      <span>Call {demandFollowUpStudent.parentPhone || demandFollowUpStudent.mobile}</span>
+                    </a>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        Talked To
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={folContactPerson}
+                        onChange={(e) => setFolContactPerson(e.target.value)}
+                        className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        Call Outcome
+                      </label>
+                      <select
+                        value={folOutcome}
+                        onChange={(e) => setFolOutcome(e.target.value as any)}
+                        className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-bold"
+                      >
+                        <option value="Promise to Pay">Promise to Pay</option>
+                        <option value="Promised to Pay">Promised to Pay</option>
+                        <option value="Partial Payment Promised">Partial Payment Promised</option>
+                        <option value="No Answer">No Answer / Switched Off</option>
+                        <option value="Disputed">Disputed / Requested Time</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        Promised Payment Date
+                      </label>
+                      <input
+                        type="date"
+                        value={folPromiseDate}
+                        onChange={(e) => setFolPromiseDate(e.target.value)}
+                        className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                      />
+                    </div>
+                  </div>
                   <div>
                     <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      Talked To
+                      Parent Response / Conversation Remarks *
                     </label>
                     <input
                       type="text"
                       required
-                      value={folContactPerson}
-                      onChange={(e) => setFolContactPerson(e.target.value)}
+                      placeholder="Enter conversation details with parent..."
+                      value={folNotes}
+                      onChange={(e) => setFolNotes(e.target.value)}
                       className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
                     />
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      Call Outcome
-                    </label>
-                    <select
-                      value={folOutcome}
-                      onChange={(e) => setFolOutcome(e.target.value as any)}
-                      className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-bold"
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer"
                     >
-                      <option value="Promise to Pay">Promise to Pay</option>
-                      <option value="Promised to Pay">Promised to Pay</option>
-                      <option value="Partial Payment Promised">Partial Payment Promised</option>
-                      <option value="No Answer">No Answer / Switched Off</option>
-                      <option value="Disputed">Disputed / Requested Time</option>
-                    </select>
+                      Save Phone Follow-up
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      Promised Payment Date
-                    </label>
-                    <input
-                      type="date"
-                      value={folPromiseDate}
-                      onChange={(e) => setFolPromiseDate(e.target.value)}
-                      className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs font-mono"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                    Parent Response / Conversation Remarks *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Enter conversation details with parent..."
-                    value={folNotes}
-                    onChange={(e) => setFolNotes(e.target.value)}
-                    className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
-                  />
-                </div>
-                <div className="flex justify-end">
-                  <button
-                    type="submit"
-                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer"
-                  >
-                    Save Phone Follow-up
-                  </button>
-                </div>
-              </form>
+                </form>
+              )}
 
               <div className="space-y-2.5">
                 <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px]">
@@ -4563,7 +4604,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
             <div className="px-5 py-3.5 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex items-center gap-2">
-                {previewScreenshot.receipt && (
+                {!isReadOnly && previewScreenshot.receipt && (
                   <label className="cursor-pointer inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-2xs">
                     <Upload className="w-3.5 h-3.5" />
                     <span>

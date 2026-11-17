@@ -49,6 +49,7 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
   onUpdateMaintenanceStatus,
 }) => {
   const isAdmin = currentRole === 'Admin';
+  const isReadOnly = currentRole === 'Principal';
   const todayStr = new Date().toISOString().split('T')[0];
 
   const [activeTab, setActiveTab] = useState<'fleet' | 'odometer' | 'fuel' | 'maintenance'>(
@@ -378,13 +379,15 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                   { header: 'Logged By', accessor: (l) => l.recordedBy },
                 ]}
               />
-              <button
-                onClick={() => handleOpenOdometerModal()}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>+ Log Book Entry</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => handleOpenOdometerModal()}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Log Book Entry</span>
+                </button>
+              )}
             </>
           )}
 
@@ -447,13 +450,15 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                   { header: 'Status', accessor: (m) => m.status },
                 ]}
               />
-              <button
-                onClick={() => setIsWoModalOpen(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <Wrench className="w-4 h-4" />
-                <span>+ Raise Work Order</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => setIsWoModalOpen(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <Wrench className="w-4 h-4" />
+                  <span>+ Raise Work Order</span>
+                </button>
+              )}
             </>
           )}
 
@@ -475,13 +480,15 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                   { header: 'Status', accessor: (f) => f.status || 'Settled' },
                 ]}
               />
-              <button
-                onClick={() => handleOpenGiveFuelAdvance()}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>+ Record Fuel Advance</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => handleOpenGiveFuelAdvance()}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Record Fuel Advance</span>
+                </button>
+              )}
             </>
           )}
         </div>
@@ -778,7 +785,7 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                                 </button>
                               </>
                             )}
-                            {m.status === 'Approved' && (
+                            {!isReadOnly && m.status === 'Approved' && (
                               <button
                                 type="button"
                                 onClick={() => {
@@ -893,20 +900,24 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                   { header: 'Status', accessor: (f) => f.status },
                 ]}
               />
-              <button
-                onClick={handleOpenGiveFuelAdvance}
-                className="flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4 text-amber-400" />
-                <span>+ Give Fuel Advance to Driver</span>
-              </button>
-              <button
-                onClick={() => handleOpenSettleFuelAdvance()}
-                className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-xs cursor-pointer"
-              >
-                <Fuel className="w-4 h-4" />
-                <span>Settle Fuel Advance</span>
-              </button>
+              {!isReadOnly && (
+                <>
+                  <button
+                    onClick={handleOpenGiveFuelAdvance}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4 text-amber-400" />
+                    <span>+ Give Fuel Advance to Driver</span>
+                  </button>
+                  <button
+                    onClick={() => handleOpenSettleFuelAdvance()}
+                    className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-xs cursor-pointer"
+                  >
+                    <Fuel className="w-4 h-4" />
+                    <span>Settle Fuel Advance</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -961,13 +972,17 @@ export const VehiclesView: React.FC<VehiclesViewProps> = ({
                         </td>
                         <td className="py-3 px-4 text-right">
                           {fa.status !== 'Settled' ? (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenSettleFuelAdvance(fa)}
-                              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-[11px] cursor-pointer"
-                            >
-                              Settle Bill
-                            </button>
+                            isReadOnly ? (
+                              <span className="text-[11px] text-amber-700 font-semibold">Pending</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSettleFuelAdvance(fa)}
+                                className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-[11px] cursor-pointer"
+                              >
+                                Settle Bill
+                              </button>
+                            )
                           ) : (
                             <span className="text-[11px] text-slate-400">Closed</span>
                           )}

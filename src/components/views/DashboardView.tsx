@@ -438,6 +438,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [woDesc, setWoDesc] = useState('');
   const [isSubmittingWo, setIsSubmittingWo] = useState(false);
 
+  const isPrincipal = currentRoleName === 'Principal';
   const isAssistant = currentRoleName === 'Transport Assistant';
   const isAttendanceIncharge = currentRoleName === 'Attendance Incharge';
   const isCoordinator = currentRoleName === 'Transport Coordinator';
@@ -813,28 +814,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   .join(' • ')}
               </span>
             </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {analysis.partiallyMarkedRoutes.slice(0, 3).map((pr) => (
-                <button
-                  key={pr.routeId}
-                  type="button"
-                  onClick={() => {
-                    if (onSelectRouteForAttendance) {
-                      onSelectRouteForAttendance({
-                        routeId: pr.routeId,
-                        date: activeDashAttDate,
-                        mode: pr.arrivalUnmarkedCount > 0 ? 'arrival' : 'departure',
-                      });
-                    } else {
-                      onNavigate('operations' as any, 'arrival');
-                    }
-                  }}
-                  className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] cursor-pointer"
-                >
-                  Mark {pr.routeCode} ({pr.arrivalUnmarkedCount + pr.departureUnmarkedCount} left) &rarr;
-                </button>
-              ))}
-            </div>
+            {!isPrincipal && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {analysis.partiallyMarkedRoutes.slice(0, 3).map((pr) => (
+                  <button
+                    key={pr.routeId}
+                    type="button"
+                    onClick={() => {
+                      if (onSelectRouteForAttendance) {
+                        onSelectRouteForAttendance({
+                          routeId: pr.routeId,
+                          date: activeDashAttDate,
+                          mode: pr.arrivalUnmarkedCount > 0 ? 'arrival' : 'departure',
+                        });
+                      } else {
+                        onNavigate('operations' as any, 'arrival');
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold text-[11px] cursor-pointer"
+                  >
+                    Mark {pr.routeCode} ({pr.arrivalUnmarkedCount + pr.departureUnmarkedCount} left) &rarr;
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -938,7 +941,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </button>
           </div>
 
-          {onAcknowledgeUnmarkedAttendance && (bothUnmarkedList.length > 0 || singleUnmarkedList.length > 0) && (
+          {!isPrincipal && onAcknowledgeUnmarkedAttendance && (bothUnmarkedList.length > 0 || singleUnmarkedList.length > 0) && (
             <button
               type="button"
               onClick={() =>
@@ -1056,7 +1059,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     <td className="py-2.5 px-4 text-right">
                       <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
                         {/* Mark ONLY unmarked shift(s) without altering already marked shift */}
-                        {(item.arrivalStatus === 'Pending' || item.departureStatus === 'Pending') &&
+                        {!isPrincipal &&
+                          (item.arrivalStatus === 'Pending' || item.departureStatus === 'Pending') &&
                           onBatchSaveAttendance && (
                             <div className="inline-flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-lg border border-slate-200">
                               <span className="text-[10px] font-bold text-slate-600 mr-1">
@@ -1096,7 +1100,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           )}
 
                         {/* For already-marked mismatch: non-Admin cannot alter directly, must request change to Admin */}
-                        {item.category === 'status_mismatch' && !isAdmin && (
+                        {!isPrincipal && item.category === 'status_mismatch' && !isAdmin && (
                           <button
                             type="button"
                             onClick={() =>
@@ -2130,6 +2134,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold border ${
                 isAdmin
                   ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                  : isPrincipal
+                  ? 'bg-teal-500/15 border-teal-500/30 text-teal-300'
                   : 'bg-sky-500/15 border-sky-500/30 text-sky-300'
               }`}
             >
@@ -2137,6 +2143,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>
                 {isAdmin
                   ? 'Role: Admin (Full Executive & Approval Authority)'
+                  : isPrincipal
+                  ? 'Role: Principal (View-Only Executive Access — Both Campuses)'
                   : 'Role: Transport Coordinator (Operations, Routing & Fee Desk)'}
               </span>
             </span>
@@ -2146,11 +2154,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
           <h2 className="text-2xl font-bold tracking-tight">
-            {isAdmin ? 'Admin Executive Command Center' : 'Coordinator Operations & Collection Desk'}
+            {isAdmin
+              ? 'Admin Executive Command Center'
+              : isPrincipal
+              ? 'Principal Executive Overview (View-Only)'
+              : 'Coordinator Operations & Collection Desk'}
           </h2>
           <p className="text-xs text-slate-400">
             {isAdmin
               ? 'Full access to financial ledgers, expense & work order approvals, payroll, and user access control.'
+              : isPrincipal
+              ? 'Inspect real-time records across Senior (Sr), Junior (Jr), or All Campuses combined. Record editing and deletion are disabled.'
               : 'Manage student routes, fee receipts, fleet schedules, and submit work orders or suspensions for Admin approval.'}
           </p>
         </div>
@@ -2178,7 +2192,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               className="w-full py-2 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
             >
               <IndianRupee className="w-4 h-4" />
-              <span>Collect Fees</span>
+              <span>{isPrincipal ? 'View Fee Receipts' : 'Collect Fees'}</span>
             </button>
             {isAdmin ? (
               <button
@@ -3075,7 +3089,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         onClick={() => onNavigate('members', 'requests')}
                         className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl font-bold cursor-pointer"
                       >
-                        Review &amp; Enter Remarks &rarr;
+                        {isPrincipal ? 'View Requests →' : 'Review & Enter Remarks →'}
                       </button>
                     )}
                   </div>
@@ -3193,13 +3207,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               )}
             </div>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsRaiseWoOpen(true)}
-                className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
-              >
-                <Plus className="w-3 h-3 text-amber-400" />
-                <span>Raise Work Order</span>
-              </button>
+              {!isPrincipal && (
+                <button
+                  onClick={() => setIsRaiseWoOpen(true)}
+                  className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                >
+                  <Plus className="w-3 h-3 text-amber-400" />
+                  <span>Raise Work Order</span>
+                </button>
+              )}
               <button
                 onClick={() => onNavigate('vehicles', 'maintenance')}
                 className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
@@ -3302,7 +3318,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         </>
                       )}
 
-                      {isApproved && onUpdateMaintenanceStatus && (
+                      {!isPrincipal && isApproved && onUpdateMaintenanceStatus && (
                         <button
                           onClick={() =>
                             onUpdateMaintenanceStatus(wo.id, {
@@ -3795,14 +3811,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           <button
                             type="button"
                             onClick={() =>
-                              onSaveAbsenteeCall
+                              !isPrincipal && onSaveAbsenteeCall
                                 ? openDashAbsenteeModal(item)
                                 : onNavigate('operations', 'call_absentees')
                             }
                             className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-bold cursor-pointer inline-flex items-center gap-1"
                           >
                             <Phone className="w-3 h-3 text-amber-400" />
-                            <span>Call / Enter Remarks</span>
+                            <span>{isPrincipal ? 'View Calling Log' : 'Call / Enter Remarks'}</span>
                           </button>
                         </td>
                       </tr>
@@ -4021,7 +4037,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   onClick={() => onNavigate('members', 'complaints')}
                   className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl flex items-center gap-1 cursor-pointer"
                 >
-                  <span>+ Log / Open Register</span>
+                  <span>{isPrincipal ? 'Open Register' : '+ Log / Open Register'}</span>
                   <ArrowRight className="w-3.5 h-3.5 text-amber-400" />
                 </button>
               </div>
@@ -4131,7 +4147,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           >
                             Member Profile
                           </button>
-                          {c.status === 'Pending' && onResolveComplaint && (
+                          {!isPrincipal && c.status === 'Pending' && onResolveComplaint && (
                             <button
                               type="button"
                               onClick={() => {

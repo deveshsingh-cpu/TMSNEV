@@ -303,12 +303,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const standardGroups: SidebarGroupItem[] = [
     {
       key: 'dashboard',
-      label: currentRole === 'Admin' ? '1- Dashboard (Admin)' : '1- Operations Desk',
+      label:
+        currentRole === 'Admin'
+          ? '1- Dashboard (Admin)'
+          : currentRole === 'Principal'
+          ? '1- Dashboard (Principal)'
+          : '1- Operations Desk',
       icon: <LayoutDashboard className="w-5 h-5" />,
       defaultNavKey: 'dashboard',
       badge: currentRole === 'Admin' && pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined,
       badgeColor: 'bg-amber-500 text-slate-950',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
     },
     {
       key: 'members_group',
@@ -318,7 +323,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       defaultSubTab: 'all',
       badge: suspendedCount > 0 ? suspendedCount : undefined,
       badgeColor: 'bg-rose-100 text-rose-700',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
         { id: 'mem-all', label: '1- Member Directory', navKey: 'members', subTab: 'all' },
         {
@@ -354,7 +359,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: '3- Employees',
       icon: <UserSquare2 className="w-5 h-5" />,
       defaultNavKey: 'resumes',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
         {
           id: 'emp-resumes',
@@ -380,7 +385,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '4- Payroll & Advances',
           navKey: 'staff',
           subTab: 'payroll',
-          allowedRoles: ['Admin', 'Transport Coordinator'],
+          allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
         },
       ],
     },
@@ -390,7 +395,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <RouteIcon className="w-5 h-5" />,
       defaultNavKey: 'routes',
       defaultSubTab: 'routes',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
         { id: 'rt-routes', label: '1- Active Routes & Stops', navKey: 'routes', subTab: 'routes' },
         { id: 'rt-services', label: '2- Vehicle Schedule', navKey: 'routes', subTab: 'services' },
@@ -404,12 +409,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <Clock className="w-5 h-5" />,
       defaultNavKey: 'operations',
       defaultSubTab: 'arrival',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
         { id: 'op-arrival', label: '1- Arrival Attendance', navKey: 'operations', subTab: 'arrival' },
         { id: 'op-departure', label: '2- Departure Attendance', navKey: 'operations', subTab: 'departure' },
         { id: 'op-unmarked', label: '3- Unmarked & Mismatch Report', navKey: 'operations', subTab: 'unmarked_mismatch' },
-        { id: 'op-holiday', label: '4- Mark Route Holiday', navKey: 'operations', subTab: 'mark_holiday' },
+        {
+          id: 'op-holiday',
+          label: '4- Mark Route Holiday',
+          navKey: 'operations',
+          subTab: 'mark_holiday',
+          allowedRoles: ['Admin', 'Transport Coordinator'],
+        },
         { id: 'op-absentees', label: '5- Call Absentees (Follow-up)', navKey: 'operations', subTab: 'call_absentees' },
         { id: 'op-calendar', label: '6- Monthly Calendar (P/A/L/H)', navKey: 'operations', subTab: 'calendar' },
         { id: 'op-summary', label: '7- Attendance Summary Sheet', navKey: 'operations', subTab: 'summary' },
@@ -421,9 +432,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <CreditCard className="w-5 h-5" />,
       defaultNavKey: 'fees',
       defaultSubTab: 'collect',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
-        { id: 'fe-collect', label: '1- Collect Fees & Receipts', navKey: 'fees', subTab: 'collect' },
+        {
+          id: 'fe-collect',
+          label: currentRole === 'Principal' ? '1- Fee Receipts & Register' : '1- Collect Fees & Receipts',
+          navKey: 'fees',
+          subTab: 'collect',
+        },
         { id: 'fe-invoices', label: '2- Monthly Invoices', navKey: 'fees', subTab: 'invoices' },
         { id: 'fe-demand', label: '3- Demand Slip & Phone Follow-up', navKey: 'fees', subTab: 'demand_slip' },
         { id: 'fe-matrix', label: '4- Month-wise Fee & Previous Dues', navKey: 'fees', subTab: 'monthly_matrix' },
@@ -436,7 +452,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <BookOpenCheck className="w-5 h-5" />,
       defaultNavKey: 'expenses',
       defaultSubTab: 'expenses',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
         { id: 'ex-expenses', label: '1- Expenses & Categories', navKey: 'expenses', subTab: 'expenses' },
         {
@@ -451,7 +467,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: '3- Other Income & Heads',
           navKey: 'accounts',
           subTab: 'income',
-          allowedRoles: ['Admin', 'Transport Coordinator'],
+          allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
         },
         {
           id: 'ex-daybook',
@@ -467,7 +483,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <Landmark className="w-5 h-5" />,
       defaultNavKey: 'accounts',
       defaultSubTab: 'day_book',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
       subItems: [
         {
           id: 'ac-daybook',
@@ -572,7 +588,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: '10- Business Reports',
       icon: <BarChart3 className="w-5 h-5" />,
       defaultNavKey: 'reports',
-      allowedRoles: ['Admin', 'Transport Coordinator'],
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
     },
   ];
 
@@ -619,6 +635,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const roleColorBadge =
     currentRole === 'Admin'
       ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+      : currentRole === 'Principal'
+      ? 'bg-teal-500/20 text-teal-300 border-teal-500/40'
       : currentRole === 'Transport Coordinator'
       ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
       : currentRole === 'Attendance Incharge'

@@ -130,11 +130,40 @@ function unwrapMutationEnvelope(data: any): any {
 
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
+function getActiveSessionUserRole(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const raw = localStorage.getItem('tms_authenticated_user_v2');
+    if (!raw) return '';
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.role === 'string' ? parsed.role : '';
+  } catch {
+    return '';
+  }
+}
+
 async function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const method = (init?.method || 'GET').toUpperCase();
-  let nextInit = init;
+  const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+  const activeRole = getActiveSessionUserRole();
+
+  if (
+    activeRole === 'Principal' &&
+    method !== 'GET' &&
+    !urlStr.includes('/api/auth/login') &&
+    !urlStr.includes('/api/print-page')
+  ) {
+    throw new Error(
+      'View-Only Account: Principal account has viewing rights only and cannot add, edit, or delete any record.'
+    );
+  }
+
+  const headers = new Headers(init?.headers || {});
+  if (activeRole) {
+    headers.set('X-ERP-User-Role', activeRole);
+  }
+  let nextInit: RequestInit = { ...init, headers };
   if (method !== 'GET') {
-    const headers = new Headers(init?.headers || {});
     headers.set('X-ERP-Include-Bootstrap', '1');
     nextInit = { ...init, headers, cache: 'no-store' };
   }
@@ -145,6 +174,9 @@ async function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
     // On slow mobile networks or strict proxy limits, retry mutation once with a tiny 200-byte response (no bootstrap envelope)
     if (method !== 'GET') {
       const liteHeaders = new Headers(init?.headers || {});
+      if (activeRole) {
+        liteHeaders.set('X-ERP-User-Role', activeRole);
+      }
       liteHeaders.delete('X-ERP-Include-Bootstrap');
       res = await nativeFetch(input, { ...init, headers: liteHeaders, cache: 'no-store' });
     } else {

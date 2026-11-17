@@ -66,6 +66,20 @@ apiRouter.use(async (req: Request, res: Response, next) => {
     return originalJson(payload);
   }) as any;
 
+  // Strict View-Only Enforcement for Principal Role (cannot create, edit, or delete any record)
+  const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+  if (
+    callerRole === 'Principal' &&
+    req.method !== 'GET' &&
+    req.path !== '/auth/login' &&
+    req.path !== '/print-page'
+  ) {
+    res.status(403).json({
+      error: 'View-Only Account: Principal account has viewing rights only and cannot add, edit, or delete any record.',
+    });
+    return;
+  }
+
   if (req.method === 'GET') {
     await sheetsDb.ensureInitialized(req.query.fresh === '1');
   }

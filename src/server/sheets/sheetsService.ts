@@ -1008,6 +1008,7 @@ export class SheetsDatabaseManager {
       const roleRaw = String(row[4] || base.role || 'Transport Assistant').trim();
       const role: UserRole =
         roleRaw === 'Admin' ||
+        roleRaw === 'Principal' ||
         roleRaw === 'Transport Coordinator' ||
         roleRaw === 'Transport Assistant' ||
         roleRaw === 'Attendance Incharge'
@@ -1331,6 +1332,7 @@ export class SheetsDatabaseManager {
             // Fire-and-forget targeted sync so GET /api/bootstrap never blocks on writing 29 tabs
             this.flushToGoogleSheetsRemote([
               'School_Masters',
+              'System_Users',
               'Fee_Receipts',
               'Fee_Invoices',
               'Members_Transport',
@@ -3072,6 +3074,7 @@ export class SheetsDatabaseManager {
       const password = (data.password || '').trim();
       const role: UserRole =
         data.role === 'Admin' ||
+        data.role === 'Principal' ||
         data.role === 'Transport Coordinator' ||
         data.role === 'Transport Assistant' ||
         data.role === 'Attendance Incharge'
@@ -3105,7 +3108,7 @@ export class SheetsDatabaseManager {
             email: data.email ?? this.systemUsers[idx].email ?? '',
             status: data.status || this.systemUsers[idx].status || 'Active',
           };
-          await this.internalSyncToGoogleSheets();
+          await this.internalSyncToGoogleSheets(true, ['System_Users']);
           return this.systemUsers[idx];
         }
       }
@@ -3123,7 +3126,7 @@ export class SheetsDatabaseManager {
         createdAt: new Date().toISOString().split('T')[0],
       };
       this.systemUsers.push(newUser);
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(true, ['System_Users']);
       return newUser;
     });
   }
@@ -3140,8 +3143,9 @@ export class SheetsDatabaseManager {
         }
       }
 
+      this.explicitlyDeletedIds.add(id);
       this.systemUsers = this.systemUsers.filter(u => u.id !== id);
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(true, ['System_Users']);
       return { success: true };
     });
   }
@@ -9376,8 +9380,9 @@ export class SheetsDatabaseManager {
     let changed = false;
     const todayStr = new Date().toISOString().split('T')[0];
 
-    // Ensure default System Users (including Senior & Junior Attendance Incharge and Assistants) exist
+    // Ensure default System Users (including Principal, Senior & Junior Attendance Incharge and Assistants) exist
     for (const defUser of initialSystemUsers) {
+      if (this.explicitlyDeletedIds.has(defUser.id)) continue;
       const exists = this.systemUsers.some(
         u =>
           u.id === defUser.id ||

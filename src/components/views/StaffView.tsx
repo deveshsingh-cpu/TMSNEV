@@ -65,6 +65,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
   onGiveStaffAdvance,
   onFinalizePayroll,
 }) => {
+  const isReadOnly = currentRole === 'Principal';
   const todayStr = new Date().toISOString().split('T')[0];
   const currentYearMonth = todayStr.slice(0, 7); // YYYY-MM
 
@@ -300,6 +301,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
   };
 
   const handleStaffAttendanceButtonClick = (emp: Employee, newStatus: StaffAttendanceStatus) => {
+    if (isReadOnly) return;
     if (staffTouchMovedRef.current) {
       staffTouchMovedRef.current = false;
       return;
@@ -569,8 +571,9 @@ export const StaffView: React.FC<StaffViewProps> = ({
           resumes={resumes}
           designations={designations}
           isAdmin={isAdmin}
+          isReadOnly={isReadOnly}
           onSaveResume={onSaveResume}
-          onDeleteResume={onDeleteResume}
+          onDeleteResume={isReadOnly ? undefined : onDeleteResume}
           onHireResume={onHireResume}
           onNavigateToEmployees={() => setSubModule('employees')}
         />
@@ -689,7 +692,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
                         </button>
                       )}
                     </div>
-                  ) : (
+                  ) : !isReadOnly ? (
                     <button
                       onClick={() => setShowHolidayModal(true)}
                       className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
@@ -697,7 +700,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
                       <Sun className="w-3.5 h-3.5" />
                       <span>Mark {attDate} as Holiday (H)</span>
                     </button>
-                  )}
+                  ) : null}
 
                   <PrintExportToolbar
                     title={`Staff Attendance — ${attDate}`}
@@ -748,77 +751,79 @@ export const StaffView: React.FC<StaffViewProps> = ({
                 )}
 
                 {/* Save Staff Attendance Action Bar */}
-                <div
-                  className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                    unsavedStaffList.length > 0
-                      ? 'bg-amber-50 border-amber-300'
-                      : 'bg-white border-slate-200'
-                  }`}
-                >
-                  <div className="text-xs font-medium text-slate-700">
-                    {unsavedStaffList.length > 0 ? (
-                      <span className="font-bold text-amber-950">
-                        ● {unsavedStaffList.length} Unsaved Staff Selection(s) — click{' '}
-                        <strong>Save Attendance</strong> to finalize.
-                      </span>
-                    ) : (
-                      <span>
-                        Saved &amp; Finalized ({attDate}): <strong>{savedStaffCount}</strong> of{' '}
-                        <strong>{attFilteredEmployees.length}</strong> staff member(s)
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {savedStaffCount < attFilteredEmployees.length && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setStaffDraftAttendance(prev => {
-                            const next = { ...prev };
-                            for (const emp of attFilteredEmployees) {
-                              if (!getSavedStaffRecord(emp.id, attDate) && !next[`${attDate}:${emp.id}`]) {
-                                next[`${attDate}:${emp.id}`] = 'P';
+                {!isReadOnly && (
+                  <div
+                    className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      unsavedStaffList.length > 0
+                        ? 'bg-amber-50 border-amber-300'
+                        : 'bg-white border-slate-200'
+                    }`}
+                  >
+                    <div className="text-xs font-medium text-slate-700">
+                      {unsavedStaffList.length > 0 ? (
+                        <span className="font-bold text-amber-950">
+                          ● {unsavedStaffList.length} Unsaved Staff Selection(s) — click{' '}
+                          <strong>Save Attendance</strong> to finalize.
+                        </span>
+                      ) : (
+                        <span>
+                          Saved &amp; Finalized ({attDate}): <strong>{savedStaffCount}</strong> of{' '}
+                          <strong>{attFilteredEmployees.length}</strong> staff member(s)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {savedStaffCount < attFilteredEmployees.length && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setStaffDraftAttendance(prev => {
+                              const next = { ...prev };
+                              for (const emp of attFilteredEmployees) {
+                                if (!getSavedStaffRecord(emp.id, attDate) && !next[`${attDate}:${emp.id}`]) {
+                                  next[`${attDate}:${emp.id}`] = 'P';
+                                }
                               }
-                            }
-                            return next;
-                          });
-                        }}
-                        className="px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs cursor-pointer"
-                      >
-                        Mark Unsaved as Present (P)
-                      </button>
-                    )}
-                    {unsavedStaffList.length > 0 && (
+                              return next;
+                            });
+                          }}
+                          className="px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs cursor-pointer"
+                        >
+                          Mark Unsaved as Present (P)
+                        </button>
+                      )}
+                      {unsavedStaffList.length > 0 && (
+                        <button
+                          type="button"
+                          disabled={isSavingStaffAttendance}
+                          onClick={handleDiscardStaffDraft}
+                          className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer"
+                        >
+                          Back / Discard
+                        </button>
+                      )}
                       <button
                         type="button"
-                        disabled={isSavingStaffAttendance}
-                        onClick={handleDiscardStaffDraft}
-                        className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs cursor-pointer"
+                        disabled={unsavedStaffList.length === 0 || isSavingStaffAttendance}
+                        onClick={handleSaveStaffAttendanceBatch}
+                        className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
+                          unsavedStaffList.length > 0
+                            ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
+                            : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                        }`}
                       >
-                        Back / Discard
+                        <Check className="w-4 h-4" />
+                        <span>
+                          {isSavingStaffAttendance
+                            ? 'Saving...'
+                            : unsavedStaffList.length > 0
+                            ? `Save Attendance (${unsavedStaffList.length})`
+                            : 'Save Attendance'}
+                        </span>
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      disabled={unsavedStaffList.length === 0 || isSavingStaffAttendance}
-                      onClick={handleSaveStaffAttendanceBatch}
-                      className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
-                        unsavedStaffList.length > 0
-                          ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm cursor-pointer'
-                          : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                      }`}
-                    >
-                      <Check className="w-4 h-4" />
-                      <span>
-                        {isSavingStaffAttendance
-                          ? 'Saving...'
-                          : unsavedStaffList.length > 0
-                          ? `Save Attendance (${unsavedStaffList.length})`
-                          : 'Save Attendance'}
-                      </span>
-                    </button>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div
                   className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden"
@@ -911,15 +916,18 @@ export const StaffView: React.FC<StaffViewProps> = ({
                                     ] as const
                                   ).map(btn => {
                                     const isSelected = hasSelection && st === btn.code;
-                                    const isLocked = Boolean(savedRec && !isAdmin && !isSelected);
+                                    const isLocked = Boolean(isReadOnly || (savedRec && !isAdmin && !isSelected));
                                     return (
                                       <button
                                         key={btn.code}
                                         type="button"
+                                        disabled={isReadOnly}
                                         onTouchStart={handleStaffTouchStart}
                                         onTouchMove={handleStaffTouchMove}
                                         onClick={() => handleStaffAttendanceButtonClick(emp, btn.code)}
-                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all touch-manipulation select-none ${
+                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all touch-manipulation select-none ${
+                                          isReadOnly ? 'cursor-default' : 'cursor-pointer'
+                                        } ${
                                           isSelected
                                             ? `${btn.activeCls} shadow-2xs`
                                             : isLocked
@@ -1187,11 +1195,14 @@ export const StaffView: React.FC<StaffViewProps> = ({
                           <div
                             key={dt}
                             onClick={() => {
+                              if (isReadOnly) return;
                               const cycle: StaffAttendanceStatus[] = ['P', 'L', 'A', 'H'];
                               const next = cycle[(cycle.indexOf(st) + 1) % cycle.length];
                               if (onMarkStaffAttendance) onMarkStaffAttendance(calEmp.id, dt, next);
                             }}
-                            className={`h-20 rounded-xl border p-2 flex flex-col justify-between cursor-pointer transition-all ${
+                            className={`h-20 rounded-xl border p-2 flex flex-col justify-between ${
+                              isReadOnly ? 'cursor-default' : 'cursor-pointer'
+                            } transition-all ${
                               st === 'P'
                                 ? 'bg-emerald-50/60 border-emerald-200 hover:border-emerald-400'
                                 : st === 'L'
@@ -1292,13 +1303,15 @@ export const StaffView: React.FC<StaffViewProps> = ({
                 ]}
               />
 
-              <button
-                onClick={() => setShowAdvanceModal(true)}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Give Advance</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => setShowAdvanceModal(true)}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Give Advance</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1369,7 +1382,7 @@ export const StaffView: React.FC<StaffViewProps> = ({
                             ₹{pr.grossEarnedSalary.toLocaleString('en-IN')}
                           </td>
                           <td className="py-3 px-3 text-center">
-                            {isFinalized ? (
+                            {isFinalized || isReadOnly ? (
                               <span className="font-mono font-bold text-amber-800">
                                 - ₹{pr.advanceDeducted.toLocaleString('en-IN')}
                               </span>
@@ -1655,13 +1668,15 @@ export const StaffView: React.FC<StaffViewProps> = ({
                     >
                       {emp.status}
                     </span>
-                    <button
-                      onClick={() => handleOpenEdit(emp)}
-                      className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer"
-                      title="Edit Employee"
-                    >
-                      <Edit className="w-3.5 h-3.5" />
-                    </button>
+                    {!isReadOnly && (
+                      <button
+                        onClick={() => handleOpenEdit(emp)}
+                        className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer"
+                        title="Edit Employee"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     {isAdmin && onDeleteEmployee && (
                       <button
                         onClick={() => onDeleteEmployee(emp.id)}

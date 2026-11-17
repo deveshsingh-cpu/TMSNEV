@@ -145,6 +145,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   onAdminReviewMemberRequest,
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
+  const isReadOnly = currentRole === 'Principal';
   const canInitiateSuspension = currentRole === 'Admin' || currentRole === 'Transport Coordinator';
   const isAssistant = currentRole === 'Transport Assistant';
   const lockedCampus = isAssistant && userCampus && userCampus !== 'All' ? userCampus : null;
@@ -1579,6 +1580,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
           </div>
 
           {/* Log New Complaint / Feedback Form */}
+          {!isReadOnly && (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5">
             <h3 className="text-sm font-black text-slate-900 mb-3 flex items-center gap-2">
               <Plus className="w-4 h-4 text-amber-500" />
@@ -1763,6 +1765,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
               </div>
             </form>
           </div>
+          )}
 
           {/* Filters & List */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 flex flex-wrap items-center justify-between gap-3">
@@ -1964,16 +1967,18 @@ export const MembersView: React.FC<MembersViewProps> = ({
                             >
                               Member Profile
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setResolveComplaintTarget(c);
-                                setResolveActionNotes(c.actionTaken || '');
-                              }}
-                              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
-                            >
-                              {c.status === 'Resolved' ? 'Update Action' : 'Resolve'}
-                            </button>
+                            {!isReadOnly && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setResolveComplaintTarget(c);
+                                  setResolveActionNotes(c.actionTaken || '');
+                                }}
+                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                              >
+                                {c.status === 'Resolved' ? 'Update Action' : 'Resolve'}
+                              </button>
+                            )}
                             {isAdmin && onDeleteComplaint && (
                               <button
                                 type="button"
@@ -2011,22 +2016,26 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={openNewModal}
-                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>{isAdmin ? '+ Add Member' : '+ Raise Add Member Request'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openDropMemberModal()}
-                  className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Ban className="w-3.5 h-3.5" />
-                  <span>{isAdmin ? 'Drop Member (Left School)' : 'Raise Drop Member Request'}</span>
-                </button>
+                {!isReadOnly && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={openNewModal}
+                      className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>{isAdmin ? '+ Add Member' : '+ Raise Add Member Request'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openDropMemberModal()}
+                      className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Ban className="w-3.5 h-3.5" />
+                      <span>{isAdmin ? 'Drop Member (Left School)' : 'Raise Drop Member Request'}</span>
+                    </button>
+                  </>
+                )}
                 {canInitiateSuspension && (
                   <button
                     type="button"
@@ -2381,19 +2390,21 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 ]}
               />
 
-              <button
-                onClick={() => {
-                  setDiscMemberId(students[0]?.id || '');
-                  setDiscDate(todayStr);
-                  setDiscConcern('');
-                  setDiscActionTaken('');
-                  setShowAddDisciplineModal(true);
-                }}
-                className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold cursor-pointer shadow-xs whitespace-nowrap transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Record Issue</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => {
+                    setDiscMemberId(students[0]?.id || '');
+                    setDiscDate(todayStr);
+                    setDiscConcern('');
+                    setDiscActionTaken('');
+                    setShowAddDisciplineModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold cursor-pointer shadow-xs whitespace-nowrap transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Record Issue</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -2601,13 +2612,15 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 ]}
               />
 
-              <button
-                onClick={() => openRevokePermModal()}
-                className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
-              >
-                <Award className="w-4 h-4" />
-                <span>Grant Permission</span>
-              </button>
+              {!isReadOnly && (
+                <button
+                  onClick={() => openRevokePermModal()}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                >
+                  <Award className="w-4 h-4" />
+                  <span>Grant Permission</span>
+                </button>
+              )}
 
               {canInitiateSuspension && (
                 <button
@@ -2774,10 +2787,10 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                 setProfileTab('special');
                               }}
                               className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg text-[11px] font-bold cursor-pointer flex items-center gap-1"
-                              title="Grant Permission Letter or Revoke Suspension"
+                              title={isReadOnly ? 'View Suspension & Permission History' : 'Grant Permission Letter or Revoke Suspension'}
                             >
                               <Award className="w-3.5 h-3.5 text-amber-600" />
-                              <span>Permissions</span>
+                              <span>{isReadOnly ? 'History' : 'Permissions'}</span>
                             </button>
                             <button
                               onClick={() => {
@@ -2984,13 +2997,15 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   <span>Approvals ({pendingRequestsCount})</span>
                 </button>
 
-                <button
-                  onClick={() => openDropMemberModal()}
-                  className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
-                >
-                  <Ban className="w-3.5 h-3.5" />
-                  <span>Drop Member</span>
-                </button>
+                {!isReadOnly && (
+                  <button
+                    onClick={() => openDropMemberModal()}
+                    className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                  >
+                    <Ban className="w-3.5 h-3.5" />
+                    <span>Drop Member</span>
+                  </button>
+                )}
 
                 {isAdmin && (
                   <button
@@ -3009,13 +3024,15 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   </button>
                 )}
 
-                <button
-                  onClick={openNewModal}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>{isAdmin ? 'Add Member' : 'Request Add Member'}</span>
-                </button>
+                {!isReadOnly && (
+                  <button
+                    onClick={openNewModal}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{isAdmin ? 'Add Member' : 'Request Add Member'}</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -3325,36 +3342,42 @@ export const MembersView: React.FC<MembersViewProps> = ({
                       >
                         {isStudentMember(activeProfileMember) ? 'Student' : `Staff (${activeProfileMember.memberType})`}
                       </span>
-                      <select
-                        value={activeProfileMember.transportStatus}
-                        onChange={(e) => {
-                          const nextStatus = e.target.value as StudentMember['transportStatus'];
-                          if (nextStatus === 'Suspended') {
-                            if (!canInitiateSuspension) return;
-                            openSuspendMemberModal(activeProfileMember.id);
-                            return;
-                          }
-                          if (onChangeMemberStatus) {
-                            onChangeMemberStatus(
-                              activeProfileMember.id,
-                              nextStatus,
-                              `Status changed to ${nextStatus} from Member Profile`
-                            );
-                          }
-                        }}
-                        className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-amber-300 border border-slate-700 cursor-pointer"
-                      >
-                        <option value="Active">Status: Active</option>
-                        <option value="Suspended" disabled={!canInitiateSuspension}>
-                          {canInitiateSuspension
-                            ? isAdmin
-                              ? 'Status: Suspended'
-                              : 'Status: Suspended (Request Approval)'
-                            : 'Status: Suspended (Coordinator/Admin Only)'}
-                        </option>
-                        <option value="Left">Status: Left</option>
-                        <option value="Needs Setup">Status: Needs Setup</option>
-                      </select>
+                      {isReadOnly ? (
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-amber-300 border border-slate-700">
+                          Status: {activeProfileMember.transportStatus}
+                        </span>
+                      ) : (
+                        <select
+                          value={activeProfileMember.transportStatus}
+                          onChange={(e) => {
+                            const nextStatus = e.target.value as StudentMember['transportStatus'];
+                            if (nextStatus === 'Suspended') {
+                              if (!canInitiateSuspension) return;
+                              openSuspendMemberModal(activeProfileMember.id);
+                              return;
+                            }
+                            if (onChangeMemberStatus) {
+                              onChangeMemberStatus(
+                                activeProfileMember.id,
+                                nextStatus,
+                                `Status changed to ${nextStatus} from Member Profile`
+                              );
+                            }
+                          }}
+                          className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-amber-300 border border-slate-700 cursor-pointer"
+                        >
+                          <option value="Active">Status: Active</option>
+                          <option value="Suspended" disabled={!canInitiateSuspension}>
+                            {canInitiateSuspension
+                              ? isAdmin
+                                ? 'Status: Suspended'
+                                : 'Status: Suspended (Request Approval)'
+                              : 'Status: Suspended (Coordinator/Admin Only)'}
+                          </option>
+                          <option value="Left">Status: Left</option>
+                          <option value="Needs Setup">Status: Needs Setup</option>
+                        </select>
+                      )}
                     </div>
                     <div className="text-xs text-slate-300 mt-1 flex flex-wrap items-center gap-3">
                       <span>ID: <strong className="font-mono text-amber-400">{activeProfileMember.admissionNo}</strong></span>
@@ -3385,23 +3408,25 @@ export const MembersView: React.FC<MembersViewProps> = ({
 
               {/* Quick Action Bar inside Member Profile */}
               <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-800">
-                <button
-                  onClick={() => {
-                    const id = activeProfileMember.id;
-                    setProfileMemberId(null);
-                    if (onQuickCollectFeeForMember) onQuickCollectFeeForMember(id);
-                  }}
-                  className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
-                >
-                  <IndianRupee className="w-3.5 h-3.5" />
-                  <span>Collect Fees</span>
-                </button>
+                {!isReadOnly && (
+                  <button
+                    onClick={() => {
+                      const id = activeProfileMember.id;
+                      setProfileMemberId(null);
+                      if (onQuickCollectFeeForMember) onQuickCollectFeeForMember(id);
+                    }}
+                    className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <IndianRupee className="w-3.5 h-3.5" />
+                    <span>Collect Fees</span>
+                  </button>
+                )}
                 <button
                   onClick={() => setProfileTab('followups')}
                   className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl text-xs border border-slate-700 flex items-center gap-1.5 cursor-pointer"
                 >
                   <PhoneCall className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Record Fee Follow-Up / Feedback</span>
+                  <span>{isReadOnly ? 'Fee Follow-Ups' : 'Record Fee Follow-Up / Feedback'}</span>
                 </button>
                 <button
                   onClick={() => setProfileTab('discipline')}
@@ -3549,58 +3574,60 @@ export const MembersView: React.FC<MembersViewProps> = ({
                         {' '}— Included in Outstanding &amp; collectible in Fee Collection.
                       </p>
                     </div>
-                    <form
-                      onSubmit={async e => {
-                        e.preventDefault();
-                        const amt = Number(
-                          profilePrevDuesAmt !== ''
-                            ? profilePrevDuesAmt
-                            : activeProfileMember.previousDues ?? 0
-                        );
-                        if (isNaN(amt) || amt < 0) return;
-                        setSubmitting(true);
-                        try {
-                          await api.setStudentPreviousDues(
-                            activeProfileMember.id,
-                            amt,
-                            profilePrevDuesNote || activeProfileMember.previousDuesRemarks || 'Previous Dues (Old Software)'
+                    {!isReadOnly && (
+                      <form
+                        onSubmit={async e => {
+                          e.preventDefault();
+                          const amt = Number(
+                            profilePrevDuesAmt !== ''
+                              ? profilePrevDuesAmt
+                              : activeProfileMember.previousDues ?? 0
                           );
-                          setProfilePrevDuesAmt('');
-                        } finally {
-                          setSubmitting(false);
-                        }
-                      }}
-                      className="flex flex-wrap items-end gap-2"
-                    >
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Previous Dues (₹)</label>
-                        <input
-                          type="number"
-                          min={0}
-                          placeholder={String(activeProfileMember.previousDues ?? 0)}
-                          value={profilePrevDuesAmt}
-                          onChange={e => setProfilePrevDuesAmt(e.target.value)}
-                          className="w-28 px-2.5 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Head / Remark</label>
-                        <input
-                          type="text"
-                          placeholder={activeProfileMember.previousDuesRemarks || 'Old Software Arrears'}
-                          value={profilePrevDuesNote}
-                          onChange={e => setProfilePrevDuesNote(e.target.value)}
-                          className="w-44 px-2.5 py-1.5 bg-white border border-amber-300 rounded-xl text-xs"
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        disabled={submitting}
-                        className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-xl text-xs font-bold cursor-pointer"
+                          if (isNaN(amt) || amt < 0) return;
+                          setSubmitting(true);
+                          try {
+                            await api.setStudentPreviousDues(
+                              activeProfileMember.id,
+                              amt,
+                              profilePrevDuesNote || activeProfileMember.previousDuesRemarks || 'Previous Dues (Old Software)'
+                            );
+                            setProfilePrevDuesAmt('');
+                          } finally {
+                            setSubmitting(false);
+                          }
+                        }}
+                        className="flex flex-wrap items-end gap-2"
                       >
-                        {submitting ? 'Saving...' : 'Save Previous Dues'}
-                      </button>
-                    </form>
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Previous Dues (₹)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            placeholder={String(activeProfileMember.previousDues ?? 0)}
+                            value={profilePrevDuesAmt}
+                            onChange={e => setProfilePrevDuesAmt(e.target.value)}
+                            className="w-28 px-2.5 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-700 mb-0.5">Head / Remark</label>
+                          <input
+                            type="text"
+                            placeholder={activeProfileMember.previousDuesRemarks || 'Old Software Arrears'}
+                            value={profilePrevDuesNote}
+                            onChange={e => setProfilePrevDuesNote(e.target.value)}
+                            className="w-44 px-2.5 py-1.5 bg-white border border-amber-300 rounded-xl text-xs"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={submitting}
+                          className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-xl text-xs font-bold cursor-pointer"
+                        >
+                          {submitting ? 'Saving...' : 'Save Previous Dues'}
+                        </button>
+                      </form>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between">
@@ -3690,64 +3717,66 @@ export const MembersView: React.FC<MembersViewProps> = ({
               {/* TAB: FEE FOLLOW-UPS */}
               {profileTab === 'followups' && (
                 <div className="space-y-5">
-                  <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
-                    <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-                      Log Fee Deposit Call Follow-Up / Guardian Response
-                    </h4>
-                    <form onSubmit={handleProfileFollowUpSubmit} className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Call Date *</label>
-                        <input
-                          type="date"
-                          required
-                          value={fuDate}
-                          onChange={e => setFuDate(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Person Talked To *</label>
-                        <input
-                          type="text"
-                          required
-                          placeholder="e.g. Father (Rakesh Verma)"
-                          value={fuPersonTalked}
-                          onChange={e => setFuPersonTalked(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Next Follow-Up / Promised Date *</label>
-                        <input
-                          type="date"
-                          required
-                          value={fuPromisedDate}
-                          onChange={e => setFuPromisedDate(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div className="sm:col-span-3">
-                        <label className="block font-bold text-slate-700 mb-1">Response Received *</label>
-                        <input
-                          type="text"
-                          required
-                          placeholder="What response was received from guardian/member..."
-                          value={fuResponse}
-                          onChange={e => setFuResponse(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div className="flex items-end">
-                        <button
-                          type="submit"
-                          disabled={submitting}
-                          className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl cursor-pointer"
-                        >
-                          Save Follow-Up
-                        </button>
-                      </div>
-                    </form>
-                  </div>
+                  {!isReadOnly && (
+                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
+                      <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                        Log Fee Deposit Call Follow-Up / Guardian Response
+                      </h4>
+                      <form onSubmit={handleProfileFollowUpSubmit} className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">Call Date *</label>
+                          <input
+                            type="date"
+                            required
+                            value={fuDate}
+                            onChange={e => setFuDate(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">Person Talked To *</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="e.g. Father (Rakesh Verma)"
+                            value={fuPersonTalked}
+                            onChange={e => setFuPersonTalked(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">Next Follow-Up / Promised Date *</label>
+                          <input
+                            type="date"
+                            required
+                            value={fuPromisedDate}
+                            onChange={e => setFuPromisedDate(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div className="sm:col-span-3">
+                          <label className="block font-bold text-slate-700 mb-1">Response Received *</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="What response was received from guardian/member..."
+                            value={fuResponse}
+                            onChange={e => setFuResponse(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div className="flex items-end">
+                          <button
+                            type="submit"
+                            disabled={submitting}
+                            className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl cursor-pointer"
+                          >
+                            Save Follow-Up
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  )}
 
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
                     <table className="w-full text-left border-collapse text-xs">
@@ -3809,54 +3838,56 @@ export const MembersView: React.FC<MembersViewProps> = ({
               {/* TAB: DISCIPLINE & BEHAVIOUR */}
               {profileTab === 'discipline' && (
                 <div className="space-y-5">
-                  <div className="bg-rose-50/70 p-4 rounded-2xl border border-rose-200 space-y-3">
-                    <h4 className="text-xs font-bold text-rose-950 uppercase tracking-wider">
-                      Record Transit Mischief / Behaviour &amp; Discipline Irregularity
-                    </h4>
-                    <form onSubmit={handleProfileDisciplineSubmit} className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Incident Date *</label>
-                        <input
-                          type="date"
-                          required
-                          value={discDate}
-                          onChange={e => setDiscDate(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div className="sm:col-span-2">
-                        <label className="block font-bold text-slate-700 mb-1">Mischief / Concern *</label>
-                        <input
-                          type="text"
-                          required
-                          placeholder="Describe mischief or concern during transit..."
-                          value={discConcern}
-                          onChange={e => setDiscConcern(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div className="sm:col-span-2">
-                        <label className="block font-bold text-slate-700 mb-1">Action Taken *</label>
-                        <input
-                          type="text"
-                          required
-                          placeholder="Warning issued, guardian informed, seat reassigned..."
-                          value={discActionTaken}
-                          onChange={e => setDiscActionTaken(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div className="flex items-end">
-                        <button
-                          type="submit"
-                          disabled={submitting}
-                          className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl cursor-pointer"
-                        >
-                          Save Discipline Record
-                        </button>
-                      </div>
-                    </form>
-                  </div>
+                  {!isReadOnly && (
+                    <div className="bg-rose-50/70 p-4 rounded-2xl border border-rose-200 space-y-3">
+                      <h4 className="text-xs font-bold text-rose-950 uppercase tracking-wider">
+                        Record Transit Mischief / Behaviour &amp; Discipline Irregularity
+                      </h4>
+                      <form onSubmit={handleProfileDisciplineSubmit} className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">Incident Date *</label>
+                          <input
+                            type="date"
+                            required
+                            value={discDate}
+                            onChange={e => setDiscDate(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold text-slate-700 mb-1">Mischief / Concern *</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Describe mischief or concern during transit..."
+                            value={discConcern}
+                            onChange={e => setDiscConcern(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold text-slate-700 mb-1">Action Taken *</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Warning issued, guardian informed, seat reassigned..."
+                            value={discActionTaken}
+                            onChange={e => setDiscActionTaken(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div className="flex items-end">
+                          <button
+                            type="submit"
+                            disabled={submitting}
+                            className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl cursor-pointer"
+                          >
+                            Save Discipline Record
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  )}
 
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
                     <table className="w-full text-left border-collapse text-xs">
@@ -3951,78 +3982,80 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   </div>
 
                   {/* Inline Form to Log Complaint / Feedback for this Member */}
-                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                    <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
-                      <MessageSquareWarning className="w-4 h-4 text-amber-500" />
-                      <span>
-                        Log New Complaint or Feedback for {activeProfileMember.name} (Linked to Route{' '}
-                        {activeProfileMember.routeCode})
-                      </span>
-                    </h4>
-                    <form
-                      onSubmit={e => handleSubmitComplaintForm(e, activeProfileMember)}
-                      className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs"
-                    >
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Date *</label>
-                        <input
-                          type="date"
-                          value={compDate}
-                          max={!isAdmin ? todayStr : undefined}
-                          onChange={e => setCompDate(e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white font-semibold"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Seriousness *</label>
-                        <select
-                          value={compSeriousness}
-                          onChange={e =>
-                            setCompSeriousness(e.target.value as ComplaintSeriousness)
-                          }
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white font-bold"
-                        >
-                          <option value="Urgent">Urgent</option>
-                          <option value="General">General</option>
-                          <option value="Feedback">Feedback</option>
-                        </select>
-                      </div>
-                      <div className="sm:col-span-2">
-                        <label className="block font-bold text-slate-700 mb-1">
-                          Action Taken / Resolution (Optional)
-                        </label>
-                        <input
-                          type="text"
-                          value={compActionTaken}
-                          onChange={e => setCompActionTaken(e.target.value)}
-                          placeholder="Leave blank if Pending action..."
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white"
-                        />
-                      </div>
-                      <div className="sm:col-span-3">
-                        <label className="block font-bold text-slate-700 mb-1">
-                          Words of Member / Parent (Exact Statement) *
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          value={compWordsOfMember}
-                          onChange={e => setCompWordsOfMember(e.target.value)}
-                          placeholder="Write verbatim grievance or feedback received from member/parent..."
-                          className="w-full p-2 border border-slate-300 rounded-xl bg-white font-medium"
-                        />
-                      </div>
-                      <div className="flex items-end">
-                        <button
-                          type="submit"
-                          disabled={submitting}
-                          className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold rounded-xl cursor-pointer"
-                        >
-                          {submitting ? 'Saving...' : '+ Add Record'}
-                        </button>
-                      </div>
-                    </form>
-                  </div>
+                  {!isReadOnly && (
+                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                        <MessageSquareWarning className="w-4 h-4 text-amber-500" />
+                        <span>
+                          Log New Complaint or Feedback for {activeProfileMember.name} (Linked to Route{' '}
+                          {activeProfileMember.routeCode})
+                        </span>
+                      </h4>
+                      <form
+                        onSubmit={e => handleSubmitComplaintForm(e, activeProfileMember)}
+                        className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs"
+                      >
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">Date *</label>
+                          <input
+                            type="date"
+                            value={compDate}
+                            max={!isAdmin ? todayStr : undefined}
+                            onChange={e => setCompDate(e.target.value)}
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white font-semibold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">Seriousness *</label>
+                          <select
+                            value={compSeriousness}
+                            onChange={e =>
+                              setCompSeriousness(e.target.value as ComplaintSeriousness)
+                            }
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white font-bold"
+                          >
+                            <option value="Urgent">Urgent</option>
+                            <option value="General">General</option>
+                            <option value="Feedback">Feedback</option>
+                          </select>
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold text-slate-700 mb-1">
+                            Action Taken / Resolution (Optional)
+                          </label>
+                          <input
+                            type="text"
+                            value={compActionTaken}
+                            onChange={e => setCompActionTaken(e.target.value)}
+                            placeholder="Leave blank if Pending action..."
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white"
+                          />
+                        </div>
+                        <div className="sm:col-span-3">
+                          <label className="block font-bold text-slate-700 mb-1">
+                            Words of Member / Parent (Exact Statement) *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={compWordsOfMember}
+                            onChange={e => setCompWordsOfMember(e.target.value)}
+                            placeholder="Write verbatim grievance or feedback received from member/parent..."
+                            className="w-full p-2 border border-slate-300 rounded-xl bg-white font-medium"
+                          />
+                        </div>
+                        <div className="flex items-end">
+                          <button
+                            type="submit"
+                            disabled={submitting}
+                            className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-amber-400 font-bold rounded-xl cursor-pointer"
+                          >
+                            {submitting ? 'Saving...' : '+ Add Record'}
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  )}
 
                   {/* Chronological History Table */}
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
@@ -4079,16 +4112,20 @@ export const MembersView: React.FC<MembersViewProps> = ({
                               </span>
                             </td>
                             <td className="py-2.5 px-3 text-right">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setResolveComplaintTarget(c);
-                                  setResolveActionNotes(c.actionTaken || '');
-                                }}
-                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
-                              >
-                                {c.status === 'Resolved' ? 'Edit Note' : 'Resolve'}
-                              </button>
+                              {!isReadOnly ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setResolveComplaintTarget(c);
+                                    setResolveActionNotes(c.actionTaken || '');
+                                  }}
+                                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                                >
+                                  {c.status === 'Resolved' ? 'Edit Note' : 'Resolve'}
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-slate-400">View-Only</span>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -4340,34 +4377,36 @@ export const MembersView: React.FC<MembersViewProps> = ({
               {/* TAB 4: DOCUMENTS */}
               {profileTab === 'documents' && (
                 <div className="space-y-4">
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-900">Upload Document</h4>
+                  {!isReadOnly && (
+                    <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900">Upload Document</h4>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={newDocType}
+                          onChange={e => setNewDocType(e.target.value as DocumentAttachment['type'])}
+                          className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold"
+                        >
+                          <option value="School ID Card">School ID Card (Student)</option>
+                          <option value="Aadhaar Card">Aadhaar Card</option>
+                          <option value="PAN Card">PAN Card</option>
+                          <option value="Permission Letter">Permission Letter</option>
+                          <option value="Other">Other Document</option>
+                        </select>
+                        <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                          <Upload className="w-3.5 h-3.5 text-amber-400" />
+                          <span>{uploadingDoc ? 'Uploading...' : 'Attach File'}</span>
+                          <input
+                            type="file"
+                            accept="image/*,.pdf"
+                            onChange={handleProfileDocumentUpload}
+                            className="hidden"
+                          />
+                        </label>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={newDocType}
-                        onChange={e => setNewDocType(e.target.value as DocumentAttachment['type'])}
-                        className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold"
-                      >
-                        <option value="School ID Card">School ID Card (Student)</option>
-                        <option value="Aadhaar Card">Aadhaar Card</option>
-                        <option value="PAN Card">PAN Card</option>
-                        <option value="Permission Letter">Permission Letter</option>
-                        <option value="Other">Other Document</option>
-                      </select>
-                      <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold cursor-pointer">
-                        <Upload className="w-3.5 h-3.5 text-amber-400" />
-                        <span>{uploadingDoc ? 'Uploading...' : 'Attach File'}</span>
-                        <input
-                          type="file"
-                          accept="image/*,.pdf"
-                          onChange={handleProfileDocumentUpload}
-                          className="hidden"
-                        />
-                      </label>
-                    </div>
-                  </div>
+                  )}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {(activeProfileMember.documents || []).map(doc => (
@@ -4424,84 +4463,86 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     </div>
                   )}
 
-                  <div className="p-5 rounded-2xl bg-amber-50/70 border border-amber-200 space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-900">
-                          Allow Transport Facility with Permission Letter
-                        </h4>
+                  {!isReadOnly && (
+                    <div className="p-5 rounded-2xl bg-amber-50/70 border border-amber-200 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <h4 className="text-sm font-bold text-slate-900">
+                            Allow Transport Facility with Permission Letter
+                          </h4>
+                        </div>
+                        {activeProfileMember.transportStatus === 'Suspended' && (
+                          <button
+                            onClick={() => onReactivateStudent(activeProfileMember.id, 'Full overdue balance cleared')}
+                            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shrink-0 cursor-pointer"
+                          >
+                            Revoke Suspension (Dues Cleared)
+                          </button>
+                        )}
                       </div>
-                      {activeProfileMember.transportStatus === 'Suspended' && (
-                        <button
-                          onClick={() => onReactivateStudent(activeProfileMember.id, 'Full overdue balance cleared')}
-                          className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shrink-0 cursor-pointer"
-                        >
-                          Revoke Suspension (Dues Cleared)
-                        </button>
-                      )}
-                    </div>
 
-                    <form onSubmit={handleGrantPermissionSubmit} className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-                      <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">
-                          Stipulated Allowed-Until Date *
-                        </label>
-                        <input
-                          type="date"
-                          required
-                          value={permUntilDate}
-                          onChange={e => setPermUntilDate(e.target.value)}
-                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">Approved By *</label>
-                        <input
-                          type="text"
-                          required
-                          value={permApprovedBy}
-                          onChange={e => setPermApprovedBy(e.target.value)}
-                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">
-                          Attach Permission Letter (Compulsory) *
-                        </label>
-                        <label className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-900 text-white rounded-xl text-xs font-semibold cursor-pointer hover:bg-slate-800">
-                          <Upload className="w-3.5 h-3.5 text-amber-400" />
-                          <span className="truncate">
-                            {permFileName ? permFileName : 'Upload Signed Letter'}
-                          </span>
+                      <form onSubmit={handleGrantPermissionSubmit} className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1">
+                            Stipulated Allowed-Until Date *
+                          </label>
                           <input
-                            type="file"
-                            accept="image/*,.pdf"
-                            onChange={handlePermFileUpload}
-                            className="hidden"
+                            type="date"
+                            required
+                            value={permUntilDate}
+                            onChange={e => setPermUntilDate(e.target.value)}
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                           />
-                        </label>
-                      </div>
-                      <div className="sm:col-span-2">
-                        <input
-                          type="text"
-                          required
-                          value={permReason}
-                          onChange={e => setPermReason(e.target.value)}
-                          placeholder="Reason / Economic difficulty details..."
-                          className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                        />
-                      </div>
-                      <div>
-                        <button
-                          type="submit"
-                          disabled={submitting}
-                          className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer shadow-xs"
-                        >
-                          {submitting ? 'Saving...' : 'Grant Permission & Allow Transport'}
-                        </button>
-                      </div>
-                    </form>
-                  </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1">Approved By *</label>
+                          <input
+                            type="text"
+                            required
+                            value={permApprovedBy}
+                            onChange={e => setPermApprovedBy(e.target.value)}
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1">
+                            Attach Permission Letter (Compulsory) *
+                          </label>
+                          <label className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-900 text-white rounded-xl text-xs font-semibold cursor-pointer hover:bg-slate-800">
+                            <Upload className="w-3.5 h-3.5 text-amber-400" />
+                            <span className="truncate">
+                              {permFileName ? permFileName : 'Upload Signed Letter'}
+                            </span>
+                            <input
+                              type="file"
+                              accept="image/*,.pdf"
+                              onChange={handlePermFileUpload}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                        <div className="sm:col-span-2">
+                          <input
+                            type="text"
+                            required
+                            value={permReason}
+                            onChange={e => setPermReason(e.target.value)}
+                            placeholder="Reason / Economic difficulty details..."
+                            className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                          />
+                        </div>
+                        <div>
+                          <button
+                            type="submit"
+                            disabled={submitting}
+                            className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs cursor-pointer shadow-xs"
+                          >
+                            {submitting ? 'Saving...' : 'Grant Permission & Allow Transport'}
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  )}
 
                   {/* Pending Suspension Request Banner inside Special Tab */}
                   {activeProfileMember.pendingSuspensionRequest?.status === 'Pending Approval' && (
@@ -4540,7 +4581,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     </div>
                   )}
 
-                  {activeProfileMember.transportStatus === 'Active' && onSuspendStudent && (
+                  {!isReadOnly && activeProfileMember.transportStatus === 'Active' && onSuspendStudent && (
                     canInitiateSuspension ? (
                       <div className="p-4 rounded-xl bg-rose-50/70 border border-rose-200 space-y-2.5">
                         <div className="flex items-center justify-between">
