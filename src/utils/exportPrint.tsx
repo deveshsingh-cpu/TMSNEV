@@ -188,6 +188,9 @@ export function openHtmlPrintPreview(
         html: string;
         filename?: string;
         autoPrint?: boolean;
+        onSavePdf?: () => void;
+        printButtonLabel?: string;
+        pdfButtonLabel?: string;
       }
     | string,
   legacySecondArg?: string
@@ -197,6 +200,9 @@ export function openHtmlPrintPreview(
   let html = '';
   let filename: string | undefined;
   let autoPrint = false;
+  let onSavePdf: (() => void) | undefined;
+  let printButtonLabel = '🖨️ Print Document';
+  let pdfButtonLabel = '📄 Save as PDF';
 
   if (typeof optionsOrHtml === 'string') {
     const firstLooksLikeHtml = /<[a-z][\s\S]*>/i.test(optionsOrHtml);
@@ -214,6 +220,9 @@ export function openHtmlPrintPreview(
     html = optionsOrHtml.html || '';
     filename = optionsOrHtml.filename;
     autoPrint = Boolean(optionsOrHtml.autoPrint);
+    onSavePdf = optionsOrHtml.onSavePdf;
+    if (optionsOrHtml.printButtonLabel) printButtonLabel = optionsOrHtml.printButtonLabel;
+    if (optionsOrHtml.pdfButtonLabel) pdfButtonLabel = optionsOrHtml.pdfButtonLabel;
   }
 
   const fullHtml = /<html[\s>]/i.test(html)
@@ -332,7 +341,7 @@ export function openHtmlPrintPreview(
   }
 
   const btnGroup = document.createElement('div');
-  btnGroup.style.cssText = 'display:flex;align-items:center;gap:8px;';
+  btnGroup.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
 
   const printForm = document.createElement('form');
   printForm.method = 'POST';
@@ -357,9 +366,9 @@ export function openHtmlPrintPreview(
 
   const printNowBtn = document.createElement('button');
   printNowBtn.type = 'submit';
-  printNowBtn.textContent = '🖨️ Print Document';
+  printNowBtn.textContent = printButtonLabel;
   printNowBtn.style.cssText =
-    'background:#0f172a;color:#ffffff;border:none;padding:9px 18px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.1);';
+    'background:#0f172a;color:#ffffff;border:none;padding:9px 16px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.1);';
 
   printForm.appendChild(titleInput);
   printForm.appendChild(subtitleInput);
@@ -386,6 +395,18 @@ export function openHtmlPrintPreview(
       }
     }
   };
+
+  let savePdfBtn: HTMLButtonElement | null = null;
+  if (onSavePdf) {
+    savePdfBtn = document.createElement('button');
+    savePdfBtn.type = 'button';
+    savePdfBtn.textContent = pdfButtonLabel;
+    savePdfBtn.style.cssText =
+      'background:#dc2626;color:#ffffff;border:none;padding:9px 16px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.12);';
+    savePdfBtn.onclick = () => {
+      onSavePdf?.();
+    };
+  }
 
   const downloadHtmlBtn = document.createElement('button');
   downloadHtmlBtn.type = 'button';
@@ -429,6 +450,7 @@ export function openHtmlPrintPreview(
   };
 
   btnGroup.appendChild(printForm);
+  if (savePdfBtn) btnGroup.appendChild(savePdfBtn);
   btnGroup.appendChild(downloadHtmlBtn);
   btnGroup.appendChild(closeBtn);
   topBar.appendChild(leftInfo);

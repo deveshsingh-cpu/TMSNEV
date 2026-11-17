@@ -1524,6 +1524,24 @@ export function App() {
     return res;
   };
 
+  const handleIssueWarningLettersBulk = async (entries: Partial<WarningLetter>[]) => {
+    const res = await api.issueWarningLettersBulk(entries);
+    await loadAllData();
+    return res;
+  };
+
+  const handleDeleteWarningLetter = async (id: string) => {
+    const res = await api.deleteWarningLetter(id);
+    await loadAllData();
+    return res;
+  };
+
+  const handleClearAllWarningLetters = async () => {
+    const res = await api.clearAllWarningLetters();
+    await loadAllData();
+    return res;
+  };
+
   const handleEvaluateSuspensions = async (threshold: number) => {
     const res = await api.evaluateSuspensions(threshold, activeRole);
     await loadAllData();
@@ -2293,6 +2311,9 @@ export function App() {
                   onAddFollowUp={isPrincipal ? undefined : handleAddFeeFollowUp}
                   onDeleteFollowUp={isPrincipal ? undefined : handleDeleteFeeFollowUp}
                   onIssueWarningLetter={isPrincipal ? undefined : handleIssueWarningLetter}
+                  onIssueWarningLettersBulk={isPrincipal ? undefined : handleIssueWarningLettersBulk}
+                  onDeleteWarningLetter={isAdmin ? handleDeleteWarningLetter : undefined}
+                  onClearAllWarningLetters={isAdmin ? handleClearAllWarningLetters : undefined}
                   onEvaluateSuspensions={handleEvaluateSuspensions}
                   onSuspendStudent={isPrincipal ? undefined : handleSuspendStudent}
                   onPrintReceipt={() => window.print()}

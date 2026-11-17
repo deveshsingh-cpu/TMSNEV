@@ -1306,8 +1306,12 @@ export class SheetsDatabaseManager {
       if ((tabMap.get('Warning_Letters') || []).length >= 1) {
         const remote = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
         this.warningLetters = keepRecentLocalLedgers
-          ? this.unionPermanentRecords(this.warningLetters, remote)
-          : remote;
+          ? this.unionPermanentRecords(this.warningLetters, remote, wl => wl.letterNo)
+          : remote.filter(
+              wl =>
+                !this.explicitlyDeletedIds.has(wl.id) &&
+                (!wl.letterNo || !this.explicitlyDeletedIds.has(wl.letterNo))
+            );
       }
       if ((tabMap.get('Discipline_Records') || []).length >= 1) {
         const remote = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
@@ -1343,6 +1347,8 @@ export class SheetsDatabaseManager {
             this.flushToGoogleSheetsRemote([
               'School_Masters',
               'System_Users',
+              'Expense_Heads',
+              'Warning_Letters',
               'Fee_Receipts',
               'Fee_Invoices',
               'Members_Transport',
@@ -1922,7 +1928,7 @@ export class SheetsDatabaseManager {
       }
       if (remoteMap.has('Warning_Letters')) {
         const remoteWl = this.parseRowsFromSheet<WarningLetter>(remoteMap.get('Warning_Letters'), true);
-        this.warningLetters = this.unionPermanentRecords(this.warningLetters, remoteWl);
+        this.warningLetters = this.unionPermanentRecords(this.warningLetters, remoteWl, wl => wl.letterNo);
       }
 
       if (feesMerged) {
@@ -9723,6 +9729,22 @@ export class SheetsDatabaseManager {
       changed = true;
     }
 
+    if (this.normalizeExpenseHeadsOrder()) {
+      changed = true;
+    }
+
+    if (!(this.config as any).clearedTrialWarningLetters20261117) {
+      if (this.warningLetters.length > 0) {
+        for (const wl of this.warningLetters) {
+          if (wl?.id) this.explicitlyDeletedIds.add(String(wl.id).trim());
+          if (wl?.letterNo) this.explicitlyDeletedIds.add(String(wl.letterNo).trim());
+        }
+        this.warningLetters = [];
+      }
+      (this.config as any).clearedTrialWarningLetters20261117 = true;
+      changed = true;
+    }
+
     if (changed) {
       this.rebuildScheduledServices();
       this.saveLocalSnapshot();
@@ -11045,7 +11067,38 @@ export class SheetsDatabaseManager {
   }
 
   // --- Dynamic Expense Heads & Income Heads & Other Incomes ---
+  private getExpenseHeadSortBucket(head: ExpenseHead): number {
+    const name = String(head?.name || '').trim().toLowerCase();
+    if (head?.id === 'eh-1' || /^fuel\b/.test(name) || name.includes('fuel (diesel')) {
+      return 0; // Always top
+    }
+    if (
+      name.includes('rental due to breakdown') ||
+      (name.includes('rental') && name.includes('breakdown'))
+    ) {
+      return 2; // Always last
+    }
+    return 1;
+  }
+
+  private normalizeExpenseHeadsOrder(): boolean {
+    if (!Array.isArray(this.expenseHeads) || this.expenseHeads.length <= 1) return false;
+    const indexed = this.expenseHeads.map((head, idx) => ({
+      head,
+      idx,
+      bucket: this.getExpenseHeadSortBucket(head),
+    }));
+    indexed.sort((a, b) => (a.bucket !== b.bucket ? a.bucket - b.bucket : a.idx - b.idx));
+    const sorted = indexed.map(item => item.head);
+    const reordered = sorted.some((h, i) => h.id !== this.expenseHeads[i]?.id);
+    if (reordered) {
+      this.expenseHeads = sorted;
+    }
+    return reordered;
+  }
+
   public getExpenseHeads() {
+    this.normalizeExpenseHeadsOrder();
     return this.expenseHeads;
   }
 
@@ -11068,6 +11121,7 @@ export class SheetsDatabaseManager {
           if (data.requiresApproval !== undefined) {
             existingById.requiresApproval = !!data.requiresApproval;
           }
+          this.normalizeExpenseHeadsOrder();
           let renamedLinkedExpenses = false;
           if (prevName && prevName !== trimmed) {
             for (const exp of this.expenses) {
@@ -11095,6 +11149,7 @@ export class SheetsDatabaseManager {
       if (existing) {
         if (data.category) existing.category = data.category;
         if (data.requiresApproval !== undefined) existing.requiresApproval = !!data.requiresApproval;
+        this.normalizeExpenseHeadsOrder();
         await this.internalSyncToGoogleSheets(false, ['Expense_Heads']);
         return existing;
       }
@@ -11106,7 +11161,8 @@ export class SheetsDatabaseManager {
         requiresApproval: !!data.requiresApproval,
         createdAt: new Date().toISOString().split('T')[0],
       };
-      this.expenseHeads.unshift(head);
+      this.expenseHeads.push(head);
+      this.normalizeExpenseHeadsOrder();
       await this.internalSyncToGoogleSheets(false, ['Expense_Heads']);
       return head;
     });
@@ -11837,32 +11893,125 @@ export class SheetsDatabaseManager {
     });
   }
 
+  private getDefault30thOfMonthDate(refDateStr?: string): string {
+    const baseYm =
+      refDateStr && /^\d{4}-\d{2}/.test(refDateStr)
+        ? refDateStr.slice(0, 7)
+        : new Date().toISOString().slice(0, 7);
+    const [yrStr, moStr] = baseYm.split('-');
+    const lastDay = new Date(Number(yrStr), Number(moStr), 0).getDate();
+    const day = Math.min(30, lastDay);
+    return `${yrStr}-${moStr}-${String(day).padStart(2, '0')}`;
+  }
+
+  private getNextWarningLetterSeq(year: number): number {
+    let maxSeq = 0;
+    const prefix = `WL-${year}-`;
+    for (const wl of this.warningLetters) {
+      const no = String(wl.letterNo || '').trim();
+      if (no.startsWith(prefix)) {
+        const parsed = parseInt(no.slice(prefix.length), 10);
+        if (!isNaN(parsed) && parsed > maxSeq) maxSeq = parsed;
+      }
+    }
+    return maxSeq + 1;
+  }
+
+  private buildWarningLetterObject(
+    data: Partial<WarningLetter>,
+    seq: number,
+    indexOffset = 0
+  ): WarningLetter {
+    const student = this.students.find(s => s.id === data.studentId);
+    const today = new Date().toISOString().split('T')[0];
+    const default30th = this.getDefault30thOfMonthDate(data.issueDate || data.date || today);
+    const year = Number((data.issueDate || data.date || today).slice(0, 4)) || new Date().getFullYear();
+    const baseOverdue = Math.max(
+      0,
+      Number(data.baseOverdueAmount ?? student?.balanceDue ?? data.overdueAmount ?? 0)
+    );
+    const lateFine = Math.max(0, Number(data.lateFineAmount ?? 0));
+    const totalPayable =
+      data.totalPayableAmount !== undefined
+        ? Math.max(0, Number(data.totalPayableAmount))
+        : data.overdueAmount !== undefined
+        ? Math.max(0, Number(data.overdueAmount))
+        : baseOverdue + lateFine;
+
+    return {
+      id: `wl-${Date.now()}-${indexOffset}`,
+      letterNo: data.letterNo || `WL-${year}-${String(seq).padStart(3, '0')}`,
+      date: data.date || today,
+      issueDate: data.issueDate || data.date || today,
+      studentId: student?.id || data.studentId || '',
+      studentName: student?.name || data.studentName || '',
+      admissionNo: student?.admissionNo || data.admissionNo || '',
+      campus: data.campus || (student?.campus as any),
+      parentName: data.parentName || student?.fatherName || 'Parent',
+      fatherName: data.fatherName || student?.fatherName || 'Parent',
+      address: data.address || student?.address || '',
+      overdueAmount: totalPayable,
+      baseOverdueAmount: baseOverdue,
+      lateFineAmount: lateFine,
+      totalPayableAmount: totalPayable,
+      periodOverdue: data.periodOverdue || 'Pending Transport Dues',
+      deadlineDate: data.deadlineDate || default30th,
+      proposedSuspensionDate: data.proposedSuspensionDate || data.deadlineDate || default30th,
+      warningLevel: data.warningLevel || 'Level 2: Urgent Notice',
+      sentVia: data.sentVia || 'Printed Slip',
+      issuedBy: data.issuedBy || 'Admin',
+    };
+  }
+
   public async issueWarningLetter(data: Partial<WarningLetter>): Promise<WarningLetter> {
     return this.enqueueWrite(async () => {
-      const student = this.students.find(s => s.id === data.studentId);
-      const today = new Date().toISOString().split('T')[0];
-      const wl: WarningLetter = {
-        id: `wl-${Date.now()}`,
-        letterNo: data.letterNo || `WL-${new Date().getFullYear()}-${(this.warningLetters.length + 1).toString().padStart(3, '0')}`,
-        date: data.date || today,
-        issueDate: data.issueDate || today,
-        studentId: student?.id || data.studentId || '',
-        studentName: student?.name || data.studentName || '',
-        admissionNo: student?.admissionNo || data.admissionNo || '',
-        parentName: data.parentName || student?.fatherName || 'Parent',
-        fatherName: data.fatherName || student?.fatherName || 'Parent',
-        address: data.address || student?.address || '',
-        overdueAmount: Number(data.overdueAmount ?? student?.balanceDue ?? 0),
-        periodOverdue: data.periodOverdue || 'Pending Transport Dues',
-        deadlineDate: data.deadlineDate || today,
-        proposedSuspensionDate: data.proposedSuspensionDate || today,
-        warningLevel: data.warningLevel || 'Level 2: Urgent Notice',
-        sentVia: data.sentVia || 'Printed Slip',
-        issuedBy: data.issuedBy || 'Admin',
-      };
+      const year = new Date().getFullYear();
+      const nextSeq = this.getNextWarningLetterSeq(year);
+      const wl = this.buildWarningLetterObject(data, nextSeq, 0);
       this.warningLetters.unshift(wl);
-      await this.internalSyncToGoogleSheets();
+      await this.internalSyncToGoogleSheets(false, ['Warning_Letters']);
       return wl;
+    });
+  }
+
+  public async issueWarningLettersBulk(entries: Partial<WarningLetter>[]): Promise<WarningLetter[]> {
+    return this.enqueueWrite(async () => {
+      if (!Array.isArray(entries) || entries.length === 0) return [];
+      const year = new Date().getFullYear();
+      let seq = this.getNextWarningLetterSeq(year);
+      const created: WarningLetter[] = [];
+      for (let i = 0; i < entries.length; i++) {
+        const wl = this.buildWarningLetterObject(entries[i], seq++, i);
+        created.push(wl);
+      }
+      // Prepend in reverse order so the latest sequential letter sits at the top of history
+      this.warningLetters = [...created.slice().reverse(), ...this.warningLetters];
+      await this.internalSyncToGoogleSheets(false, ['Warning_Letters']);
+      return created;
+    });
+  }
+
+  public async deleteWarningLetter(id: string) {
+    return this.enqueueWrite(async () => {
+      const target = this.warningLetters.find(w => w.id === id);
+      if (id) this.explicitlyDeletedIds.add(String(id).trim());
+      if (target?.letterNo) this.explicitlyDeletedIds.add(String(target.letterNo).trim());
+      this.warningLetters = this.warningLetters.filter(w => w.id !== id);
+      await this.internalSyncToGoogleSheets(false, ['Warning_Letters', 'School_Masters']);
+      return { success: true };
+    });
+  }
+
+  public async clearAllWarningLetters() {
+    return this.enqueueWrite(async () => {
+      const removedCount = this.warningLetters.length;
+      for (const wl of this.warningLetters) {
+        if (wl?.id) this.explicitlyDeletedIds.add(String(wl.id).trim());
+        if (wl?.letterNo) this.explicitlyDeletedIds.add(String(wl.letterNo).trim());
+      }
+      this.warningLetters = [];
+      await this.internalSyncToGoogleSheets(false, ['Warning_Letters', 'School_Masters']);
+      return { success: true, removedCount };
     });
   }
 

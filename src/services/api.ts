@@ -1130,6 +1130,34 @@ export const api = {
     }
     return res.json();
   },
+  issueWarningLettersBulk: async (entries: Partial<WarningLetter>[]): Promise<WarningLetter[]> => {
+    const res = await fetch('/api/warning-letters/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to bulk issue warning letters');
+    }
+    return res.json();
+  },
+  deleteWarningLetter: async (id: string) => {
+    const res = await fetch(`/api/warning-letters/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to delete warning letter');
+    }
+    return res.json();
+  },
+  clearAllWarningLetters: async () => {
+    const res = await fetch('/api/warning-letters/all', { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to clear warning letters');
+    }
+    return res.json();
+  },
   evaluateSuspensions: async (thresholdAmount: number, triggeredBy: string) => {
     const res = await fetch('/api/recovery/evaluate-suspensions', {
       method: 'POST',

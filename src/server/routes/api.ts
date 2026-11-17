@@ -921,6 +921,41 @@ apiRouter.post('/warning-letters', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.post('/warning-letters/bulk', async (req: Request, res: Response) => {
+  try {
+    const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
+    const created = await sheetsDb.issueWarningLettersBulk(entries);
+    res.json(created);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.delete('/warning-letters/all', async (req: Request, res: Response) => {
+  try {
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+    if (callerRole !== 'Admin') {
+      res.status(403).json({ error: 'Access Denied: Only Admin can clear warning letter history.' });
+      return;
+    }
+    const result = await sheetsDb.clearAllWarningLetters();
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+apiRouter.delete('/warning-letters/:id', async (req: Request, res: Response) => {
+  try {
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim();
+    if (callerRole !== 'Admin') {
+      res.status(403).json({ error: 'Access Denied: Only Admin can delete issued warning letters.' });
+      return;
+    }
+    const result = await sheetsDb.deleteWarningLetter(req.params.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 apiRouter.post('/recovery/evaluate-suspensions', async (req: Request, res: Response) => {
   try {

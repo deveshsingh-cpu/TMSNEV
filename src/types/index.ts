@@ -836,6 +836,9 @@ export interface WarningLetter {
   campus?: CampusId;
   parentName: string;
   overdueAmount: number;
+  baseOverdueAmount?: number;
+  lateFineAmount?: number;
+  totalPayableAmount?: number;
   deadlineDate: string;
   warningLevel: 'Level 1: Polite Reminder' | 'Level 2: Urgent Notice' | 'Level 3: Final Suspension Warning';
   sentVia: 'SMS' | 'WhatsApp' | 'Registered Letter' | 'Printed Slip';

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { jsPDF } from 'jspdf';
 import {
   CreditCard, IndianRupee, Printer, CheckCircle,
-  AlertTriangle, Phone, FileText,
+  AlertTriangle, Phone, FileText, Download,
   Calendar, Search, ShieldCheck, UserX, Plus, X, Upload, Eye, Trash2, Lock,
   BarChart3, PhoneCall, MessageSquare, Layers
 } from 'lucide-react';
@@ -50,6 +51,9 @@ interface FeesViewProps {
   onAddFollowUp?: (data: Partial<FollowUpRecord>) => Promise<any>;
   onDeleteFollowUp?: (id: string) => Promise<any>;
   onIssueWarningLetter?: (data: Partial<WarningLetter>) => Promise<any>;
+  onIssueWarningLettersBulk?: (entries: Partial<WarningLetter>[]) => Promise<WarningLetter[]>;
+  onDeleteWarningLetter?: (id: string) => Promise<any>;
+  onClearAllWarningLetters?: () => Promise<any>;
   onEvaluateSuspensions: (threshold: number) => Promise<{ suspendedCount: number; affectedStudents: string[] }>;
   onSuspendStudent?: (studentId: string, reason: string) => Promise<any>;
   onPrintReceipt: (receipt: FeeReceipt) => void;
@@ -81,6 +85,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
   onAddFollowUp,
   onDeleteFollowUp,
   onIssueWarningLetter,
+  onIssueWarningLettersBulk,
+  onDeleteWarningLetter,
+  onClearAllWarningLetters,
   onEvaluateSuspensions,
   onSuspendStudent,
   onPrintReceipt,
@@ -680,6 +687,55 @@ export const FeesView: React.FC<FeesViewProps> = ({
     }
   }, [folStudentId, scopedStudents.length, selectedCampus]);
 
+  // Default Deposit Date = 30th of Current Month (safely clamped to last day for February)
+  const getDefault30thOfCurrentMonth = (refDateStr?: string): string => {
+    const baseYm =
+      refDateStr && /^\d{4}-\d{2}/.test(refDateStr)
+        ? refDateStr.slice(0, 7)
+        : todayStr.slice(0, 7);
+    const [yrStr, moStr] = baseYm.split('-');
+    const lastDay = new Date(Number(yrStr), Number(moStr), 0).getDate();
+    const targetDay = Math.min(30, lastDay);
+    return `${yrStr}-${moStr}-${String(targetDay).padStart(2, '0')}`;
+  };
+
+  const formatLetterDateDisplay = (isoDate: string): string => {
+    if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate || '30th of Month';
+    const [yyyy, mm, dd] = isoDate.split('-');
+    return `${dd}-${mm}-${yyyy}`;
+  };
+
+  const getApplicableLateFineForMember = (
+    member: StudentMember,
+    issueDateStr: string = todayStr
+  ): number => {
+    if ((Number(member.balanceDue) || 0) <= 0) return 0;
+    const issueDay = Number((issueDateStr || todayStr).split('-')[2] || 1);
+    if (issueDay > 10) return 100;
+    const currentYm = (issueDateStr || todayStr).slice(0, 7);
+    const hasPastOverdueInvoice = invoices.some(
+      (i) =>
+        (i.studentId === member.id || i.admissionNo === member.admissionNo) &&
+        i.balanceDue > 0 &&
+        ((i.dueDate && i.dueDate < issueDateStr) || (i.month && i.month < currentYm))
+    );
+    return hasPastOverdueInvoice ? 100 : 0;
+  };
+
+  const letterFilterSectionRef = useRef<HTMLDivElement | null>(null);
+  const [letterMinDuesInput, setLetterMinDuesInput] = useState<string>('');
+  const [letterDuesCompareMode, setLetterDuesCompareMode] = useState<'gt' | 'gte'>('gt');
+  const [letterSearchQuery, setLetterSearchQuery] = useState<string>('');
+  const [letterRouteFilter, setLetterRouteFilter] = useState<string>('all');
+  const [letterDepositDate, setLetterDepositDate] = useState<string>(() =>
+    getDefault30thOfCurrentMonth(todayStr)
+  );
+  const [includeApplicableLateFine, setIncludeApplicableLateFine] = useState<boolean>(true);
+  const [isIssuingBulkLetters, setIsIssuingBulkLetters] = useState<boolean>(false);
+  const [issuingMemberId, setIssuingMemberId] = useState<string | null>(null);
+  const [confirmClearLetters, setConfirmClearLetters] = useState<boolean>(false);
+  const [isClearingLetters, setIsClearingLetters] = useState<boolean>(false);
+
   const [isWarningModalOpen, setIsWarningModalOpen] = useState(false);
   const [warnStudentId, setWarnStudentId] = useState(
     scopedStudents.find((s) => s.balanceDue > 0)?.id || scopedStudents[0]?.id || ''
@@ -687,21 +743,364 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [warnLevel, setWarnLevel] = useState<WarningLetter['warningLevel']>(
     'Level 2: Urgent Notice'
   );
-  const [warnDeadline, setWarnDeadline] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 5);
-    return d.toISOString().split('T')[0];
-  });
+  const [warnDeadline, setWarnDeadline] = useState<string>(() =>
+    getDefault30thOfCurrentMonth(todayStr)
+  );
   const [warnSentVia, setWarnSentVia] = useState<WarningLetter['sentVia']>('Printed Slip');
 
-  // Helper to print Formal Warning cum Reminder Letter (Single or Bulk) with Dues History & Acknowledgement Slip
-  const printWarningCumReminderLetters = (targetMembers: { member: StudentMember; letterNo: string; issueDate: string; deadlineDate: string }[]) => {
+  type PrintableLetterTarget = {
+    member: StudentMember;
+    letterNo: string;
+    issueDate: string;
+    deadlineDate: string;
+    lateFineAmount?: number;
+    baseOverdueAmount?: number;
+  };
+
+  // Direct Multi-Page Vector A4 PDF Generator for Warning cum Reminder Letters
+  const downloadWarningLettersPdf = (
+    targetMembers: PrintableLetterTarget[],
+    customFilename?: string
+  ) => {
+    if (targetMembers.length === 0) return;
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const pageW = 210;
+    const margin = 12;
+    const boxW = pageW - margin * 2;
+
+    targetMembers.forEach((item, idx) => {
+      if (idx > 0) doc.addPage();
+      const { member, letterNo, issueDate, deadlineDate } = item;
+      const stuInvoices = invoices.filter(
+        (i) =>
+          (i.studentId === member.id || i.admissionNo === member.admissionNo) && i.balanceDue > 0
+      );
+      const baseDues =
+        item.baseOverdueAmount !== undefined
+          ? Math.max(0, Number(item.baseOverdueAmount))
+          : Math.max(0, Number(member.balanceDue) || 0);
+      const lateFine =
+        item.lateFineAmount !== undefined
+          ? Math.max(0, Number(item.lateFineAmount))
+          : includeApplicableLateFine
+          ? getApplicableLateFineForMember(member, issueDate)
+          : 0;
+      const totalPayable = baseDues + lateFine;
+      const periodStr =
+        stuInvoices.length > 0
+          ? stuInvoices.map((i) => i.month).join(', ')
+          : `Up to ${selectedMonth}`;
+      const formattedDeadline = formatLetterDateDisplay(deadlineDate);
+      const formattedIssue = formatLetterDateDisplay(issueDate);
+
+      // Outer Formal Letter Border
+      doc.setDrawColor(15, 23, 42);
+      doc.setLineWidth(0.6);
+      doc.roundedRect(margin, 10, boxW, 276, 2.5, 2.5);
+
+      // School Header
+      let y = 19;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(
+        `${(schoolName || 'Narendra Edu Valley').toUpperCase()} - TRANSPORT DEPARTMENT`,
+        pageW / 2,
+        y,
+        { align: 'center' }
+      );
+      y += 6;
+      doc.setFontSize(10.5);
+      doc.setTextColor(185, 28, 28);
+      doc.text('WARNING CUM REMINDER LETTER', pageW / 2, y, { align: 'center' });
+      y += 4;
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.4);
+      doc.line(margin + 6, y, pageW - margin - 6, y);
+
+      // Letter Meta Row
+      y += 6;
+      doc.setFontSize(9);
+      doc.setTextColor(15, 23, 42);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`Letter Ref No: ${letterNo}`, margin + 6, y);
+      doc.text(`Issue Date: ${formattedIssue}`, pageW - margin - 6, y, { align: 'right' });
+
+      // Recipient Box
+      y += 4;
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(203, 213, 225);
+      doc.roundedRect(margin + 6, y, boxW - 12, 24, 1.5, 1.5, 'FD');
+      let ry = y + 5;
+      doc.setFontSize(8.8);
+      doc.setFont('helvetica', 'bold');
+      doc.text('To,', margin + 9, ry);
+      ry += 4.6;
+      doc.setFont('helvetica', 'normal');
+      const guardianLine = `Guardian: ${member.fatherName || 'Parent / Guardian'} (Ward: ${member.name}, ID: ${member.admissionNo}, Class: ${member.class}-${member.section})`;
+      doc.text(doc.splitTextToSize(guardianLine, boxW - 18)[0] || guardianLine, margin + 9, ry);
+      ry += 4.6;
+      const addrLine = `Address: ${member.address || member.villageName || 'Registered Address'} (${member.pickupDropStopName || 'Assigned Stop'})`;
+      doc.text(doc.splitTextToSize(addrLine, boxW - 18)[0] || addrLine, margin + 9, ry);
+      ry += 4.6;
+      doc.text(
+        `Phone No: ${member.mobile || member.emergencyContact || '-'}   |   Route: ${member.routeCode || 'Assigned Route'}`,
+        margin + 9,
+        ry
+      );
+
+      // Subject
+      y += 29;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.2);
+      const subjText = `Subject: Pending Transport Fee Dues (${periodStr}) - Deposit on or before ${formattedDeadline}`;
+      doc.text(doc.splitTextToSize(subjText, boxW - 12)[0] || subjText, margin + 6, y);
+      y += 2.5;
+      doc.line(margin + 6, y, pageW - margin - 6, y);
+
+      // Salutation & Body
+      y += 5.5;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.text('Dear Sir / Madam,', margin + 6, y);
+      y += 4.8;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.6);
+      const introLines = doc.splitTextToSize(
+        `This is an official reminder from the School Transport Department regarding the pending transport fee dues of your ward ${member.name} (Admission No: ${member.admissionNo}, Class: ${member.class}-${member.section}, Stop: ${member.pickupDropStopName || member.villageName || '-'}). Kindly review the statement of unpaid transport dues below:`,
+        boxW - 12
+      );
+      doc.text(introLines, margin + 6, y);
+      y += introLines.length * 4.2 + 2;
+
+      // Dues Table
+      const colX = [margin + 6, margin + 36, margin + 74, margin + 102, margin + 128, margin + 152, pageW - margin - 6];
+      const drawTableRow = (
+        cells: string[],
+        rowY: number,
+        opts?: { header?: boolean; bold?: boolean; highlightRed?: boolean }
+      ) => {
+        const rowH = 6.2;
+        if (opts?.header) {
+          doc.setFillColor(241, 245, 249);
+          doc.rect(colX[0], rowY, colX[6] - colX[0], rowH, 'F');
+        } else if (opts?.highlightRed) {
+          doc.setFillColor(254, 242, 242);
+          doc.rect(colX[0], rowY, colX[6] - colX[0], rowH, 'F');
+        }
+        doc.setDrawColor(148, 163, 184);
+        doc.setLineWidth(0.25);
+        doc.rect(colX[0], rowY, colX[6] - colX[0], rowH);
+        for (let c = 1; c < 6; c++) {
+          doc.line(colX[c], rowY, colX[c], rowY + rowH);
+        }
+        doc.setFont('helvetica', opts?.header || opts?.bold ? 'bold' : 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(opts?.highlightRed ? 185 : 15, opts?.highlightRed ? 28 : 23, opts?.highlightRed ? 28 : 42);
+        doc.text(cells[0] || '', colX[0] + 1.8, rowY + 4.2);
+        doc.text(cells[1] || '', colX[1] + 1.8, rowY + 4.2);
+        doc.text(cells[2] || '', colX[3] - 1.8, rowY + 4.2, { align: 'right' });
+        doc.text(cells[3] || '', colX[4] - 1.8, rowY + 4.2, { align: 'right' });
+        doc.text(cells[4] || '', colX[5] - 1.8, rowY + 4.2, { align: 'right' });
+        doc.text(cells[5] || '', colX[6] - 1.8, rowY + 4.2, { align: 'right' });
+        doc.setTextColor(15, 23, 42);
+        return rowY + rowH;
+      };
+
+      y = drawTableRow(
+        ['Period', 'Invoice Ref', 'Base Fee', 'Concession', 'Paid', 'Balance Due'],
+        y,
+        { header: true }
+      );
+
+      const maxInvoiceRows = Math.min(stuInvoices.length, 8);
+      if (maxInvoiceRows > 0) {
+        for (let r = 0; r < maxInvoiceRows; r++) {
+          const inv = stuInvoices[r];
+          y = drawTableRow(
+            [
+              String(inv.month || '').slice(0, 14),
+              String(inv.invoiceNo || '').slice(0, 18),
+              `Rs. ${inv.baseFee}`,
+              `Rs. ${inv.concession}`,
+              `Rs. ${inv.paidAmount}`,
+              `Rs. ${inv.balanceDue}`,
+            ],
+            y
+          );
+        }
+        if (stuInvoices.length > maxInvoiceRows) {
+          const extraBal = stuInvoices
+            .slice(maxInvoiceRows)
+            .reduce((s, inv) => s + (inv.balanceDue || 0), 0);
+          y = drawTableRow(
+            [
+              `+${stuInvoices.length - maxInvoiceRows} more`,
+              'CONSOLIDATED',
+              '-',
+              '-',
+              '-',
+              `Rs. ${extraBal}`,
+            ],
+            y
+          );
+        }
+      } else {
+        y = drawTableRow(
+          [
+            periodStr.slice(0, 14),
+            'OPEN-BAL',
+            `Rs. ${member.monthlyFee || baseDues}`,
+            `Rs. ${member.concessionAmount || 0}`,
+            'Rs. 0',
+            `Rs. ${baseDues}`,
+          ],
+          y
+        );
+      }
+
+      // Summary Footer Rows (Fee Subtotal + Applicable Late Fine + Total Payable)
+      const drawSummaryRow = (label: string, val: string, rowY: number, isTotal = false) => {
+        const rowH = 6.2;
+        if (isTotal) {
+          doc.setFillColor(254, 242, 242);
+          doc.rect(colX[0], rowY, colX[6] - colX[0], rowH, 'F');
+        }
+        doc.setDrawColor(148, 163, 184);
+        doc.rect(colX[0], rowY, colX[6] - colX[0], rowH);
+        doc.line(colX[5], rowY, colX[5], rowY + rowH);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(isTotal ? 8.6 : 8);
+        doc.setTextColor(isTotal ? 185 : 51, isTotal ? 28 : 65, isTotal ? 28 : 85);
+        doc.text(label, colX[5] - 2.2, rowY + 4.2, { align: 'right' });
+        doc.text(val, colX[6] - 1.8, rowY + 4.2, { align: 'right' });
+        doc.setTextColor(15, 23, 42);
+        return rowY + rowH;
+      };
+
+      y = drawSummaryRow('Pending Transport Fee Dues:', `Rs. ${baseDues.toLocaleString('en-IN')}`, y, false);
+      y = drawSummaryRow(
+        lateFine > 0
+          ? 'Applicable Late Fine (After 10th Due Date):'
+          : 'Late Fine (Rs. 100 applicable if paid after 10th):',
+        lateFine > 0 ? `+ Rs. ${lateFine.toLocaleString('en-IN')}` : 'Rs. 0',
+        y,
+        false
+      );
+      y = drawSummaryRow(
+        'TOTAL OVERDUE AMOUNT PAYABLE:',
+        `Rs. ${totalPayable.toLocaleString('en-IN')}`,
+        y,
+        true
+      );
+
+      // Deposit Deadline Notice
+      y += 5.5;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.8);
+      doc.setTextColor(185, 28, 28);
+      const deadlineNotice = doc.splitTextToSize(
+        `Kindly deposit the total payable amount of Rs. ${totalPayable.toLocaleString('en-IN')} on or before ${formattedDeadline} to avoid suspension of transport facility.`,
+        boxW - 12
+      );
+      doc.text(deadlineNotice, margin + 6, y);
+      y += deadlineNotice.length * 4.2 + 1;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.3);
+      doc.setTextColor(15, 23, 42);
+      const noteLines = doc.splitTextToSize(
+        `In case of any genuine difficulty, please visit the school transport office in person with a written application before ${formattedDeadline}.`,
+        boxW - 12
+      );
+      doc.text(noteLines, margin + 6, y);
+      y += noteLines.length * 4.2 + 6;
+
+      // Signature Row
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.8);
+      doc.text('Regards,', margin + 6, y);
+      doc.text('Transport Coordinator', margin + 6, y + 4.5);
+      doc.setFont('helvetica', 'normal');
+      doc.text(schoolName || 'Narendra Edu Valley', margin + 6, y + 9);
+      doc.setFont('helvetica', 'italic');
+      doc.text('(Office Seal & Sign)', pageW - margin - 6, y + 9, { align: 'right' });
+
+      // Tear-Off Acknowledgement Slip at Bottom
+      const slipTop = Math.max(y + 15, 230);
+      doc.setDrawColor(100, 116, 139);
+      doc.setLineDashPattern([2, 1.5], 0);
+      doc.line(margin + 4, slipTop, pageW - margin - 4, slipTop);
+      doc.setLineDashPattern([], 0);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text('TEAR-OFF ACKNOWLEDGEMENT SLIP', pageW / 2, slipTop - 1.5, { align: 'center' });
+
+      const ackBoxY = slipTop + 3;
+      doc.setFillColor(255, 251, 235);
+      doc.setDrawColor(71, 85, 105);
+      doc.roundedRect(margin + 6, ackBoxY, boxW - 12, 46, 1.8, 1.8, 'FD');
+
+      doc.setTextColor(15, 23, 42);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.text(
+        'ACKNOWLEDGEMENT SLIP (To be signed by Guardian & submitted to Transport Office)',
+        pageW / 2,
+        ackBoxY + 5.5,
+        { align: 'center' }
+      );
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.1);
+      const ackText = doc.splitTextToSize(
+        `Received Warning cum Reminder Letter No. ${letterNo} dated ${formattedIssue} regarding pending transport fee dues of Rs. ${baseDues.toLocaleString('en-IN')}${
+          lateFine > 0 ? ` + Late Fine Rs. ${lateFine.toLocaleString('en-IN')} (Total Payable: Rs. ${totalPayable.toLocaleString('en-IN')})` : ''
+        } with deposit date ${formattedDeadline} in respect of ${member.name} (${member.admissionNo}, Class ${member.class}-${member.section}, Route ${member.routeCode || '-'}).`,
+        boxW - 18
+      );
+      doc.text(ackText, margin + 9, ackBoxY + 11);
+
+      const gY = ackBoxY + 29;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.text(`Guardian Name: ${member.fatherName || '____________________'}`, margin + 9, gY);
+      doc.text(`Phone No: ${member.mobile || '________________'}`, pageW / 2 + 4, gY);
+      doc.text('Date of Receipt: ____/____/2026', margin + 9, gY + 10);
+      doc.text('Signature of Guardian: ______________________', pageW / 2 + 4, gY + 10);
+    });
+
+    const outName =
+      customFilename ||
+      (targetMembers.length === 1
+        ? `warning_letter_${targetMembers[0].letterNo}.pdf`
+        : `bulk_warning_letters_${todayStr}.pdf`);
+    doc.save(outName.endsWith('.pdf') ? outName : `${outName}.pdf`);
+  };
+
+  // Helper to open Formal Warning cum Reminder Letter Print & Save-as-PDF Preview Form
+  const printWarningCumReminderLetters = (targetMembers: PrintableLetterTarget[]) => {
     if (targetMembers.length === 0) return;
     const pagesHtml = targetMembers
-      .map(({ member, letterNo, issueDate, deadlineDate }) => {
+      .map((item) => {
+        const { member, letterNo, issueDate, deadlineDate } = item;
         const stuInvoices = invoices.filter(
           (i) => (i.studentId === member.id || i.admissionNo === member.admissionNo) && i.balanceDue > 0
         );
+        const baseDues =
+          item.baseOverdueAmount !== undefined
+            ? Math.max(0, Number(item.baseOverdueAmount))
+            : Math.max(0, Number(member.balanceDue) || 0);
+        const lateFine =
+          item.lateFineAmount !== undefined
+            ? Math.max(0, Number(item.lateFineAmount))
+            : includeApplicableLateFine
+            ? getApplicableLateFineForMember(member, issueDate)
+            : 0;
+        const totalPayable = baseDues + lateFine;
+        const formattedDeadline = formatLetterDateDisplay(deadlineDate);
+        const formattedIssue = formatLetterDateDisplay(issueDate);
         const periodStr =
           stuInvoices.length > 0
             ? stuInvoices.map((i) => i.month).join(', ')
@@ -726,10 +1125,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 <tr>
                   <td>${periodStr}</td>
                   <td>OPEN-BAL</td>
-                  <td style="text-align:right;">Rs. ${member.monthlyFee}</td>
+                  <td style="text-align:right;">Rs. ${member.monthlyFee || baseDues}</td>
                   <td style="text-align:right;">Rs. ${member.concessionAmount || 0}</td>
                   <td style="text-align:right;">Rs. 0</td>
-                  <td style="text-align:right;font-weight:bold;">Rs. ${member.balanceDue}</td>
+                  <td style="text-align:right;font-weight:bold;">Rs. ${baseDues}</td>
                 </tr>
               `;
 
@@ -742,23 +1141,23 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
               <div class="meta-row">
                 <div><strong>Letter Ref No:</strong> ${letterNo}</div>
-                <div><strong>Date:</strong> ${issueDate}</div>
+                <div><strong>Issue Date:</strong> ${formattedIssue}</div>
               </div>
               <div class="recipient">
                 <div><strong>To,</strong></div>
                 <div><strong>Name of Guardian:</strong> ${member.fatherName || 'Parent / Guardian'} (Guardian of <strong>${member.name}</strong>, ID: ${member.admissionNo}, Class: ${member.class}-${member.section})</div>
                 <div><strong>Address:</strong> ${member.address || member.villageName || 'Registered Address'} (${member.pickupDropStopName || 'Stop'})</div>
-                <div><strong>Phone No:</strong> ${member.mobile || member.emergencyContact || '—'}</div>
+                <div><strong>Phone No:</strong> ${member.mobile || member.emergencyContact || '—'} &nbsp;|&nbsp; <strong>Route:</strong> ${member.routeCode || 'Assigned Route'}</div>
               </div>
               <div class="subject">
-                <strong>Subject:</strong> Fee Due for <u>${periodStr}</u> (Route: ${member.routeCode || 'Assigned Route'})
+                <strong>Subject:</strong> Pending Transport Fee Dues for <u>${periodStr}</u> — Deposit Date: <strong>${formattedDeadline}</strong>
               </div>
               <div class="body-text">
                 <p><strong>Dear Sir / Madam,</strong></p>
                 <p>
                   This is an official reminder from the School Transport Department regarding the pending transport fee dues of your ward
                   <strong>${member.name}</strong> (Admission No: <strong>${member.admissionNo}</strong>, Class: <strong>${member.class}-${member.section}</strong>,
-                  Stop: <strong>${member.pickupDropStopName}</strong>). The detailed statement of unpaid transport dues is attached below for your kind perusal:
+                  Stop: <strong>${member.pickupDropStopName || member.villageName || 'Assigned Stop'}</strong>). The detailed statement of unpaid transport dues is given below:
                 </p>
                 <table class="dues-table">
                   <thead>
@@ -776,14 +1175,26 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   </tbody>
                   <tfoot>
                     <tr>
-                      <td colspan="5" style="text-align:right;font-weight:bold;">TOTAL OVERDUE AMOUNT PAYABLE:</td>
-                      <td style="text-align:right;font-weight:bold;color:#b91c1c;">Rs. ${member.balanceDue.toLocaleString('en-IN')}</td>
+                      <td colspan="5" style="text-align:right;font-weight:bold;">Pending Transport Fee Dues:</td>
+                      <td style="text-align:right;font-weight:bold;">Rs. ${baseDues.toLocaleString('en-IN')}</td>
+                    </tr>
+                    <tr>
+                      <td colspan="5" style="text-align:right;font-weight:bold;color:${lateFine > 0 ? '#be123c' : '#475569'};">
+                        ${lateFine > 0 ? 'Applicable Late Fine (After 10th Due Date):' : 'Late Fine (Rs. 100 applicable if paid after 10th):'}
+                      </td>
+                      <td style="text-align:right;font-weight:bold;color:${lateFine > 0 ? '#be123c' : '#475569'};">
+                        ${lateFine > 0 ? `+ Rs. ${lateFine.toLocaleString('en-IN')}` : 'Rs. 0'}
+                      </td>
+                    </tr>
+                    <tr style="background:#fef2f2;">
+                      <td colspan="5" style="text-align:right;font-weight:800;font-size:13px;color:#991b1b;">TOTAL OVERDUE AMOUNT PAYABLE:</td>
+                      <td style="text-align:right;font-weight:800;font-size:13px;color:#b91c1c;">Rs. ${totalPayable.toLocaleString('en-IN')}</td>
                     </tr>
                   </tfoot>
                 </table>
                 <p>
-                  <strong>Kindly pay before the 20th (${deadlineDate}) to avoid suspension of transport facility.</strong>
-                  In case of any genuine economic difficulty, please visit the school office in person with a written application before the given date (${deadlineDate}).
+                  <strong style="color:#b91c1c;">Kindly deposit the total payable amount of Rs. ${totalPayable.toLocaleString('en-IN')} on or before ${formattedDeadline} to avoid suspension of transport facility.</strong>
+                  In case of any genuine economic difficulty, please visit the school office in person with a written application before the deposit date (${formattedDeadline}).
                 </p>
               </div>
               <div class="sign-row">
@@ -803,9 +1214,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <div class="ack-box">
                 <div class="ack-title">ACKNOWLEDGEMENT SLIP (To be signed by Guardian &amp; submitted to Transport Office)</div>
                 <p style="margin:6px 0;font-size:12px;">
-                  Received Warning cum Reminder Letter No. <strong>${letterNo}</strong> dated <strong>${issueDate}</strong> regarding pending transport fee dues of
-                  <strong>Rs. ${member.balanceDue.toLocaleString('en-IN')}</strong> for Period <strong>${periodStr}</strong> in respect of
-                  <strong>${member.name}</strong> (${member.admissionNo}, Class ${member.class}-${member.section}, Route ${member.routeCode}).
+                  Received Warning cum Reminder Letter No. <strong>${letterNo}</strong> dated <strong>${formattedIssue}</strong> regarding pending transport fee dues of
+                  <strong>Rs. ${baseDues.toLocaleString('en-IN')}</strong>${
+                    lateFine > 0
+                      ? ` + Applicable Late Fine <strong>Rs. ${lateFine.toLocaleString('en-IN')}</strong> (Total Payable: <strong>Rs. ${totalPayable.toLocaleString('en-IN')}</strong>)`
+                      : ''
+                  } for Period <strong>${periodStr}</strong> (Deposit Date: <strong>${formattedDeadline}</strong>) in respect of
+                  <strong>${member.name}</strong> (${member.admissionNo}, Class ${member.class}-${member.section}, Route ${member.routeCode || '—'}).
                 </p>
                 <div class="ack-grid">
                   <div><strong>Guardian Name:</strong> ${member.fatherName || '________________'}</div>
@@ -839,8 +1254,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
             .dues-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
             .dues-table th, .dues-table td { border: 1px solid #94a3b8; padding: 6px 8px; }
             .dues-table th { background: #f1f5f9; text-align: left; }
-            .sign-row { display: flex; justify-content: space-between; margin-top: 22px; font-size: 12.5px; }
-            .cut-line { margin: 16px 0 12px; text-align: center; font-size: 11px; color: #64748b; font-weight: bold; }
+            .sign-row { display: flex; justify-content: space-between; margin-top: 20px; font-size: 12.5px; }
+            .cut-line { margin: 14px 0 10px; text-align: center; font-size: 11px; color: #64748b; font-weight: bold; }
             .ack-box { border: 1.5px dashed #334155; border-radius: 8px; padding: 12px; background: #fffbeb; }
             .ack-title { font-weight: bold; font-size: 12px; text-align: center; text-transform: uppercase; margin-bottom: 6px; }
             .ack-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; margin-top: 10px; }
@@ -850,17 +1265,24 @@ export const FeesView: React.FC<FeesViewProps> = ({
       </html>
     `;
 
+    const baseFile =
+      targetMembers.length === 1
+        ? `warning_letter_${targetMembers[0].letterNo}`
+        : `bulk_warning_letters_${todayStr}`;
+
     openHtmlPrintPreview({
       title:
         targetMembers.length === 1
-          ? `Warning cum Reminder Letter & Slip — ${targetMembers[0].member.name} (${targetMembers[0].letterNo})`
+          ? `Warning cum Reminder Letter — ${targetMembers[0].member.name} (${targetMembers[0].letterNo})`
           : `Bulk Warning cum Reminder Letters (${targetMembers.length} Members)`,
-      subtitle: 'Includes Guardian Details, Dues History Statement, 20th Deadline & Tear-off Acknowledgement Slip',
+      subtitle: `Deposit Date: ${formatLetterDateDisplay(targetMembers[0].deadlineDate)} • Includes Dues Statement, Applicable Late Fine & Acknowledgement Slip`,
       html,
-      filename:
-        targetMembers.length === 1
-          ? `warning_letter_${targetMembers[0].letterNo}`
-          : `bulk_warning_letters_${selectedMonth}`,
+      filename: baseFile,
+      printButtonLabel:
+        targetMembers.length === 1 ? '🖨️ Print Letter' : `🖨️ Print Letters (${targetMembers.length})`,
+      pdfButtonLabel:
+        targetMembers.length === 1 ? '📄 Save as PDF' : `📄 Save as PDF (${targetMembers.length})`,
+      onSavePdf: () => downloadWarningLettersPdf(targetMembers, `${baseFile}.pdf`),
     });
   };
 
@@ -960,56 +1382,210 @@ export const FeesView: React.FC<FeesViewProps> = ({
     });
   };
 
+  const parsedMinDuesThreshold =
+    letterMinDuesInput.trim() !== '' && !isNaN(Number(letterMinDuesInput))
+      ? Math.max(0, Number(letterMinDuesInput))
+      : null;
+
+  const filteredOverdueMembersForLetters = scopedStudents
+    .filter((s) => {
+      if ((Number(s.balanceDue) || 0) <= 0 || s.transportStatus === 'Left') return false;
+      if (parsedMinDuesThreshold !== null) {
+        if (letterDuesCompareMode === 'gt' && !(s.balanceDue > parsedMinDuesThreshold)) {
+          return false;
+        }
+        if (letterDuesCompareMode === 'gte' && !(s.balanceDue >= parsedMinDuesThreshold)) {
+          return false;
+        }
+      }
+      if (letterRouteFilter !== 'all') {
+        const matchesRt =
+          s.routeId === letterRouteFilter ||
+          (s.routeCode && s.routeCode.trim() === letterRouteFilter.trim());
+        if (!matchesRt) return false;
+      }
+      if (letterSearchQuery.trim() !== '') {
+        const q = letterSearchQuery.trim().toLowerCase();
+        const hit =
+          (s.name || '').toLowerCase().includes(q) ||
+          (s.admissionNo || '').toLowerCase().includes(q) ||
+          (s.fatherName || '').toLowerCase().includes(q) ||
+          (s.mobile || '').toLowerCase().includes(q) ||
+          (s.routeCode || '').toLowerCase().includes(q) ||
+          (s.pickupDropStopName || '').toLowerCase().includes(q);
+        if (!hit) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => (b.balanceDue || 0) - (a.balanceDue || 0));
+
+  const handleIssueSingleMemberLetterDirect = async (st: StudentMember) => {
+    if (isReadOnly) {
+      printWarningCumReminderLetters([
+        {
+          member: st,
+          letterNo: `PREVIEW-${st.admissionNo}`,
+          issueDate: todayStr,
+          deadlineDate: letterDepositDate || getDefault30thOfCurrentMonth(todayStr),
+          baseOverdueAmount: st.balanceDue,
+          lateFineAmount: includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0,
+        },
+      ]);
+      return;
+    }
+    if (!onIssueWarningLetter) return;
+    try {
+      setIssuingMemberId(st.id);
+      const depositDt = letterDepositDate || getDefault30thOfCurrentMonth(todayStr);
+      const baseDues = Math.max(0, Number(st.balanceDue) || 0);
+      const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
+      const totalPayable = baseDues + fine;
+      const stuCamp = getStudentCampus(st, routes);
+
+      const created = await onIssueWarningLetter({
+        date: todayStr,
+        issueDate: todayStr,
+        studentId: st.id,
+        studentName: st.name,
+        admissionNo: st.admissionNo,
+        campus: stuCamp,
+        parentName: st.fatherName,
+        fatherName: st.fatherName,
+        address: st.address,
+        baseOverdueAmount: baseDues,
+        lateFineAmount: fine,
+        totalPayableAmount: totalPayable,
+        overdueAmount: totalPayable,
+        periodOverdue: `Pending Dues up to ${selectedMonth}`,
+        deadlineDate: depositDt,
+        proposedSuspensionDate: depositDt,
+        warningLevel: 'Level 2: Urgent Notice',
+        sentVia: 'Printed Slip',
+        issuedBy: `${currentRole} (${stuCamp} Campus)`,
+      });
+
+      setStatusMessage({
+        type: 'success',
+        text: `Issued Warning cum Reminder Letter ${created?.letterNo || ''} for ${st.name} (Deposit Date: ${formatLetterDateDisplay(depositDt)}). Opening Print / Save as PDF preview...`,
+      });
+
+      printWarningCumReminderLetters([
+        {
+          member: st,
+          letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
+          issueDate: todayStr,
+          deadlineDate: depositDt,
+          baseOverdueAmount: baseDues,
+          lateFineAmount: fine,
+        },
+      ]);
+    } catch (err: any) {
+      setStatusMessage({
+        type: 'warning',
+        text: err?.message || 'Failed to issue Warning cum Reminder Letter.',
+      });
+    } finally {
+      setIssuingMemberId(null);
+    }
+  };
+
   const handleBulkWarningLettersBy15th = async () => {
-    const overdueMembers = scopedStudents.filter(
-      (s) => s.balanceDue > 0 && s.transportStatus !== 'Left'
-    );
+    const overdueMembers = filteredOverdueMembersForLetters;
     if (overdueMembers.length === 0) {
       setStatusMessage({
         type: 'info',
-        text: 'No members currently have pending fees for bulk Warning cum Reminder Letter generation.',
+        text:
+          parsedMinDuesThreshold !== null
+            ? `No members match the current dues filter (${letterDuesCompareMode === 'gt' ? 'Above' : 'At least'} ₹${parsedMinDuesThreshold.toLocaleString('en-IN')}).`
+            : 'No members currently have pending fees for bulk Warning cum Reminder Letter generation.',
       });
       return;
     }
-    const deadline20th = `${selectedMonth}-20`;
-    const batchTargets: { member: StudentMember; letterNo: string; issueDate: string; deadlineDate: string }[] = [];
 
-    for (let i = 0; i < overdueMembers.length; i++) {
-      const st = overdueMembers[i];
-      const letterNo = `WCR-${selectedMonth.replace('-', '')}-${String(i + 1).padStart(3, '0')}`;
-      if (onIssueWarningLetter) {
-        await onIssueWarningLetter({
+    const depositDt = letterDepositDate || getDefault30thOfCurrentMonth(todayStr);
+
+    if (isReadOnly) {
+      const previewTargets: PrintableLetterTarget[] = overdueMembers.map((st, i) => ({
+        member: st,
+        letterNo: `PREVIEW-${String(i + 1).padStart(3, '0')}`,
+        issueDate: todayStr,
+        deadlineDate: depositDt,
+        baseOverdueAmount: Math.max(0, Number(st.balanceDue) || 0),
+        lateFineAmount: includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0,
+      }));
+      printWarningCumReminderLetters(previewTargets);
+      return;
+    }
+
+    try {
+      setIsIssuingBulkLetters(true);
+      const entriesPayload: Partial<WarningLetter>[] = overdueMembers.map((st) => {
+        const baseDues = Math.max(0, Number(st.balanceDue) || 0);
+        const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
+        const totalPayable = baseDues + fine;
+        const stuCamp = getStudentCampus(st, routes);
+        return {
           date: todayStr,
           issueDate: todayStr,
           studentId: st.id,
           studentName: st.name,
           admissionNo: st.admissionNo,
-          campus: getStudentCampus(st, routes),
+          campus: stuCamp,
           parentName: st.fatherName,
           fatherName: st.fatherName,
           address: st.address,
-          overdueAmount: st.balanceDue,
+          baseOverdueAmount: baseDues,
+          lateFineAmount: fine,
+          totalPayableAmount: totalPayable,
+          overdueAmount: totalPayable,
           periodOverdue: `Pending Dues up to ${selectedMonth}`,
-          deadlineDate: deadline20th,
-          proposedSuspensionDate: deadline20th,
+          deadlineDate: depositDt,
+          proposedSuspensionDate: depositDt,
           warningLevel: 'Level 2: Urgent Notice',
           sentVia: 'Printed Slip',
-          issuedBy: currentRole,
-        });
-      }
-      batchTargets.push({
-        member: st,
-        letterNo,
-        issueDate: todayStr,
-        deadlineDate: deadline20th,
+          issuedBy: `${currentRole} (${stuCamp} Campus)`,
+        };
       });
-    }
 
-    setStatusMessage({
-      type: 'success',
-      text: `Generated & opened print dialog for ${batchTargets.length} Bulk Warning cum Reminder Letters (for all members with pending dues by 15th).`,
-    });
-    printWarningCumReminderLetters(batchTargets);
+      let createdLetters: WarningLetter[] = [];
+      if (onIssueWarningLettersBulk) {
+        createdLetters = await onIssueWarningLettersBulk(entriesPayload);
+      } else if (onIssueWarningLetter) {
+        for (const payload of entriesPayload) {
+          const c = await onIssueWarningLetter(payload);
+          if (c) createdLetters.push(c);
+        }
+      }
+
+      const batchTargets: PrintableLetterTarget[] = overdueMembers.map((st, i) => {
+        const matchedCreated = createdLetters[i];
+        const baseDues = Math.max(0, Number(st.balanceDue) || 0);
+        const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
+        return {
+          member: st,
+          letterNo:
+            matchedCreated?.letterNo ||
+            `WL-${todayStr.slice(0, 4)}-${String(i + 1).padStart(3, '0')}`,
+          issueDate: todayStr,
+          deadlineDate: depositDt,
+          baseOverdueAmount: baseDues,
+          lateFineAmount: fine,
+        };
+      });
+
+      setStatusMessage({
+        type: 'success',
+        text: `Issued ${batchTargets.length} Warning cum Reminder Letter(s) with Deposit Date ${formatLetterDateDisplay(depositDt)}. Proceeding to Print / Save as PDF...`,
+      });
+      printWarningCumReminderLetters(batchTargets);
+    } catch (err: any) {
+      setStatusMessage({
+        type: 'warning',
+        text: err?.message || 'Failed to issue bulk Warning cum Reminder Letters.',
+      });
+    } finally {
+      setIsIssuingBulkLetters(false);
+    }
   };
 
   // Eligible list for manual individual suspension: neither permission extension received nor overall dues clear
@@ -1214,31 +1790,42 @@ export const FeesView: React.FC<FeesViewProps> = ({
     if (!onIssueWarningLetter) return;
     const st = scopedStudents.find((s) => s.id === warnStudentId);
     if (!st) return;
+    const depositDt = warnDeadline || getDefault30thOfCurrentMonth(todayStr);
+    const baseDues = Math.max(0, Number(st.balanceDue) || 0);
+    const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
+    const totalPayable = baseDues + fine;
+    const stuCamp = getStudentCampus(st, routes);
+
     const created = await onIssueWarningLetter({
       date: todayStr,
       issueDate: todayStr,
       studentId: st.id,
       studentName: st.name,
       admissionNo: st.admissionNo,
-      campus: getStudentCampus(st, routes),
+      campus: stuCamp,
       parentName: st.fatherName,
       fatherName: st.fatherName,
       address: st.address,
-      overdueAmount: st.balanceDue,
+      baseOverdueAmount: baseDues,
+      lateFineAmount: fine,
+      totalPayableAmount: totalPayable,
+      overdueAmount: totalPayable,
       periodOverdue: `Pending Transport Dues (${selectedMonth})`,
-      deadlineDate: warnDeadline,
-      proposedSuspensionDate: warnDeadline,
+      deadlineDate: depositDt,
+      proposedSuspensionDate: depositDt,
       warningLevel: warnLevel,
       sentVia: warnSentVia,
-      issuedBy: `${currentRole} (${getStudentCampus(st, routes)} Campus)`,
+      issuedBy: `${currentRole} (${stuCamp} Campus)`,
     });
     setIsWarningModalOpen(false);
     printWarningCumReminderLetters([
       {
         member: st,
-        letterNo: created?.letterNo || `WCR-${Date.now().toString().slice(-4)}`,
+        letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
         issueDate: todayStr,
-        deadlineDate: warnDeadline,
+        deadlineDate: depositDt,
+        baseOverdueAmount: baseDues,
+        lateFineAmount: fine,
       },
     ]);
   };
@@ -1934,11 +2521,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
             <div
               onClick={() => {
-                if (!isReadOnly) setIsWarningModalOpen(true);
+                letterFilterSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
               }}
-              className={`bg-white rounded-2xl border-2 border-rose-200 p-4 shadow-2xs space-y-2 transition-all ${
-                isReadOnly ? '' : 'hover:bg-rose-50/50 hover:border-rose-400 cursor-pointer'
-              }`}
+              className="bg-white rounded-2xl border-2 border-rose-200 p-4 shadow-2xs space-y-2 transition-all hover:bg-rose-50/50 hover:border-rose-400 cursor-pointer"
             >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-rose-700 uppercase">Stage 2: 15th of Month</span>
@@ -1946,7 +2531,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
               <h4 className="font-bold text-slate-900 text-sm">Warning cum Reminder Letters</h4>
               <p className="text-slate-600 text-xs leading-relaxed">
-                Auto-fetches Guardian Name, Address, Phone, Dues History table, 20th deadline, and Tear-off Acknowledgement Slip.
+                Filter members by dues amount, include applicable Late Fine, default 30th deposit date, and issue Bulk or Individual letters to Print / Save as PDF.
               </p>
               <div className={`grid grid-cols-1 ${isReadOnly ? '' : 'sm:grid-cols-2'} gap-2 pt-1`}>
                 {!isReadOnly && (
@@ -1954,6 +2539,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
+                      setWarnDeadline(letterDepositDate || getDefault30thOfCurrentMonth(todayStr));
                       setIsWarningModalOpen(true);
                     }}
                     className="py-2 px-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1"
@@ -1964,14 +2550,19 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 )}
                 <button
                   type="button"
+                  disabled={isIssuingBulkLetters || filteredOverdueMembersForLetters.length === 0}
                   onClick={(e) => {
                     e.stopPropagation();
                     handleBulkWarningLettersBy15th();
                   }}
-                  className="py-2 px-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1"
+                  className="py-2 px-2.5 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center justify-center gap-1"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>Bulk Print (15th)</span>
+                  <span>
+                    {isIssuingBulkLetters
+                      ? 'Issuing...'
+                      : `${isReadOnly ? 'Preview' : 'Bulk Issue'} (${filteredOverdueMembersForLetters.length})`}
+                  </span>
                 </button>
               </div>
             </div>
@@ -1985,7 +2576,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
               }`}
             >
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-rose-800 uppercase">Stage 3: 20th of Month</span>
+                <span className="text-xs font-bold text-rose-800 uppercase">Stage 3: 30th Deposit Cutoff</span>
                 <UserX className="w-4 h-4 text-rose-600" />
               </div>
               <h4 className="font-bold text-slate-900 text-sm">Individual Suspension Selection</h4>
@@ -2005,6 +2596,274 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   <span>Select Members for Suspension ({eligibleForManualSuspension.length})</span>
                 </button>
               )}
+            </div>
+          </div>
+
+          {/* =================================================================== */}
+          {/* DUES AMOUNT FILTER + BULK & INDIVIDUAL WARNING LETTER ISSUANCE      */}
+          {/* =================================================================== */}
+          <div
+            ref={letterFilterSectionRef}
+            className="bg-white rounded-2xl border-2 border-rose-200 p-4 sm:p-5 shadow-2xs space-y-4"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-3.5">
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="font-bold text-slate-900 text-sm sm:text-base">
+                    Filter Overdue Members &amp; Issue Warning cum Reminder Letters
+                  </h3>
+                  <span className="px-2.5 py-0.5 rounded-md bg-rose-100 text-rose-800 font-mono font-bold text-xs">
+                    {filteredOverdueMembersForLetters.length} Matching Member
+                    {filteredOverdueMembersForLetters.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Enter a dues amount to filter all members above that amount, then click{' '}
+                  <strong>Bulk Issue</strong> or issue individually against any member to proceed directly to Print / Save as PDF.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isIssuingBulkLetters || filteredOverdueMembersForLetters.length === 0}
+                  onClick={handleBulkWarningLettersBy15th}
+                  className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white font-bold rounded-xl text-xs cursor-pointer inline-flex items-center gap-1.5 shadow-2xs"
+                >
+                  {isIssuingBulkLetters ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Issuing Letters...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Printer className="w-4 h-4" />
+                      <span>
+                        {isReadOnly ? 'Bulk Preview / PDF' : 'Bulk Issue & Print / PDF'} (
+                        {filteredOverdueMembersForLetters.length})
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Filter & Letter Settings Bar */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200/80 text-xs">
+              <div className="sm:col-span-2 lg:col-span-4">
+                <label className="block font-bold text-slate-700 mb-1">
+                  Filter by Pending Dues Amount (₹)
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={letterDuesCompareMode}
+                    onChange={(e) => setLetterDuesCompareMode(e.target.value as 'gt' | 'gte')}
+                    className="py-2 px-2.5 rounded-xl border border-slate-300 bg-white font-bold text-slate-800 shrink-0"
+                    title="Filter comparison mode"
+                  >
+                    <option value="gt">Above (&gt;)</option>
+                    <option value="gte">At least (≥)</option>
+                  </select>
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">
+                      ₹
+                    </span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="50"
+                      value={letterMinDuesInput}
+                      onChange={(e) => setLetterMinDuesInput(e.target.value)}
+                      placeholder="e.g. 1000"
+                      className="w-full pl-7 pr-8 py-2 rounded-xl border border-slate-300 bg-white font-mono font-bold text-slate-900"
+                    />
+                    {letterMinDuesInput !== '' && (
+                      <button
+                        type="button"
+                        onClick={() => setLetterMinDuesInput('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-rose-600 font-bold cursor-pointer"
+                        title="Clear dues filter"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="lg:col-span-3">
+                <label className="block font-bold text-slate-700 mb-1">
+                  Deposit Date (Default 30th) *
+                </label>
+                <input
+                  type="date"
+                  value={letterDepositDate}
+                  onChange={(e) => setLetterDepositDate(e.target.value)}
+                  className="w-full py-2 px-3 rounded-xl border border-rose-300 bg-white font-mono font-bold text-rose-900"
+                />
+              </div>
+
+              <div className="lg:col-span-2">
+                <label className="block font-bold text-slate-700 mb-1">Route Filter</label>
+                <select
+                  value={letterRouteFilter}
+                  onChange={(e) => setLetterRouteFilter(e.target.value)}
+                  className="w-full py-2 px-2.5 rounded-xl border border-slate-300 bg-white font-semibold text-slate-800"
+                >
+                  <option value="all">All Routes</option>
+                  {routes
+                    .filter((r) => matchesCampusFilter(normalizeCampus(r.campus) || 'Sr', selectedCampus))
+                    .map((r) => (
+                      <option key={r.id} value={r.code}>
+                        {r.code} ({r.name})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="lg:col-span-3">
+                <label className="block font-bold text-slate-700 mb-1">Search Member</label>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={letterSearchQuery}
+                    onChange={(e) => setLetterSearchQuery(e.target.value)}
+                    placeholder="Name, ID, Guardian..."
+                    className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-300 bg-white font-medium text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div className="sm:col-span-2 lg:col-span-12 flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-200/70">
+                <label className="inline-flex items-center gap-2 cursor-pointer font-semibold text-slate-800">
+                  <input
+                    type="checkbox"
+                    checked={includeApplicableLateFine}
+                    onChange={(e) => setIncludeApplicableLateFine(e.target.checked)}
+                    className="rounded accent-rose-600 w-4 h-4"
+                  />
+                  <span>
+                    Add Applicable Late Fine (₹100 after 10th due date) in Letter &amp; Total Payable
+                  </span>
+                </label>
+
+                {(parsedMinDuesThreshold !== null ||
+                  letterRouteFilter !== 'all' ||
+                  letterSearchQuery.trim() !== '') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLetterMinDuesInput('');
+                      setLetterRouteFilter('all');
+                      setLetterSearchQuery('');
+                    }}
+                    className="text-xs font-bold text-rose-600 hover:underline cursor-pointer"
+                  >
+                    Reset Filters
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Filtered Overdue Members Table with Individual Issue Letter Action */}
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="max-h-[420px] overflow-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase text-[10px] sticky top-0 z-10">
+                    <tr>
+                      <th className="py-2.5 px-3">#</th>
+                      <th className="py-2.5 px-3">Member &amp; ID</th>
+                      <th className="py-2.5 px-3">Guardian &amp; Phone</th>
+                      <th className="py-2.5 px-3">Route &amp; Stop</th>
+                      <th className="py-2.5 px-3 text-right">Fee Dues</th>
+                      <th className="py-2.5 px-3 text-right">Late Fine</th>
+                      <th className="py-2.5 px-3 text-right">Total Payable</th>
+                      <th className="py-2.5 px-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredOverdueMembersForLetters.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="py-8 text-center text-slate-400 font-medium">
+                          {parsedMinDuesThreshold !== null
+                            ? `No members found with pending dues ${letterDuesCompareMode === 'gt' ? 'above' : 'at least'} ₹${parsedMinDuesThreshold.toLocaleString('en-IN')}.`
+                            : 'No overdue members found for the selected filters.'}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredOverdueMembersForLetters.map((st, idx) => {
+                        const baseDues = Math.max(0, Number(st.balanceDue) || 0);
+                        const fine = includeApplicableLateFine
+                          ? getApplicableLateFineForMember(st, todayStr)
+                          : 0;
+                        const totalPayable = baseDues + fine;
+                        const isRowIssuing = issuingMemberId === st.id;
+                        return (
+                          <tr key={st.id} className="hover:bg-rose-50/30">
+                            <td className="py-2.5 px-3 font-mono text-slate-400">{idx + 1}</td>
+                            <td className="py-2.5 px-3">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onOpenStudentProfile && onOpenStudentProfile(st.id, 'fees')
+                                }
+                                className="font-bold text-slate-900 hover:text-indigo-600 hover:underline text-left cursor-pointer"
+                              >
+                                {st.name}
+                              </button>
+                              <div className="font-mono text-[10px] text-slate-500">
+                                {st.admissionNo} • {st.class}-{st.section} •{' '}
+                                {getStudentCampus(st, routes)}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-medium text-slate-800">{st.fatherName || '—'}</div>
+                              <div className="font-mono text-[10px] text-slate-500">
+                                {st.mobile || '—'}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="font-mono font-bold text-slate-800">
+                                {st.routeCode || '—'}
+                              </span>
+                              <div className="text-[10px] text-slate-500 truncate max-w-[150px]">
+                                {st.pickupDropStopName || st.villageName || '—'}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-800 tabular-nums">
+                              ₹{baseDues.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-semibold text-rose-600 tabular-nums">
+                              {fine > 0 ? `+₹${fine}` : '₹0'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-black text-rose-700 tabular-nums">
+                              ₹{totalPayable.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <button
+                                type="button"
+                                disabled={isRowIssuing || isIssuingBulkLetters}
+                                onClick={() => handleIssueSingleMemberLetterDirect(st)}
+                                className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white font-bold rounded-lg text-[11px] inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                              >
+                                <Printer className="w-3 h-3 text-amber-400" />
+                                <span>
+                                  {isRowIssuing
+                                    ? 'Issuing...'
+                                    : isReadOnly
+                                    ? 'Preview / PDF'
+                                    : 'Issue Letter'}
+                                </span>
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 
@@ -2101,109 +2960,207 @@ export const FeesView: React.FC<FeesViewProps> = ({
               </div>
             </div>
 
-            {/* Formal Warning cum Reminder Letters */}
+            {/* Formal Warning cum Reminder Letters History */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h3 className="font-bold text-slate-900 text-sm">Issued Warning cum Reminder Letters</h3>
+                  <h3 className="font-bold text-slate-900 text-sm">
+                    Issued Warning cum Reminder Letters ({scopedWarningLetters.length})
+                  </h3>
                   <p className="text-[11px] text-slate-500">
-                    Includes Guardian details, Dues History table, 20th deadline &amp; Acknowledgement Slip
+                    Includes Guardian details, Dues Statement, Applicable Late Fine, 30th Deposit Date &amp; Slip
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleBulkWarningLettersBy15th}
-                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center gap-1"
-                  >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Bulk Print Pending (15th)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsWarningModalOpen(true)}
-                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center gap-1"
-                  >
-                    <Plus className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Issue Single Letter</span>
-                  </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {isAdmin && onClearAllWarningLetters && scopedWarningLetters.length > 0 && (
+                    confirmClearLetters ? (
+                      <div className="inline-flex items-center gap-1 bg-rose-50 border border-rose-200 px-2.5 py-1 rounded-xl text-[11px]">
+                        <span className="font-bold text-rose-800">Clear all?</span>
+                        <button
+                          type="button"
+                          disabled={isClearingLetters}
+                          onClick={async () => {
+                            try {
+                              setIsClearingLetters(true);
+                              await onClearAllWarningLetters();
+                              setConfirmClearLetters(false);
+                              setStatusMessage({
+                                type: 'success',
+                                text: 'Cleared all issued Warning cum Reminder Letter history.',
+                              });
+                            } finally {
+                              setIsClearingLetters(false);
+                            }
+                          }}
+                          className="px-2 py-0.5 bg-rose-600 text-white font-bold rounded cursor-pointer"
+                        >
+                          {isClearingLetters ? '...' : 'Yes'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmClearLetters(false)}
+                          className="px-1.5 py-0.5 text-slate-600 font-bold cursor-pointer"
+                        >
+                          No
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClearLetters(true)}
+                        className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold rounded-xl text-xs cursor-pointer flex items-center gap-1"
+                        title="Clear all issued letter history (Admin Only)"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Clear History</span>
+                      </button>
+                    )
+                  )}
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWarnDeadline(letterDepositDate || getDefault30thOfCurrentMonth(todayStr));
+                        setIsWarningModalOpen(true);
+                      }}
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs cursor-pointer flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Issue Single Letter</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-3 max-h-[420px] overflow-y-auto pr-0.5">
                 {scopedWarningLetters.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-6 text-center">No Warning cum Reminder letters issued yet for this campus.</p>
+                  <p className="text-xs text-slate-400 py-6 text-center">
+                    No Warning cum Reminder letters issued yet. Use the filter panel above to issue individual or bulk letters.
+                  </p>
                 ) : (
                   scopedWarningLetters.map((wl) => {
                     const memberObj = findStudentStrictly(scopedStudents, wl);
+                    const buildTargetForIssued = (): PrintableLetterTarget => {
+                      const matchedOrFallback: StudentMember =
+                        findStudentStrictly(students, wl) || {
+                          id: wl.studentId || 'stu-fallback',
+                          admissionNo: wl.admissionNo || 'ADM-000',
+                          name: wl.studentName || 'Member',
+                          memberType: 'Student',
+                          class: '—',
+                          section: '—',
+                          gender: 'M',
+                          campus: 'Main',
+                          academicSession: '2026-27',
+                          fatherName: wl.fatherName || wl.parentName || 'Parent / Guardian',
+                          mobile: '—',
+                          address: wl.address || 'Registered Guardian Address',
+                          routeId: '',
+                          routeCode: 'Assigned Route',
+                          villageId: '',
+                          villageName: '',
+                          pickupDropStopId: '',
+                          pickupDropStopName: 'Assigned Stop',
+                          serviceType: 'both',
+                          transportStatus: 'Active',
+                          emergencyContact: '—',
+                          monthlyFee: wl.baseOverdueAmount ?? wl.overdueAmount ?? 0,
+                          concessionAmount: 0,
+                          balanceDue: wl.baseOverdueAmount ?? wl.overdueAmount ?? 0,
+                          joiningDate: todayStr,
+                          version: 1,
+                        };
+                      const recordedFine =
+                        wl.lateFineAmount !== undefined ? Number(wl.lateFineAmount) : 0;
+                      const recordedBase =
+                        wl.baseOverdueAmount !== undefined
+                          ? Number(wl.baseOverdueAmount)
+                          : Math.max(0, (Number(wl.overdueAmount) || 0) - recordedFine);
+                      return {
+                        member: matchedOrFallback,
+                        letterNo: wl.letterNo,
+                        issueDate: wl.issueDate || wl.date || todayStr,
+                        deadlineDate:
+                          wl.proposedSuspensionDate ||
+                          wl.deadlineDate ||
+                          getDefault30thOfCurrentMonth(wl.issueDate || wl.date || todayStr),
+                        baseOverdueAmount: recordedBase,
+                        lateFineAmount: recordedFine,
+                      };
+                    };
+
                     return (
                       <div
                         key={wl.id}
-                        className="p-3.5 bg-rose-50/40 rounded-xl border border-rose-200 text-xs flex items-center justify-between gap-4"
+                        className="p-3.5 bg-rose-50/40 rounded-xl border border-rose-200 text-xs flex flex-wrap sm:flex-nowrap items-center justify-between gap-3"
                       >
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-mono font-bold text-rose-950">{wl.letterNo}</span>
                             <span className="text-slate-400">•</span>
                             <span className="font-bold text-slate-900">{wl.studentName}</span>
                           </div>
                           <div className="text-slate-600">
-                            Guardian: <strong>{wl.fatherName || wl.parentName || memberObj?.fatherName || '—'}</strong> • Overdue:{' '}
-                            <strong className="text-rose-700">₹{wl.overdueAmount}</strong> ({wl.periodOverdue || 'Dues'})
+                            Guardian:{' '}
+                            <strong>
+                              {wl.fatherName || wl.parentName || memberObj?.fatherName || '—'}
+                            </strong>{' '}
+                            • Total Payable:{' '}
+                            <strong className="text-rose-700">
+                              ₹{(wl.totalPayableAmount ?? wl.overdueAmount ?? 0).toLocaleString('en-IN')}
+                            </strong>
+                            {(wl.lateFineAmount ?? 0) > 0 && (
+                              <span className="text-[11px] text-rose-600">
+                                {' '}
+                                (incl. ₹{wl.lateFineAmount} Late Fine)
+                              </span>
+                            )}
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            Pay Before: <strong>{wl.proposedSuspensionDate || wl.deadlineDate || '20th of Month'}</strong>
+                            Deposit Date:{' '}
+                            <strong>
+                              {formatLetterDateDisplay(
+                                wl.proposedSuspensionDate ||
+                                  wl.deadlineDate ||
+                                  getDefault30thOfCurrentMonth(todayStr)
+                              )}
+                            </strong>
                           </div>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const matchedOrFallback: StudentMember =
-                              findStudentStrictly(students, wl) || {
-                                id: wl.studentId || 'stu-fallback',
-                                admissionNo: wl.admissionNo || 'ADM-000',
-                                name: wl.studentName || 'Member',
-                                memberType: 'Student',
-                                class: '—',
-                                section: '—',
-                                gender: 'M',
-                                campus: 'Main',
-                                academicSession: '2026-27',
-                                fatherName: wl.fatherName || wl.parentName || 'Parent / Guardian',
-                                mobile: '—',
-                                address: wl.address || 'Registered Guardian Address',
-                                routeId: '',
-                                routeCode: 'Assigned Route',
-                                villageId: '',
-                                villageName: '',
-                                pickupDropStopId: '',
-                                pickupDropStopName: 'Assigned Stop',
-                                serviceType: 'both',
-                                transportStatus: 'Active',
-                                emergencyContact: '—',
-                                monthlyFee: wl.overdueAmount || 0,
-                                concessionAmount: 0,
-                                balanceDue: wl.overdueAmount || 0,
-                                joiningDate: todayStr,
-                                version: 1,
-                              };
-
-                            printWarningCumReminderLetters([
-                              {
-                                member: matchedOrFallback,
-                                letterNo: wl.letterNo,
-                                issueDate: wl.issueDate || wl.date || todayStr,
-                                deadlineDate:
-                                  wl.proposedSuspensionDate || wl.deadlineDate || `${selectedMonth}-20`,
-                              },
-                            ]);
-                          }}
-                          className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
-                        >
-                          <Printer className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Print Letter &amp; Slip</span>
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => printWarningCumReminderLetters([buildTargetForIssued()])}
+                            className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Printer className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Print / PDF</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              downloadWarningLettersPdf(
+                                [buildTargetForIssued()],
+                                `warning_letter_${wl.letterNo}.pdf`
+                              )
+                            }
+                            className="p-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs cursor-pointer"
+                            title="Download PDF directly"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                          {isAdmin && onDeleteWarningLetter && (
+                            <button
+                              type="button"
+                              onClick={() => onDeleteWarningLetter(wl.id)}
+                              className="p-2 text-rose-600 hover:bg-rose-100 rounded-xl cursor-pointer"
+                              title="Delete letter (Admin Only)"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     );
                   })
@@ -4361,7 +5318,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 text-xs">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">Issue Formal Overdue Warning Letter</h3>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Issue Formal Overdue Warning Letter</h3>
+                <p className="text-[11px] text-slate-500">
+                  Defaults to 30th of current month deposit date &amp; includes applicable Late Fine
+                </p>
+              </div>
               <button
                 onClick={() => setIsWarningModalOpen(false)}
                 className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
@@ -4378,11 +5340,19 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   onChange={(e) => setWarnStudentId(e.target.value)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl bg-slate-50 font-semibold"
                 >
-                  {scopedStudents.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.admissionNo}) — Overdue: ₹{s.balanceDue}
-                    </option>
-                  ))}
+                  {scopedStudents
+                    .filter((s) => (s.balanceDue || 0) > 0 && s.transportStatus !== 'Left')
+                    .map((s) => {
+                      const fine = includeApplicableLateFine
+                        ? getApplicableLateFineForMember(s, todayStr)
+                        : 0;
+                      return (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.admissionNo}) — Dues: ₹{s.balanceDue}
+                          {fine > 0 ? ` + ₹${fine} Fine = ₹${s.balanceDue + fine}` : ''}
+                        </option>
+                      );
+                    })}
                 </select>
               </div>
 
@@ -4402,13 +5372,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">
-                    Payment Deadline / Suspension Date *
+                    Deposit Date (Default 30th) *
                   </label>
                   <input
                     type="date"
                     value={warnDeadline}
                     onChange={(e) => setWarnDeadline(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-xl"
+                    className="w-full p-2.5 border border-rose-300 bg-rose-50/30 rounded-xl font-bold"
                     required
                   />
                 </div>
@@ -4427,6 +5397,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 </div>
               </div>
 
+              <label className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer font-semibold text-slate-800">
+                <input
+                  type="checkbox"
+                  checked={includeApplicableLateFine}
+                  onChange={(e) => setIncludeApplicableLateFine(e.target.checked)}
+                  className="rounded accent-rose-600 w-4 h-4"
+                />
+                <span>Include Applicable Late Fine (₹100 after 10th due date)</span>
+              </label>
+
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
@@ -4440,7 +5420,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                   className="px-5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl cursor-pointer flex items-center gap-1.5"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>Issue &amp; Print Warning Letter</span>
+                  <span>Issue &amp; Proceed to Print / PDF</span>
                 </button>
               </div>
             </form>

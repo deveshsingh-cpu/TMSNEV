@@ -94,7 +94,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   invoices = [],
   receipts = [],
   expenses = [],
-  expenseHeads = [],
+  expenseHeads: rawExpenseHeads = [],
   odometerLogs = [],
   incomeHeads = [],
   incomes = [],
@@ -106,6 +106,23 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
   onDeleteExpense,
   onCreateVoucher,
 }) => {
+  const expenseHeads = React.useMemo(() => {
+    const getBucket = (h: ExpenseHead) => {
+      const n = String(h?.name || '').trim().toLowerCase();
+      if (h?.id === 'eh-1' || /^fuel\b/.test(n) || n.includes('fuel (diesel')) return 0;
+      if (
+        n.includes('rental due to breakdown') ||
+        (n.includes('rental') && n.includes('breakdown'))
+      ) {
+        return 2;
+      }
+      return 1;
+    };
+    return rawExpenseHeads
+      .map((head, idx) => ({ head, idx, bucket: getBucket(head) }))
+      .sort((a, b) => (a.bucket !== b.bucket ? a.bucket - b.bucket : a.idx - b.idx))
+      .map((item) => item.head);
+  }, [rawExpenseHeads]);
   const todayStr = new Date().toISOString().split('T')[0];
   // Only incorporate Approved expenses in paid reports, Day Book, and Ledgers
   const approvedExpenses = expenses.filter(
