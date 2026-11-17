@@ -1525,12 +1525,22 @@ export function App() {
 
   const handleIssueWarningLetter = async (data: Partial<WarningLetter>) => {
     const res = await api.issueWarningLetter(data);
+    if (res && res.id) {
+      setWarningLetters((prev) => [res, ...prev.filter((w) => w.id !== res.id)]);
+    }
     await loadAllData();
     return res;
   };
 
   const handleIssueWarningLettersBulk = async (entries: Partial<WarningLetter>[]) => {
     const res = await api.issueWarningLettersBulk(entries);
+    if (Array.isArray(res) && res.length > 0) {
+      const newIds = new Set(res.map((w) => w.id));
+      setWarningLetters((prev) => [
+        ...res.slice().reverse(),
+        ...prev.filter((w) => !newIds.has(w.id)),
+      ]);
+    }
     await loadAllData();
     return res;
   };
@@ -1546,17 +1556,24 @@ export function App() {
     }
   ) => {
     const res = await api.uploadWarningLetterAcknowledgement(id, payload);
+    if (res && res.id) {
+      setWarningLetters((prev) =>
+        prev.map((w) => (w.id === res.id || w.id === id ? { ...w, ...res } : w))
+      );
+    }
     await loadAllData();
     return res;
   };
 
   const handleDeleteWarningLetter = async (id: string) => {
+    setWarningLetters((prev) => prev.filter((w) => w.id !== id));
     const res = await api.deleteWarningLetter(id);
     await loadAllData();
     return res;
   };
 
   const handleClearAllWarningLetters = async () => {
+    setWarningLetters([]);
     const res = await api.clearAllWarningLetters();
     await loadAllData();
     return res;
@@ -2192,6 +2209,7 @@ export function App() {
                   onChangeMemberStatus={isPrincipal ? undefined : handleChangeMemberStatus}
                   onAddFeeFollowUp={isPrincipal ? undefined : (handleAddFeeFollowUp as any)}
                   onDeleteFeeFollowUp={isPrincipal ? undefined : handleDeleteFeeFollowUp}
+                  onIssueWarningLetter={isPrincipal ? undefined : handleIssueWarningLetter}
                   onUploadWarningLetterAck={isPrincipal ? undefined : handleUploadWarningLetterAcknowledgement}
                   onDeleteWarningLetter={isAdmin ? handleDeleteWarningLetter : undefined}
                   onAddDisciplineRecord={isPrincipal ? undefined : (handleAddDisciplineRecord as any)}

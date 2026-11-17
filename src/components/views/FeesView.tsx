@@ -2456,15 +2456,21 @@ export const FeesView: React.FC<FeesViewProps> = ({
                           : 0;
                         const totalPayable = baseDues + fine;
                         const isRowIssuing = issuingMemberId === st.id;
+                        const cleanStuAdm = String(st.admissionNo || '').trim().toLowerCase();
                         const stuLetters = warningLetters
                           .filter(
                             (w) =>
                               w.studentId === st.id ||
-                              (Boolean(st.admissionNo) && w.admissionNo === st.admissionNo)
+                              (Boolean(cleanStuAdm) &&
+                                String(w.admissionNo || '').trim().toLowerCase() === cleanStuAdm)
                           )
-                          .sort((a, b) =>
-                            (b.issueDate || b.date || '').localeCompare(a.issueDate || a.date || '')
-                          );
+                          .sort((a, b) => {
+                            const dCmp = (b.issueDate || b.date || '').localeCompare(
+                              a.issueDate || a.date || ''
+                            );
+                            if (dCmp !== 0) return dCmp;
+                            return String(b.id || '').localeCompare(String(a.id || ''));
+                          });
                         const latestLetter = stuLetters[0] || null;
                         const ackCount = stuLetters.filter(
                           (w) =>

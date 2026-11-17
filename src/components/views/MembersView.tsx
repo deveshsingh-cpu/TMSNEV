@@ -17,6 +17,7 @@ import {
   downloadWarningLettersPdf,
   formatLetterDateDisplay,
   getDefault30thOfCurrentMonth,
+  getApplicableLateFineForStudent,
 } from '../../utils/warningLetterPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
 import { api } from '../../services/api.js';
@@ -64,6 +65,7 @@ interface MembersViewProps {
   onChangeMemberStatus?: (id: string, status: StudentMember['transportStatus'], reason?: string) => Promise<void>;
   onAddFeeFollowUp?: (data: Omit<FeeFollowUpRecord, 'id'>) => Promise<void>;
   onDeleteFeeFollowUp?: (id: string) => Promise<void>;
+  onIssueWarningLetter?: (data: Partial<WarningLetter>) => Promise<any>;
   onUploadWarningLetterAck?: (
     id: string,
     payload: {
@@ -155,6 +157,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   onChangeMemberStatus,
   onAddFeeFollowUp,
   onDeleteFeeFollowUp,
+  onIssueWarningLetter,
   onUploadWarningLetterAck,
   onDeleteWarningLetter,
   onAddDisciplineRecord,
@@ -279,6 +282,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [uploadingAckLetterId, setUploadingAckLetterId] = useState<string | null>(null);
   const [localAckOverrides, setLocalAckOverrides] = useState<Record<string, string>>({});
+  const [issuingProfileLetter, setIssuingProfileLetter] = useState(false);
 
   // Special Tab: Permission Letter & Suspension form state
   const [permUntilDate, setPermUntilDate] = useState<string>('');
@@ -1092,9 +1096,14 @@ export const MembersView: React.FC<MembersViewProps> = ({
         .filter(
           w =>
             w.studentId === activeProfileMember.id ||
-            (Boolean(activeProfileAdmNo) && w.admissionNo === activeProfileAdmNo)
+            (Boolean(activeProfileAdmNo) &&
+              String(w.admissionNo || '').trim().toLowerCase() === activeProfileAdmNo.toLowerCase())
         )
-        .sort((a, b) => (b.issueDate || b.date || '').localeCompare(a.issueDate || a.date || ''))
+        .sort((a, b) => {
+          const dCmp = (b.issueDate || b.date || '').localeCompare(a.issueDate || a.date || '');
+          if (dCmp !== 0) return dCmp;
+          return String(b.id || '').localeCompare(String(a.id || ''));
+        })
     : [];
   const memberDisciplines = activeProfileMember
     ? disciplineRecords.filter(
@@ -1106,6 +1115,62 @@ export const MembersView: React.FC<MembersViewProps> = ({
         c => c.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && c.admissionNo === activeProfileAdmNo)
       )
     : [];
+
+  const handleIssueWarningLetterFromProfile = async () => {
+    if (!activeProfileMember || isReadOnly || !onIssueWarningLetter) return;
+    try {
+      setIssuingProfileLetter(true);
+      setFormError(null);
+      const depositDt = getDefault30thOfCurrentMonth(todayStr);
+      const baseDues = Math.max(0, Number(activeProfileMember.balanceDue) || 0);
+      const fine = getApplicableLateFineForStudent(activeProfileMember, invoices, todayStr);
+      const totalPayable = baseDues + fine;
+      const stuCampus = activeProfileMember.campus === 'Jr' ? 'Jr' : 'Sr';
+
+      const created = await onIssueWarningLetter({
+        date: todayStr,
+        issueDate: todayStr,
+        studentId: activeProfileMember.id,
+        studentName: activeProfileMember.name,
+        admissionNo: activeProfileMember.admissionNo,
+        campus: stuCampus as any,
+        parentName: activeProfileMember.fatherName,
+        fatherName: activeProfileMember.fatherName,
+        address: activeProfileMember.address,
+        baseOverdueAmount: baseDues,
+        lateFineAmount: fine,
+        totalPayableAmount: totalPayable,
+        overdueAmount: totalPayable,
+        periodOverdue: `Pending Dues up to ${todayStr.slice(0, 7)}`,
+        deadlineDate: depositDt,
+        proposedSuspensionDate: depositDt,
+        warningLevel: 'Level 2: Urgent Notice',
+        sentVia: 'Printed Slip',
+        issuedBy: `${currentRole} (${stuCampus} Campus)`,
+      });
+
+      printWarningCumReminderLetters(
+        [
+          {
+            member: activeProfileMember,
+            letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
+            issueDate: todayStr,
+            deadlineDate: depositDt,
+            baseOverdueAmount: baseDues,
+            lateFineAmount: fine,
+          },
+        ],
+        {
+          invoices,
+          schoolName,
+        }
+      );
+    } catch (err: any) {
+      setFormError(err?.message || 'Failed to issue Warning cum Reminder Letter.');
+    } finally {
+      setIssuingProfileLetter(false);
+    }
+  };
 
   const handleUploadLetterAckSlip = async (
     wl: WarningLetter,
@@ -3932,30 +3997,44 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 </div>
               )}
 
-              {/* TAB: WARNING LETTERS & ACKNOWLEDGEMENT SLIPS */}
+              {/* TAB: WARNING LETTERS & ACKNOWLEDGEMENT SLIPS (DATE-WISE HISTORY) */}
               {profileTab === 'warning_letters' && (
                 <div className="space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2 bg-rose-50/70 border border-rose-200 p-4 rounded-2xl">
+                  <div className="flex flex-wrap items-center justify-between gap-3 bg-rose-50/70 border border-rose-200 p-4 rounded-2xl">
                     <div>
                       <h4 className="text-sm font-bold text-slate-900">
-                        Issued Warning cum Reminder Letters ({memberWarningLetters.length})
+                        Date-wise Issued Warning Letters History ({memberWarningLetters.length})
                       </h4>
                       <p className="text-[11px] text-slate-600 mt-0.5">
-                        Complete history of Warning cum Reminder letters issued to {activeProfileMember.name}. Upload signed guardian Acknowledgement Slips against each letter when received.
+                        Date-wise record of all Warning cum Reminder letters issued to {activeProfileMember.name}. Use <strong>Upload Acknowledgement</strong> in front of each date to attach the signed acknowledgement photo.
                       </p>
                     </div>
-                    <div className="flex items-center gap-2 text-xs font-bold">
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
                       <span className="px-3 py-1.5 rounded-xl bg-white border border-rose-200 text-slate-800">
-                        Ack Received:{' '}
+                        Ack Uploaded:{' '}
                         <span className="text-emerald-700">
                           {
-                            memberWarningLetters.filter(
-                              w => Boolean(localAckOverrides[w.id] || w.acknowledgementSlip)
-                            ).length
+                            memberWarningLetters.filter(w => {
+                              const u = localAckOverrides[w.id] || w.acknowledgementSlip || '';
+                              return Boolean(u) && u !== '[ATTACHMENT_STORED]';
+                            }).length
                           }
                         </span>{' '}
                         / {memberWarningLetters.length}
                       </span>
+                      {!isReadOnly && onIssueWarningLetter && (
+                        <button
+                          type="button"
+                          disabled={issuingProfileLetter}
+                          onClick={handleIssueWarningLetterFromProfile}
+                          className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-400 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>
+                            {issuingProfileLetter ? 'Issuing...' : '+ Issue & Print Warning Letter'}
+                          </span>
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -3972,12 +4051,11 @@ export const MembersView: React.FC<MembersViewProps> = ({
                     <div className="overflow-x-auto">
                       <table className="w-full text-left border-collapse text-xs">
                         <thead>
-                          <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
-                            <th className="py-3 px-4">Letter Ref &amp; Issue Date</th>
-                            <th className="py-3 px-3">Overdue Breakdown</th>
-                            <th className="py-3 px-3">Deposit Cutoff</th>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-600 uppercase">
+                            <th className="py-3 px-4">Issue Date &amp; Letter Ref</th>
+                            <th className="py-3 px-3">Overdue Dues &amp; Deposit By</th>
+                            <th className="py-3 px-3">Upload Acknowledgement (Photo)</th>
                             <th className="py-3 px-3">Issued By</th>
-                            <th className="py-3 px-3">Signed Acknowledgement Slip</th>
                             <th className="py-3 px-4 text-right">Letter Print / PDF</th>
                           </tr>
                         </thead>
@@ -3996,15 +4074,21 @@ export const MembersView: React.FC<MembersViewProps> = ({
                             const ackUrl = localAckOverrides[wl.id] || wl.acknowledgementSlip || '';
                             const hasAck =
                               Boolean(ackUrl) && ackUrl !== '[ATTACHMENT_STORED]';
+                            const isPdfAck =
+                              hasAck &&
+                              (ackUrl.startsWith('data:application/pdf') ||
+                                ackUrl.includes('type=pdf') ||
+                                ackUrl.toLowerCase().endsWith('.pdf'));
                             const isUploadingThis = uploadingAckLetterId === wl.id;
+                            const issueDateIso = wl.issueDate || wl.date || todayStr;
                             const letterTarget = {
                               member: activeProfileMember,
                               letterNo: wl.letterNo,
-                              issueDate: wl.issueDate || wl.date || todayStr,
+                              issueDate: issueDateIso,
                               deadlineDate:
                                 wl.proposedSuspensionDate ||
                                 wl.deadlineDate ||
-                                getDefault30thOfCurrentMonth(wl.issueDate || wl.date || todayStr),
+                                getDefault30thOfCurrentMonth(issueDateIso),
                               baseOverdueAmount: recordedBase,
                               lateFineAmount: recordedFine,
                             };
@@ -4012,11 +4096,11 @@ export const MembersView: React.FC<MembersViewProps> = ({
                             return (
                               <tr key={wl.id} className="hover:bg-slate-50/80">
                                 <td className="py-3 px-4">
-                                  <div className="font-mono font-bold text-rose-900">
-                                    {wl.letterNo}
+                                  <div className="font-mono font-extrabold text-slate-900 text-xs">
+                                    {formatLetterDateDisplay(issueDateIso)}
                                   </div>
-                                  <div className="text-[11px] text-slate-500 font-mono">
-                                    Issued: {formatLetterDateDisplay(wl.issueDate || wl.date || '')}
+                                  <div className="font-mono font-bold text-[11px] text-rose-700 mt-0.5">
+                                    {wl.letterNo}
                                   </div>
                                 </td>
                                 <td className="py-3 px-3">
@@ -4027,68 +4111,87 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                     Fee: ₹{recordedBase.toLocaleString('en-IN')}
                                     {recordedFine > 0 ? ` + Fine: ₹${recordedFine}` : ''}
                                   </div>
-                                  {wl.periodOverdue && (
-                                    <div className="text-[10px] text-slate-400 truncate max-w-44">
-                                      {wl.periodOverdue}
-                                    </div>
-                                  )}
+                                  <div className="text-[10px] font-mono font-semibold text-slate-700 mt-0.5">
+                                    Deposit By:{' '}
+                                    {formatLetterDateDisplay(
+                                      wl.proposedSuspensionDate || wl.deadlineDate || ''
+                                    )}
+                                  </div>
                                 </td>
-                                <td className="py-3 px-3 font-mono font-bold text-slate-800">
-                                  {formatLetterDateDisplay(
-                                    wl.proposedSuspensionDate || wl.deadlineDate || ''
-                                  )}
-                                </td>
-                                <td className="py-3 px-3 text-slate-600">{wl.issuedBy || '—'}</td>
                                 <td className="py-3 px-3">
-                                  <div className="flex flex-wrap items-center gap-1.5">
+                                  <div className="flex flex-wrap items-center gap-2">
                                     {hasAck ? (
                                       <>
-                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-bold text-[10px]">
-                                          <CheckCircle2 className="w-3 h-3" />
-                                          <span>
-                                            Received
-                                            {wl.acknowledgementReceivedDate
-                                              ? ` (${formatLetterDateDisplay(wl.acknowledgementReceivedDate)})`
-                                              : ''}
-                                          </span>
-                                        </span>
-                                        <button
-                                          type="button"
-                                          onClick={() =>
-                                            setPreviewAttachment({
-                                              title: `Signed Acknowledgement Slip — ${wl.letterNo} (${activeProfileMember.name})`,
-                                              url: ackUrl,
-                                            })
-                                          }
-                                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] cursor-pointer"
-                                        >
-                                          <Eye className="w-3 h-3" />
-                                          <span>View Slip</span>
-                                        </button>
-                                        {!isReadOnly && (
-                                          <label className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[10px] cursor-pointer">
-                                            <Upload className="w-3 h-3" />
-                                            <span>{isUploadingThis ? 'Saving...' : 'Replace'}</span>
-                                            <input
-                                              type="file"
-                                              accept="image/*,.pdf"
-                                              disabled={isUploadingThis}
-                                              onChange={e => handleUploadLetterAckSlip(wl, e)}
-                                              className="hidden"
+                                        {!isPdfAck && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setPreviewAttachment({
+                                                title: `Acknowledgement Photo — ${formatLetterDateDisplay(issueDateIso)} (${wl.letterNo})`,
+                                                url: ackUrl,
+                                              })
+                                            }
+                                            className="w-10 h-10 rounded-lg border border-emerald-300 overflow-hidden bg-white shrink-0 cursor-pointer hover:ring-2 hover:ring-emerald-500"
+                                            title="Click to view full Acknowledgement Photo"
+                                          >
+                                            <img
+                                              src={ackUrl}
+                                              alt="Acknowledgement"
+                                              className="w-full h-full object-cover"
                                             />
-                                          </label>
+                                          </button>
                                         )}
+                                        <div className="space-y-1">
+                                          <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                                            <CheckCircle2 className="w-3 h-3" />
+                                            <span>
+                                              Ack Uploaded
+                                              {wl.acknowledgementReceivedDate
+                                                ? ` (${formatLetterDateDisplay(wl.acknowledgementReceivedDate)})`
+                                                : ''}
+                                            </span>
+                                          </div>
+                                          <div className="flex items-center gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setPreviewAttachment({
+                                                  title: `Signed Acknowledgement — ${formatLetterDateDisplay(issueDateIso)} (${wl.letterNo} • ${activeProfileMember.name})`,
+                                                  url: ackUrl,
+                                                })
+                                              }
+                                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] cursor-pointer"
+                                            >
+                                              <Eye className="w-3 h-3" />
+                                              <span>View Photo</span>
+                                            </button>
+                                            {!isReadOnly && (
+                                              <label className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-[11px] cursor-pointer">
+                                                <Camera className="w-3 h-3 text-slate-700" />
+                                                <span>
+                                                  {isUploadingThis ? 'Saving...' : 'Change Photo'}
+                                                </span>
+                                                <input
+                                                  type="file"
+                                                  accept="image/*,.pdf"
+                                                  disabled={isUploadingThis}
+                                                  onChange={e => handleUploadLetterAckSlip(wl, e)}
+                                                  className="hidden"
+                                                />
+                                              </label>
+                                            )}
+                                          </div>
+                                        </div>
                                       </>
                                     ) : (
-                                      <>
-                                        <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-bold text-[10px]">
-                                          Pending Slip
-                                        </span>
-                                        {!isReadOnly && (
-                                          <label className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] cursor-pointer">
-                                            <Upload className="w-3 h-3 text-amber-400" />
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        {!isReadOnly ? (
+                                          <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] cursor-pointer shadow-2xs">
+                                            <Camera className="w-3.5 h-3.5 text-amber-400" />
                                             <span>
-                                              {isUploadingThis ? 'Uploading...' : 'Upload Ack Slip'}
+                                              {isUploadingThis
+                                                ? 'Uploading Photo...'
+                                                : 'Upload Acknowledgement'}
                                             </span>
                                             <input
                                               type="file"
@@ -4098,10 +4201,17 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                               className="hidden"
                                             />
                                           </label>
+                                        ) : (
+                                          <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-bold text-[10px]">
+                                            Acknowledgement Pending
+                                          </span>
                                         )}
-                                      </>
+                                      </div>
                                     )}
                                   </div>
+                                </td>
+                                <td className="py-3 px-3 text-slate-600 text-[11px]">
+                                  {wl.issuedBy || '—'}
                                 </td>
                                 <td className="py-3 px-4 text-right">
                                   <div className="inline-flex items-center justify-end gap-1.5">
@@ -4149,8 +4259,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
                           })}
                           {memberWarningLetters.length === 0 && (
                             <tr>
-                              <td colSpan={6} className="py-8 text-center text-slate-400">
-                                No Warning cum Reminder letters have been issued to this member yet.
+                              <td colSpan={5} className="py-8 text-center text-slate-400">
+                                No Warning cum Reminder letters issued yet for {activeProfileMember.name}. Issue a letter from <strong>Fees &rarr; Warning Letters &amp; Recovery</strong> or click <strong>+ Issue &amp; Print Warning Letter</strong> above.
                               </td>
                             </tr>
                           )}

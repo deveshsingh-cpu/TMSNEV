@@ -319,7 +319,9 @@ export class SheetsDatabaseManager {
           if (Array.isArray(parsed.complaints)) this.complaints = parsed.complaints;
           if (Array.isArray(parsed.explicitlyDeletedIds)) {
             this.explicitlyDeletedIds = new Set(
-              parsed.explicitlyDeletedIds.map((x: any) => String(x || '').trim()).filter(Boolean)
+              parsed.explicitlyDeletedIds
+                .map((x: any) => String(x || '').trim())
+                .filter((x: string) => Boolean(x) && !/^WL-\d{4}-/i.test(x))
             );
           }
           if (!this.isGoogleConfigured) {
@@ -1245,7 +1247,9 @@ export class SheetsDatabaseManager {
                 if (Array.isArray(parsedDel)) {
                   for (const dId of parsedDel) {
                     const clean = String(dId || '').trim();
-                    if (clean) this.explicitlyDeletedIds.add(clean);
+                    if (clean && !/^WL-\d{4}-/i.test(clean)) {
+                      this.explicitlyDeletedIds.add(clean);
+                    }
                   }
                 }
               } catch {
@@ -1425,12 +1429,8 @@ export class SheetsDatabaseManager {
         }
         const remote = this.parseWarningLettersFromSheet(tabMap.get('Warning_Letters'), prevWlAttMap);
         this.warningLetters = keepRecentLocalLedgers
-          ? this.unionPermanentRecords(this.warningLetters, remote, wl => wl.letterNo)
-          : remote.filter(
-              wl =>
-                !this.explicitlyDeletedIds.has(wl.id) &&
-                (!wl.letterNo || !this.explicitlyDeletedIds.has(wl.letterNo))
-            );
+          ? this.unionPermanentRecords(this.warningLetters, remote)
+          : remote.filter(wl => !this.explicitlyDeletedIds.has(wl.id));
       }
       if ((tabMap.get('Discipline_Records') || []).length >= 1) {
         const remote = this.parseRowsFromSheet<DisciplineRecord>(tabMap.get('Discipline_Records'), true);
@@ -2075,7 +2075,7 @@ export class SheetsDatabaseManager {
           }
         }
         const remoteWl = this.parseWarningLettersFromSheet(remoteMap.get('Warning_Letters'), prevWlAttMap);
-        this.warningLetters = this.unionPermanentRecords(this.warningLetters, remoteWl, wl => wl.letterNo);
+        this.warningLetters = this.unionPermanentRecords(this.warningLetters, remoteWl);
       }
 
       if (feesMerged) {
@@ -9903,7 +9903,6 @@ export class SheetsDatabaseManager {
       if (this.warningLetters.length > 0) {
         for (const wl of this.warningLetters) {
           if (wl?.id) this.explicitlyDeletedIds.add(String(wl.id).trim());
-          if (wl?.letterNo) this.explicitlyDeletedIds.add(String(wl.letterNo).trim());
         }
         this.warningLetters = [];
       }
@@ -9911,6 +9910,13 @@ export class SheetsDatabaseManager {
       (this.config as any).clearedTrialWarningLetters20261117_v2 = true;
       (this.config as any).clearedTrialWarningLetters20261117_v3 = true;
       changed = true;
+    }
+
+    for (const delKey of Array.from(this.explicitlyDeletedIds)) {
+      if (/^WL-\d{4}-/i.test(delKey)) {
+        this.explicitlyDeletedIds.delete(delKey);
+        changed = true;
+      }
     }
 
     if (changed) {
@@ -12090,7 +12096,12 @@ export class SheetsDatabaseManager {
     seq: number,
     indexOffset = 0
   ): WarningLetter {
-    const student = this.students.find(s => s.id === data.studentId);
+    const cleanAdm = String(data.admissionNo || '').trim().toLowerCase();
+    const student =
+      (data.studentId ? this.students.find(s => s.id === data.studentId) : undefined) ||
+      (cleanAdm
+        ? this.students.find(s => String(s.admissionNo || '').trim().toLowerCase() === cleanAdm)
+        : undefined);
     const today = new Date().toISOString().split('T')[0];
     const default30th = this.getDefault30thOfMonthDate(data.issueDate || data.date || today);
     const year = Number((data.issueDate || data.date || today).slice(0, 4)) || new Date().getFullYear();
@@ -12106,9 +12117,15 @@ export class SheetsDatabaseManager {
         ? Math.max(0, Number(data.overdueAmount))
         : baseOverdue + lateFine;
 
+    const randSuffix = Math.random().toString(36).slice(2, 6);
+    const newId = `wl-${Date.now()}-${randSuffix}-${indexOffset}`;
+    const newLetterNo = data.letterNo || `WL-${year}-${String(seq).padStart(3, '0')}`;
+    this.explicitlyDeletedIds.delete(newId);
+    this.explicitlyDeletedIds.delete(newLetterNo);
+
     return {
-      id: `wl-${Date.now()}-${indexOffset}`,
-      letterNo: data.letterNo || `WL-${year}-${String(seq).padStart(3, '0')}`,
+      id: newId,
+      letterNo: newLetterNo,
       date: data.date || today,
       issueDate: data.issueDate || data.date || today,
       studentId: student?.id || data.studentId || '',
@@ -12131,13 +12148,28 @@ export class SheetsDatabaseManager {
     };
   }
 
+  private purgeLegacyDeletedLetterNos(): boolean {
+    let purged = false;
+    for (const delKey of Array.from(this.explicitlyDeletedIds)) {
+      if (/^WL-\d{4}-/i.test(delKey)) {
+        this.explicitlyDeletedIds.delete(delKey);
+        purged = true;
+      }
+    }
+    return purged;
+  }
+
   public async issueWarningLetter(data: Partial<WarningLetter>): Promise<WarningLetter> {
     return this.enqueueWrite(async () => {
+      const purgedMasters = this.purgeLegacyDeletedLetterNos();
       const year = new Date().getFullYear();
       const nextSeq = this.getNextWarningLetterSeq(year);
       const wl = this.buildWarningLetterObject(data, nextSeq, 0);
       this.warningLetters.unshift(wl);
-      await this.internalSyncToGoogleSheets(false, ['Warning_Letters']);
+      await this.internalSyncToGoogleSheets(
+        false,
+        purgedMasters ? ['Warning_Letters', 'School_Masters'] : ['Warning_Letters']
+      );
       return wl;
     });
   }
@@ -12145,6 +12177,7 @@ export class SheetsDatabaseManager {
   public async issueWarningLettersBulk(entries: Partial<WarningLetter>[]): Promise<WarningLetter[]> {
     return this.enqueueWrite(async () => {
       if (!Array.isArray(entries) || entries.length === 0) return [];
+      const purgedMasters = this.purgeLegacyDeletedLetterNos();
       const year = new Date().getFullYear();
       let seq = this.getNextWarningLetterSeq(year);
       const created: WarningLetter[] = [];
@@ -12154,16 +12187,18 @@ export class SheetsDatabaseManager {
       }
       // Prepend in reverse order so the latest sequential letter sits at the top of history
       this.warningLetters = [...created.slice().reverse(), ...this.warningLetters];
-      await this.internalSyncToGoogleSheets(false, ['Warning_Letters']);
+      await this.internalSyncToGoogleSheets(
+        false,
+        purgedMasters ? ['Warning_Letters', 'School_Masters'] : ['Warning_Letters']
+      );
       return created;
     });
   }
 
   public async deleteWarningLetter(id: string) {
     return this.enqueueWrite(async () => {
-      const target = this.warningLetters.find(w => w.id === id);
+      this.purgeLegacyDeletedLetterNos();
       if (id) this.explicitlyDeletedIds.add(String(id).trim());
-      if (target?.letterNo) this.explicitlyDeletedIds.add(String(target.letterNo).trim());
       this.warningLetters = this.warningLetters.filter(w => w.id !== id);
       await this.internalSyncToGoogleSheets(false, ['Warning_Letters', 'School_Masters']);
       return { success: true };
@@ -12172,10 +12207,10 @@ export class SheetsDatabaseManager {
 
   public async clearAllWarningLetters() {
     return this.enqueueWrite(async () => {
+      this.purgeLegacyDeletedLetterNos();
       const removedCount = this.warningLetters.length;
       for (const wl of this.warningLetters) {
         if (wl?.id) this.explicitlyDeletedIds.add(String(wl.id).trim());
-        if (wl?.letterNo) this.explicitlyDeletedIds.add(String(wl.letterNo).trim());
       }
       this.warningLetters = [];
       await this.internalSyncToGoogleSheets(false, ['Warning_Letters', 'School_Masters']);
