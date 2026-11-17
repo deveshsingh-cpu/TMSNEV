@@ -28,6 +28,7 @@ export interface SheetsStatus {
   tabList?: SheetsTabInfo[];
   lastError: string | null;
   activeWriterQueueLength: number;
+  hasHydrated?: boolean;
 }
 
 export interface ReportsSummary {
@@ -67,12 +68,15 @@ export interface MastersData {
   users?: SystemUser[];
 }
 
-const BOOTSTRAP_CACHE_KEY = 'nev_transport_bootstrap_cache_v2';
+const BOOTSTRAP_CACHE_KEY = 'nev_transport_bootstrap_cache_v3';
 let bootstrapUpdateListener: ((boot: any) => void) | null = null;
 let lastMutationBootstrapAt = 0;
 
 export function saveCachedBootstrap(boot: any) {
   if (!boot || typeof boot !== 'object' || typeof window === 'undefined') return;
+  if (boot?.status?.isConfigured && boot?.status?.hasHydrated === false) {
+    return;
+  }
   try {
     localStorage.setItem(BOOTSTRAP_CACHE_KEY, JSON.stringify(boot));
   } catch {
@@ -238,14 +242,13 @@ export const api = {
     };
 
     try {
-      return await fetchWithTimeout(fresh, 8500);
+      return await fetchWithTimeout(fresh, 25000);
     } catch (firstErr) {
-      if (fresh) {
-        try {
-          return await fetchWithTimeout(false, 6000);
-        } catch {
-          // Fall through to cached bootstrap if available
-        }
+      try {
+        await new Promise((r) => setTimeout(r, 900));
+        return await fetchWithTimeout(false, 20000);
+      } catch {
+        // Fall through to cached bootstrap if available
       }
       const cached = getCachedBootstrap();
       if (cached) {
@@ -1139,6 +1142,27 @@ export const api = {
     if (!res.ok) {
       const err = await res.json();
       throw new Error(err.error || 'Failed to bulk issue warning letters');
+    }
+    return res.json();
+  },
+  uploadWarningLetterAcknowledgement: async (
+    id: string,
+    payload: {
+      acknowledgementSlip: string;
+      acknowledgementFileName?: string;
+      acknowledgementReceivedDate?: string;
+      acknowledgementUploadedBy?: string;
+      acknowledgementRemarks?: string;
+    }
+  ): Promise<WarningLetter> => {
+    const res = await fetch(`/api/warning-letters/${encodeURIComponent(id)}/acknowledgement`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to upload acknowledgement slip');
     }
     return res.json();
   },

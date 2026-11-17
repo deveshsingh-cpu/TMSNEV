@@ -72,6 +72,7 @@ export interface SheetsConnectionStatus {
   tabList?: { title: string; headersCount: number; rowCount: number }[];
   lastError: string | null;
   activeWriterQueueLength: number;
+  hasHydrated?: boolean;
 }
 
 const DATA_DIR = process.env.VERCEL ? '/tmp/.data' : path.resolve(process.cwd(), '.data');
@@ -220,7 +221,16 @@ export class SheetsDatabaseManager {
     }
   }
 
+  public get isConfigured(): boolean {
+    return this.isGoogleConfigured;
+  }
+
+  public hasHydrated(): boolean {
+    return !this.isGoogleConfigured || this.hasHydratedFromSheets;
+  }
+
   public async ensureInitialized(forceFresh = false): Promise<void> {
+    const isColdStartHydration = this.isGoogleConfigured && !this.hasHydratedFromSheets;
     const work = (async () => {
       try {
         await this.initPromise;
@@ -246,10 +256,11 @@ export class SheetsDatabaseManager {
       }
     })();
 
-    // Never let a slow Google Sheets API call hang /api/bootstrap past 5.5s on mobile or Vercel
+    // Give initial cold-start Google Sheets hydration up to 25s so fresh containers never return empty unhydrated state
+    const maxWaitMs = isColdStartHydration ? 25000 : 6500;
     await Promise.race([
       work,
-      new Promise<void>((resolve) => setTimeout(resolve, 5500)),
+      new Promise<void>((resolve) => setTimeout(resolve, maxWaitMs)),
     ]);
   }
 
@@ -311,9 +322,11 @@ export class SheetsDatabaseManager {
               parsed.explicitlyDeletedIds.map((x: any) => String(x || '').trim()).filter(Boolean)
             );
           }
-          this.ensureSeededRouteMembers();
+          if (!this.isGoogleConfigured) {
+            this.ensureSeededRouteMembers();
+          }
         }
-      } else {
+      } else if (!this.isGoogleConfigured) {
         this.ensureSeededRouteMembers();
       }
     } catch (err) {
@@ -546,6 +559,101 @@ export class SheetsDatabaseManager {
           // Ignore malformed JSON cell
         }
       }
+    }
+    return results;
+  }
+
+  private parseWarningLettersFromSheet(
+    rows: any[][] | undefined | null,
+    prevAttachmentMap?: Map<string, string>
+  ): WarningLetter[] {
+    if (!Array.isArray(rows) || rows.length < 2) return [];
+    const headers = rows[0].map((h: any) => String(h || '').trim());
+    const jsonColIdx = headers.indexOf('_JSON') >= 0 ? headers.indexOf('_JSON') : 10;
+    const att1Idx = headers.indexOf('_ATT_1') >= 0 ? headers.indexOf('_ATT_1') : 11;
+    const results: WarningLetter[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const colId = String(row[0] || '').trim();
+      const colLetterNo = String(row[1] || '').trim();
+      const colIssueDate = String(row[2] || '').trim();
+      const colAdm = String(row[3] || '').trim();
+      const colName = String(row[4] || '').trim();
+      if (!colId && !colLetterNo && !colName) continue;
+
+      let parsedObj: Partial<WarningLetter> | null = null;
+      const rawJson = row[jsonColIdx];
+      if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+        try {
+          const p = JSON.parse(rawJson);
+          if (p && typeof p === 'object' && (p.id || p.letterNo || p.studentId)) {
+            parsedObj = p;
+          }
+        } catch {
+          parsedObj = null;
+        }
+      }
+
+      const id = String(parsedObj?.id || colId || `wl-row-${i}`).trim();
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+
+      const letterNo = String(parsedObj?.letterNo || colLetterNo || `WL-2026-${String(i).padStart(3, '0')}`).trim();
+      const chunkedAttachment = [
+        row[att1Idx],
+        row[att1Idx + 1],
+        row[att1Idx + 2],
+        row[att1Idx + 3],
+        row[att1Idx + 4],
+      ]
+        .map(c => (typeof c === 'string' ? c : ''))
+        .join('');
+
+      let acknowledgementSlip = parsedObj?.acknowledgementSlip;
+      if (chunkedAttachment && chunkedAttachment.startsWith('data:')) {
+        acknowledgementSlip = chunkedAttachment;
+      } else if (acknowledgementSlip === '[ATTACHMENT_STORED]' && prevAttachmentMap) {
+        acknowledgementSlip =
+          prevAttachmentMap.get(id) || prevAttachmentMap.get(letterNo) || undefined;
+      } else if (acknowledgementSlip === '[ATTACHMENT_STORED]') {
+        acknowledgementSlip = undefined;
+      }
+
+      const matchedStu =
+        (parsedObj?.studentId ? this.students.find(s => s.id === parsedObj!.studentId) : undefined) ||
+        (colAdm
+          ? this.students.find(
+              s => String(s.admissionNo || '').trim().toLowerCase() === colAdm.toLowerCase()
+            )
+          : undefined);
+
+      const overdueAmount = Number(parsedObj?.overdueAmount ?? row[6] ?? 0) || 0;
+      const issueDate = String(parsedObj?.issueDate || parsedObj?.date || colIssueDate || '2026-11-17').trim();
+      const deadlineDate = String(parsedObj?.deadlineDate || row[7] || '2026-11-30').trim();
+
+      results.push({
+        ...(parsedObj as any),
+        id,
+        letterNo,
+        date: String(parsedObj?.date || issueDate),
+        issueDate,
+        studentId: String(parsedObj?.studentId || matchedStu?.id || '').trim(),
+        admissionNo: String(parsedObj?.admissionNo || colAdm || matchedStu?.admissionNo || '').trim(),
+        studentName: String(parsedObj?.studentName || colName || matchedStu?.name || 'Member').trim(),
+        campus: parsedObj?.campus || matchedStu?.campus,
+        parentName: String(parsedObj?.parentName || row[5] || matchedStu?.fatherName || '').trim(),
+        fatherName: String(parsedObj?.fatherName || parsedObj?.parentName || row[5] || matchedStu?.fatherName || '').trim(),
+        overdueAmount,
+        deadlineDate,
+        proposedSuspensionDate: String(parsedObj?.proposedSuspensionDate || deadlineDate),
+        warningLevel: (parsedObj?.warningLevel || row[8] || 'Level 2: Urgent Notice') as WarningLetter['warningLevel'],
+        sentVia: (parsedObj?.sentVia || 'Printed Slip') as WarningLetter['sentVia'],
+        issuedBy: String(parsedObj?.issuedBy || row[9] || 'Admin').trim(),
+        acknowledgementSlip,
+      });
     }
     return results;
   }
@@ -1304,7 +1412,18 @@ export class SheetsDatabaseManager {
           : remote.filter(f => !this.explicitlyDeletedIds.has(f.id));
       }
       if ((tabMap.get('Warning_Letters') || []).length >= 1) {
-        const remote = this.parseRowsFromSheet<WarningLetter>(tabMap.get('Warning_Letters'), true);
+        const prevWlAttMap = new Map<string, string>();
+        for (const oldWl of this.warningLetters) {
+          if (
+            oldWl.acknowledgementSlip &&
+            oldWl.acknowledgementSlip !== '[ATTACHMENT_STORED]' &&
+            oldWl.acknowledgementSlip.startsWith('data:')
+          ) {
+            prevWlAttMap.set(oldWl.id, oldWl.acknowledgementSlip);
+            if (oldWl.letterNo) prevWlAttMap.set(oldWl.letterNo, oldWl.acknowledgementSlip);
+          }
+        }
+        const remote = this.parseWarningLettersFromSheet(tabMap.get('Warning_Letters'), prevWlAttMap);
         this.warningLetters = keepRecentLocalLedgers
           ? this.unionPermanentRecords(this.warningLetters, remote, wl => wl.letterNo)
           : remote.filter(
@@ -1440,6 +1559,9 @@ export class SheetsDatabaseManager {
         ) {
           await this.hydrateFromGoogleSheets(true);
         }
+        if (this.isGoogleConfigured && !this.hasHydratedFromSheets) {
+          throw new Error('Google Sheets live database is still synchronizing. Please retry in a few seconds.');
+        }
         const res = await task();
         const now = Date.now();
         this.lastHydratedAt = now;
@@ -1515,6 +1637,7 @@ export class SheetsDatabaseManager {
       tabList,
       lastError: this.lastError,
       activeWriterQueueLength: this.queueCount,
+      hasHydrated: !this.isGoogleConfigured || this.hasHydratedFromSheets,
     };
   }
 
@@ -1528,6 +1651,12 @@ export class SheetsDatabaseManager {
     const clean = String(idOrNo || '').trim();
     const rec = this.receipts.find(r => r.id === clean || r.receiptNo === clean);
     return rec?.upiScreenshot;
+  }
+
+  public getWarningLetterAttachmentRaw(idOrNo: string): string | undefined {
+    const clean = String(idOrNo || '').trim();
+    const wl = this.warningLetters.find(w => w.id === clean || w.letterNo === clean);
+    return wl?.acknowledgementSlip;
   }
 
   public getBootstrapSnapshot(options?: { includeAttendance?: boolean }) {
@@ -1570,6 +1699,17 @@ export class SheetsDatabaseManager {
       return e;
     });
 
+    const liteWarningLetters = this.getWarningLetters().map(w => {
+      if (typeof w.acknowledgementSlip === 'string' && w.acknowledgementSlip.startsWith('data:')) {
+        const isPdf = w.acknowledgementSlip.startsWith('data:application/pdf');
+        return {
+          ...w,
+          acknowledgementSlip: `/api/attachments/warning-letter/${encodeURIComponent(w.id)}?v=${w.acknowledgementSlip.length}${isPdf ? '&type=pdf' : ''}`,
+        };
+      }
+      return w;
+    });
+
     const includeAttendance = options?.includeAttendance !== false;
 
     return {
@@ -1595,7 +1735,7 @@ export class SheetsDatabaseManager {
       services: [...this.getScheduledServices()],
       invoices: [...invoices],
       receipts: liteReceipts,
-      warningLetters: [...this.getWarningLetters()],
+      warningLetters: liteWarningLetters,
       expenses: liteExpenses,
       expenseHeads: [...this.getExpenseHeads()],
       incomeHeads: [...this.getIncomeHeads()],
@@ -1927,7 +2067,14 @@ export class SheetsDatabaseManager {
         this.followUps = this.unionPermanentRecords(this.followUps, remoteFu);
       }
       if (remoteMap.has('Warning_Letters')) {
-        const remoteWl = this.parseRowsFromSheet<WarningLetter>(remoteMap.get('Warning_Letters'), true);
+        const prevWlAttMap = new Map<string, string>();
+        for (const w of this.warningLetters) {
+          if (w.acknowledgementSlip && w.acknowledgementSlip.startsWith('data:')) {
+            prevWlAttMap.set(w.id, w.acknowledgementSlip);
+            if (w.letterNo) prevWlAttMap.set(w.letterNo, w.acknowledgementSlip);
+          }
+        }
+        const remoteWl = this.parseWarningLettersFromSheet(remoteMap.get('Warning_Letters'), prevWlAttMap);
         this.warningLetters = this.unionPermanentRecords(this.warningLetters, remoteWl, wl => wl.letterNo);
       }
 
@@ -2537,20 +2684,36 @@ export class SheetsDatabaseManager {
         {
           range: 'Warning_Letters!A1',
           values: [
-            ['Letter ID', 'Letter No', 'Issue Date', 'Admission No', 'Member Name', 'Guardian Name', 'Overdue Amount (INR)', 'Deadline Date', 'Warning Level', 'Issued By', '_JSON'],
-            ...this.warningLetters.map(wl => [
-              wl.id,
-              wl.letterNo,
-              wl.issueDate || wl.date,
-              wl.admissionNo,
-              wl.studentName,
-              wl.parentName || wl.fatherName || '',
-              wl.overdueAmount,
-              wl.deadlineDate,
-              wl.warningLevel,
-              wl.issuedBy,
-              stripLargeBase64ForSheetCell(wl),
-            ]),
+            [
+              'Letter ID', 'Letter No', 'Issue Date', 'Admission No', 'Member Name',
+              'Guardian Name', 'Overdue Amount (INR)', 'Deadline Date', 'Warning Level',
+              'Issued By', '_JSON', '_ATT_1', '_ATT_2', '_ATT_3', '_ATT_4', '_ATT_5'
+            ],
+            ...this.warningLetters.map(wl => {
+              const rawAtt =
+                typeof wl.acknowledgementSlip === 'string' && wl.acknowledgementSlip.startsWith('data:')
+                  ? wl.acknowledgementSlip
+                  : '';
+              const needsChunks = rawAtt.length > 20000 && rawAtt.length <= 220000;
+              return [
+                wl.id,
+                wl.letterNo,
+                wl.issueDate || wl.date,
+                wl.admissionNo,
+                wl.studentName,
+                wl.parentName || wl.fatherName || '',
+                wl.overdueAmount,
+                wl.deadlineDate,
+                wl.warningLevel,
+                wl.issuedBy,
+                stripLargeBase64ForSheetCell(wl, needsChunks ? ['acknowledgementSlip'] : []),
+                needsChunks ? rawAtt.slice(0, 44000) : '',
+                needsChunks ? rawAtt.slice(44000, 88000) : '',
+                needsChunks ? rawAtt.slice(88000, 132000) : '',
+                needsChunks ? rawAtt.slice(132000, 176000) : '',
+                needsChunks ? rawAtt.slice(176000, 220000) : '',
+              ];
+            }),
           ],
         },
         {
@@ -9733,7 +9896,10 @@ export class SheetsDatabaseManager {
       changed = true;
     }
 
-    if (!(this.config as any).clearedTrialWarningLetters20261117) {
+    if (
+      (!this.isGoogleConfigured || this.hasHydratedFromSheets) &&
+      !(this.config as any).clearedTrialWarningLetters20261117_v3
+    ) {
       if (this.warningLetters.length > 0) {
         for (const wl of this.warningLetters) {
           if (wl?.id) this.explicitlyDeletedIds.add(String(wl.id).trim());
@@ -9742,6 +9908,8 @@ export class SheetsDatabaseManager {
         this.warningLetters = [];
       }
       (this.config as any).clearedTrialWarningLetters20261117 = true;
+      (this.config as any).clearedTrialWarningLetters20261117_v2 = true;
+      (this.config as any).clearedTrialWarningLetters20261117_v3 = true;
       changed = true;
     }
 
@@ -12012,6 +12180,36 @@ export class SheetsDatabaseManager {
       this.warningLetters = [];
       await this.internalSyncToGoogleSheets(false, ['Warning_Letters', 'School_Masters']);
       return { success: true, removedCount };
+    });
+  }
+
+  public async uploadWarningLetterAcknowledgement(
+    id: string,
+    payload: {
+      acknowledgementSlip: string;
+      acknowledgementFileName?: string;
+      acknowledgementReceivedDate?: string;
+      acknowledgementUploadedBy?: string;
+      acknowledgementRemarks?: string;
+    }
+  ): Promise<WarningLetter> {
+    return this.enqueueWrite(async () => {
+      const target = this.warningLetters.find(w => w.id === id || w.letterNo === id);
+      if (!target) {
+        throw new Error('Warning letter record not found.');
+      }
+      target.acknowledgementSlip = payload.acknowledgementSlip || '';
+      target.acknowledgementFileName = payload.acknowledgementFileName || 'acknowledgement_slip';
+      target.acknowledgementReceivedDate =
+        payload.acknowledgementReceivedDate || new Date().toISOString().split('T')[0];
+      if (payload.acknowledgementUploadedBy) {
+        target.acknowledgementUploadedBy = payload.acknowledgementUploadedBy;
+      }
+      if (payload.acknowledgementRemarks !== undefined) {
+        target.acknowledgementRemarks = payload.acknowledgementRemarks;
+      }
+      await this.internalSyncToGoogleSheets(false, ['Warning_Letters']);
+      return target;
     });
   }
 

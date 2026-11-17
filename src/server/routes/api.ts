@@ -36,6 +36,7 @@ apiRouter.use(async (req: Request, res: Response, next) => {
       req.method !== 'GET' &&
       res.statusCode < 400 &&
       req.headers['x-erp-include-bootstrap'] === '1' &&
+      sheetsDb.hasHydrated() &&
       (!body || typeof body !== 'object' || !body.__erpEnvelope)
     ) {
       const includeAttendance =
@@ -80,7 +81,7 @@ apiRouter.use(async (req: Request, res: Response, next) => {
     return;
   }
 
-  if (req.method === 'GET') {
+  if (req.path !== '/print-page' && req.path !== '/sheets/credentials') {
     await sheetsDb.ensureInitialized(req.query.fresh === '1');
   }
   next();
@@ -92,6 +93,10 @@ apiRouter.get('/attachments/expense/:id', (req: Request, res: Response) => {
 
 apiRouter.get('/attachments/receipt/:id', (req: Request, res: Response) => {
   sendDataUrlAttachment(res, sheetsDb.getReceiptAttachmentRaw(req.params.id));
+});
+
+apiRouter.get('/attachments/warning-letter/:id', (req: Request, res: Response) => {
+  sendDataUrlAttachment(res, sheetsDb.getWarningLetterAttachmentRaw(req.params.id));
 });
 
 // 1. Google Sheets Connection & Diagnostic Status
@@ -134,6 +139,15 @@ apiRouter.post('/sheets/credentials', async (req: Request, res: Response) => {
 // Unified Single-Request Bootstrap (Prevents multi-instance serverless race conditions)
 apiRouter.get('/bootstrap', async (_req: Request, res: Response) => {
   try {
+    if (!sheetsDb.hasHydrated()) {
+      await sheetsDb.ensureInitialized(true);
+    }
+    if (!sheetsDb.hasHydrated()) {
+      res.status(503).json({
+        error: 'Synchronizing live records from Google Sheets. Please wait a moment...',
+      });
+      return;
+    }
     res.json(sheetsDb.getBootstrapSnapshot());
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -943,6 +957,15 @@ apiRouter.delete('/warning-letters/all', async (req: Request, res: Response) => 
     res.status(400).json({ error: err.message });
   }
 });
+apiRouter.put('/warning-letters/:id/acknowledgement', async (req: Request, res: Response) => {
+  try {
+    const updated = await sheetsDb.uploadWarningLetterAcknowledgement(req.params.id, req.body || {});
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 apiRouter.delete('/warning-letters/:id', async (req: Request, res: Response) => {
   try {
     const callerRole = String(req.headers['x-erp-user-role'] || '').trim();

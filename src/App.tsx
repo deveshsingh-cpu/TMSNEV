@@ -215,6 +215,7 @@ export function App() {
 
   // Cross-view deep links
   const [externalOpenMemberId, setExternalOpenMemberId] = useState<string | null>(null);
+  const [externalOpenMemberTab, setExternalOpenMemberTab] = useState<string | null>(null);
   const [preselectedFeeMemberId, setPreselectedFeeMemberId] = useState<string | null>(null);
   const [externalTargetRoute, setExternalTargetRoute] = useState<{
     routeId: string;
@@ -347,6 +348,9 @@ export function App() {
   const applyBootstrapPayload = useCallback(
     (boot: any) => {
       if (!boot) return;
+      if (boot?.status?.isConfigured && boot?.status?.hasHydrated === false) {
+        return;
+      }
       const mastersData = boot?.masters;
 
       if (mastersData?.config) setConfig(mastersData.config);
@@ -638,8 +642,9 @@ export function App() {
     setActiveSubTab(targetSubTab);
   };
 
-  const handleOpenMemberProfileFromAnywhere = (memberId: string) => {
+  const handleOpenMemberProfileFromAnywhere = (memberId: string, initialTab?: string) => {
     setExternalOpenMemberId(memberId);
+    setExternalOpenMemberTab(initialTab || null);
     setActiveNav('members');
     setActiveSubTab('all');
   };
@@ -1530,6 +1535,21 @@ export function App() {
     return res;
   };
 
+  const handleUploadWarningLetterAcknowledgement = async (
+    id: string,
+    payload: {
+      acknowledgementSlip: string;
+      acknowledgementFileName?: string;
+      acknowledgementReceivedDate?: string;
+      acknowledgementUploadedBy?: string;
+      acknowledgementRemarks?: string;
+    }
+  ) => {
+    const res = await api.uploadWarningLetterAcknowledgement(id, payload);
+    await loadAllData();
+    return res;
+  };
+
   const handleDeleteWarningLetter = async (id: string) => {
     const res = await api.deleteWarningLetter(id);
     await loadAllData();
@@ -2136,6 +2156,7 @@ export function App() {
                   receipts={receipts}
                   attendanceRecords={attendanceRecords}
                   feeFollowUps={feeFollowUps}
+                  warningLetters={warningLetters}
                   disciplineRecords={disciplineRecords}
                   complaints={complaints}
                   memberRequests={memberRequests}
@@ -2157,7 +2178,11 @@ export function App() {
                       : 'all'
                   }
                   externalOpenMemberId={externalOpenMemberId}
-                  onClearExternalMemberId={() => setExternalOpenMemberId(null)}
+                  externalOpenProfileTab={externalOpenMemberTab}
+                  onClearExternalMemberId={() => {
+                    setExternalOpenMemberId(null);
+                    setExternalOpenMemberTab(null);
+                  }}
                   onSaveStudent={handleSaveStudent}
                   onDeleteStudent={handleDeleteStudent}
                   onReactivateStudent={handleReactivateStudent}
@@ -2167,6 +2192,8 @@ export function App() {
                   onChangeMemberStatus={isPrincipal ? undefined : handleChangeMemberStatus}
                   onAddFeeFollowUp={isPrincipal ? undefined : (handleAddFeeFollowUp as any)}
                   onDeleteFeeFollowUp={isPrincipal ? undefined : handleDeleteFeeFollowUp}
+                  onUploadWarningLetterAck={isPrincipal ? undefined : handleUploadWarningLetterAcknowledgement}
+                  onDeleteWarningLetter={isAdmin ? handleDeleteWarningLetter : undefined}
                   onAddDisciplineRecord={isPrincipal ? undefined : (handleAddDisciplineRecord as any)}
                   onDeleteDisciplineRecord={isPrincipal ? undefined : handleDeleteDisciplineRecord}
                   onQuickCollectFeeForMember={isPrincipal ? undefined : handleQuickCollectFeeForMember}
@@ -2318,7 +2345,9 @@ export function App() {
                   onSuspendStudent={isPrincipal ? undefined : handleSuspendStudent}
                   onPrintReceipt={() => window.print()}
                   onPrintWarningLetter={() => window.print()}
-                  onOpenStudentProfile={(studentId) => handleOpenMemberProfileFromAnywhere(studentId)}
+                  onOpenStudentProfile={(studentId, initialTab) =>
+                    handleOpenMemberProfileFromAnywhere(studentId, initialTab)
+                  }
                 />
               )}
 

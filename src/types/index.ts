@@ -848,6 +848,11 @@ export interface WarningLetter {
   address?: string;
   periodOverdue?: string;
   proposedSuspensionDate?: string;
+  acknowledgementSlip?: string;
+  acknowledgementFileName?: string;
+  acknowledgementReceivedDate?: string;
+  acknowledgementUploadedBy?: string;
+  acknowledgementRemarks?: string;
 }
 
 export interface AccountHead {

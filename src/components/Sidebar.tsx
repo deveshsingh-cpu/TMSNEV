@@ -443,7 +443,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'fe-invoices', label: '2- Monthly Invoices', navKey: 'fees', subTab: 'invoices' },
         { id: 'fe-demand', label: '3- Demand Slip & Phone Follow-up', navKey: 'fees', subTab: 'demand_slip' },
         { id: 'fe-matrix', label: '4- Month-wise Fee & Previous Dues', navKey: 'fees', subTab: 'monthly_matrix' },
-        { id: 'fe-recovery', label: '5- Overdue & Recovery', navKey: 'fees', subTab: 'recovery' },
+        { id: 'fe-recovery', label: '5- Warning Letters & Recovery', navKey: 'fees', subTab: 'recovery' },
       ],
     },
     {

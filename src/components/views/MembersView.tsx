@@ -1,17 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import {
   Search, Plus, AlertTriangle, X, Eye, Trash2, RotateCcw,
-  Camera, Edit2, Printer, FileText, Upload,
+  Camera, Edit2, Printer, FileText, Upload, Download,
   MapPin, Award, PhoneCall, Gavel, IndianRupee, ShieldAlert, Check, Ban,
   MessageSquareWarning, CheckCircle2
 } from 'lucide-react';
 import {
   StudentMember, CampusId, Village, Route, CampusMaster, MemberTypeMaster,
   FeeInvoice, FeeReceipt, TripAttendanceRecord, DocumentAttachment,
-  FeeFollowUpRecord, DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest,
+  FeeFollowUpRecord, WarningLetter, DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest,
   Employee, MemberComplaintRecord, ComplaintSeriousness
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview, FilterPopover } from '../../utils/exportPrint.js';
+import {
+  printWarningCumReminderLetters,
+  downloadWarningLettersPdf,
+  formatLetterDateDisplay,
+  getDefault30thOfCurrentMonth,
+} from '../../utils/warningLetterPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
 import { api } from '../../services/api.js';
 
@@ -33,10 +39,12 @@ interface MembersViewProps {
   receipts?: FeeReceipt[];
   attendanceRecords?: TripAttendanceRecord[];
   feeFollowUps?: FeeFollowUpRecord[];
+  warningLetters?: WarningLetter[];
   disciplineRecords?: DisciplineRecord[];
   complaints?: MemberComplaintRecord[];
   initialStatusFilter?: string;
   externalOpenMemberId?: string | null;
+  externalOpenProfileTab?: string | null;
   onClearExternalMemberId?: () => void;
   onSaveStudent: (student: Partial<StudentMember>) => Promise<void>;
   onDeleteStudent: (id: string) => Promise<void>;
@@ -56,6 +64,17 @@ interface MembersViewProps {
   onChangeMemberStatus?: (id: string, status: StudentMember['transportStatus'], reason?: string) => Promise<void>;
   onAddFeeFollowUp?: (data: Omit<FeeFollowUpRecord, 'id'>) => Promise<void>;
   onDeleteFeeFollowUp?: (id: string) => Promise<void>;
+  onUploadWarningLetterAck?: (
+    id: string,
+    payload: {
+      acknowledgementSlip: string;
+      acknowledgementFileName?: string;
+      acknowledgementReceivedDate?: string;
+      acknowledgementUploadedBy?: string;
+      acknowledgementRemarks?: string;
+    }
+  ) => Promise<any>;
+  onDeleteWarningLetter?: (id: string) => Promise<any>;
   onAddDisciplineRecord?: (data: Omit<DisciplineRecord, 'id'>) => Promise<void>;
   onDeleteDisciplineRecord?: (id: string) => Promise<void>;
   onSaveComplaint?: (payload: Partial<MemberComplaintRecord>) => Promise<any>;
@@ -95,6 +114,7 @@ type ProfileTabKey =
   | 'fees'
   | 'fee_structure'
   | 'followups'
+  | 'warning_letters'
   | 'discipline'
   | 'complaints'
   | 'attendance'
@@ -119,10 +139,12 @@ export const MembersView: React.FC<MembersViewProps> = ({
   receipts = [],
   attendanceRecords = [],
   feeFollowUps = [],
+  warningLetters = [],
   disciplineRecords = [],
   complaints = [],
   initialStatusFilter = 'all',
   externalOpenMemberId,
+  externalOpenProfileTab,
   onClearExternalMemberId,
   onSaveStudent,
   onDeleteStudent,
@@ -133,6 +155,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
   onChangeMemberStatus,
   onAddFeeFollowUp,
   onDeleteFeeFollowUp,
+  onUploadWarningLetterAck,
+  onDeleteWarningLetter,
   onAddDisciplineRecord,
   onDeleteDisciplineRecord,
   onSaveComplaint,
@@ -223,10 +247,23 @@ export const MembersView: React.FC<MembersViewProps> = ({
   useEffect(() => {
     if (externalOpenMemberId) {
       setProfileMemberId(externalOpenMemberId);
-      setProfileTab('general');
+      const validTabs: ProfileTabKey[] = [
+        'general',
+        'fees',
+        'fee_structure',
+        'followups',
+        'warning_letters',
+        'discipline',
+        'complaints',
+        'attendance',
+        'documents',
+        'special',
+      ];
+      const requestedTab = (externalOpenProfileTab || 'general') as ProfileTabKey;
+      setProfileTab(validTabs.includes(requestedTab) ? requestedTab : 'general');
       if (onClearExternalMemberId) onClearExternalMemberId();
     }
-  }, [externalOpenMemberId, onClearExternalMemberId]);
+  }, [externalOpenMemberId, externalOpenProfileTab, onClearExternalMemberId]);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -240,6 +277,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
   // Document Upload inside Profile
   const [newDocType, setNewDocType] = useState<DocumentAttachment['type']>('School ID Card');
   const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [uploadingAckLetterId, setUploadingAckLetterId] = useState<string | null>(null);
+  const [localAckOverrides, setLocalAckOverrides] = useState<Record<string, string>>({});
 
   // Special Tab: Permission Letter & Suspension form state
   const [permUntilDate, setPermUntilDate] = useState<string>('');
@@ -1042,8 +1081,20 @@ export const MembersView: React.FC<MembersViewProps> = ({
     : [];
   const memberFollowUps = activeProfileMember
     ? feeFollowUps.filter(
-        f => f.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && f.admissionNo === activeProfileAdmNo)
+        f =>
+          f.studentId === activeProfileMember.id ||
+          f.memberId === activeProfileMember.id ||
+          (Boolean(activeProfileAdmNo) && f.admissionNo === activeProfileAdmNo)
       )
+    : [];
+  const memberWarningLetters = activeProfileMember
+    ? warningLetters
+        .filter(
+          w =>
+            w.studentId === activeProfileMember.id ||
+            (Boolean(activeProfileAdmNo) && w.admissionNo === activeProfileAdmNo)
+        )
+        .sort((a, b) => (b.issueDate || b.date || '').localeCompare(a.issueDate || a.date || ''))
     : [];
   const memberDisciplines = activeProfileMember
     ? disciplineRecords.filter(
@@ -1055,6 +1106,36 @@ export const MembersView: React.FC<MembersViewProps> = ({
         c => c.memberId === activeProfileMember.id || (Boolean(activeProfileAdmNo) && c.admissionNo === activeProfileAdmNo)
       )
     : [];
+
+  const handleUploadLetterAckSlip = async (
+    wl: WarningLetter,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || isReadOnly) return;
+    try {
+      setUploadingAckLetterId(wl.id);
+      setFormError(null);
+      const dataUrl = await readFileCompressed(file);
+      const payload = {
+        acknowledgementSlip: dataUrl,
+        acknowledgementFileName: file.name,
+        acknowledgementReceivedDate: todayStr,
+        acknowledgementUploadedBy: currentRole,
+      };
+      setLocalAckOverrides(prev => ({ ...prev, [wl.id]: dataUrl }));
+      if (onUploadWarningLetterAck) {
+        await onUploadWarningLetterAck(wl.id, payload);
+      } else {
+        await api.uploadWarningLetterAcknowledgement(wl.id, payload);
+      }
+    } catch (err: any) {
+      setFormError(err?.message || 'Failed to upload acknowledgement slip.');
+    } finally {
+      setUploadingAckLetterId(null);
+    }
+  };
 
   // =========================================================================
   // FEEDBACK & COMPLAINT SUB-MODULE STATE & HANDLERS
@@ -3440,6 +3521,13 @@ export const MembersView: React.FC<MembersViewProps> = ({
                   <span>Discipline Irregularity Reporting</span>
                 </button>
                 <button
+                  onClick={() => setProfileTab('warning_letters')}
+                  className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl text-xs border border-slate-700 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Warning Letters ({memberWarningLetters.length})</span>
+                </button>
+                <button
                   onClick={() => setProfileTab('complaints')}
                   className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl text-xs border border-slate-700 flex items-center gap-1.5 cursor-pointer"
                 >
@@ -3469,6 +3557,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                 { key: 'fees', label: `Fees & Receipts (${memberReceipts.length})` },
                 { key: 'fee_structure', label: '2- Fee Structure' },
                 { key: 'followups', label: `Fee Follow-Ups (${memberFollowUps.length})` },
+                { key: 'warning_letters', label: `Warning Letters (${memberWarningLetters.length})` },
                 { key: 'discipline', label: `Discipline & Behaviour (${memberDisciplines.length})` },
                 { key: 'complaints', label: `Complaint & Feedback (${memberComplaints.length})` },
                 { key: 'attendance', label: `3- Attendance (${memberAttendance.length})` },
@@ -3839,6 +3928,235 @@ export const MembersView: React.FC<MembersViewProps> = ({
                         )}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB: WARNING LETTERS & ACKNOWLEDGEMENT SLIPS */}
+              {profileTab === 'warning_letters' && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-rose-50/70 border border-rose-200 p-4 rounded-2xl">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">
+                        Issued Warning cum Reminder Letters ({memberWarningLetters.length})
+                      </h4>
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        Complete history of Warning cum Reminder letters issued to {activeProfileMember.name}. Upload signed guardian Acknowledgement Slips against each letter when received.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-bold">
+                      <span className="px-3 py-1.5 rounded-xl bg-white border border-rose-200 text-slate-800">
+                        Ack Received:{' '}
+                        <span className="text-emerald-700">
+                          {
+                            memberWarningLetters.filter(
+                              w => Boolean(localAckOverrides[w.id] || w.acknowledgementSlip)
+                            ).length
+                          }
+                        </span>{' '}
+                        / {memberWarningLetters.length}
+                      </span>
+                    </div>
+                  </div>
+
+                  {formError && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center justify-between">
+                      <span>{formError}</span>
+                      <button onClick={() => setFormError(null)} className="cursor-pointer">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
+                            <th className="py-3 px-4">Letter Ref &amp; Issue Date</th>
+                            <th className="py-3 px-3">Overdue Breakdown</th>
+                            <th className="py-3 px-3">Deposit Cutoff</th>
+                            <th className="py-3 px-3">Issued By</th>
+                            <th className="py-3 px-3">Signed Acknowledgement Slip</th>
+                            <th className="py-3 px-4 text-right">Letter Print / PDF</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {memberWarningLetters.map(wl => {
+                            const recordedFine =
+                              wl.lateFineAmount !== undefined ? Number(wl.lateFineAmount) : 0;
+                            const recordedBase =
+                              wl.baseOverdueAmount !== undefined
+                                ? Number(wl.baseOverdueAmount)
+                                : Math.max(0, (Number(wl.overdueAmount) || 0) - recordedFine);
+                            const totalPayable =
+                              wl.totalPayableAmount !== undefined
+                                ? Number(wl.totalPayableAmount)
+                                : recordedBase + recordedFine;
+                            const ackUrl = localAckOverrides[wl.id] || wl.acknowledgementSlip || '';
+                            const hasAck =
+                              Boolean(ackUrl) && ackUrl !== '[ATTACHMENT_STORED]';
+                            const isUploadingThis = uploadingAckLetterId === wl.id;
+                            const letterTarget = {
+                              member: activeProfileMember,
+                              letterNo: wl.letterNo,
+                              issueDate: wl.issueDate || wl.date || todayStr,
+                              deadlineDate:
+                                wl.proposedSuspensionDate ||
+                                wl.deadlineDate ||
+                                getDefault30thOfCurrentMonth(wl.issueDate || wl.date || todayStr),
+                              baseOverdueAmount: recordedBase,
+                              lateFineAmount: recordedFine,
+                            };
+
+                            return (
+                              <tr key={wl.id} className="hover:bg-slate-50/80">
+                                <td className="py-3 px-4">
+                                  <div className="font-mono font-bold text-rose-900">
+                                    {wl.letterNo}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 font-mono">
+                                    Issued: {formatLetterDateDisplay(wl.issueDate || wl.date || '')}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-3">
+                                  <div className="font-extrabold text-rose-700 font-mono">
+                                    ₹{totalPayable.toLocaleString('en-IN')}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500">
+                                    Fee: ₹{recordedBase.toLocaleString('en-IN')}
+                                    {recordedFine > 0 ? ` + Fine: ₹${recordedFine}` : ''}
+                                  </div>
+                                  {wl.periodOverdue && (
+                                    <div className="text-[10px] text-slate-400 truncate max-w-44">
+                                      {wl.periodOverdue}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-bold text-slate-800">
+                                  {formatLetterDateDisplay(
+                                    wl.proposedSuspensionDate || wl.deadlineDate || ''
+                                  )}
+                                </td>
+                                <td className="py-3 px-3 text-slate-600">{wl.issuedBy || '—'}</td>
+                                <td className="py-3 px-3">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    {hasAck ? (
+                                      <>
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                                          <CheckCircle2 className="w-3 h-3" />
+                                          <span>
+                                            Received
+                                            {wl.acknowledgementReceivedDate
+                                              ? ` (${formatLetterDateDisplay(wl.acknowledgementReceivedDate)})`
+                                              : ''}
+                                          </span>
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setPreviewAttachment({
+                                              title: `Signed Acknowledgement Slip — ${wl.letterNo} (${activeProfileMember.name})`,
+                                              url: ackUrl,
+                                            })
+                                          }
+                                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] cursor-pointer"
+                                        >
+                                          <Eye className="w-3 h-3" />
+                                          <span>View Slip</span>
+                                        </button>
+                                        {!isReadOnly && (
+                                          <label className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[10px] cursor-pointer">
+                                            <Upload className="w-3 h-3" />
+                                            <span>{isUploadingThis ? 'Saving...' : 'Replace'}</span>
+                                            <input
+                                              type="file"
+                                              accept="image/*,.pdf"
+                                              disabled={isUploadingThis}
+                                              onChange={e => handleUploadLetterAckSlip(wl, e)}
+                                              className="hidden"
+                                            />
+                                          </label>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-bold text-[10px]">
+                                          Pending Slip
+                                        </span>
+                                        {!isReadOnly && (
+                                          <label className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] cursor-pointer">
+                                            <Upload className="w-3 h-3 text-amber-400" />
+                                            <span>
+                                              {isUploadingThis ? 'Uploading...' : 'Upload Ack Slip'}
+                                            </span>
+                                            <input
+                                              type="file"
+                                              accept="image/*,.pdf"
+                                              disabled={isUploadingThis}
+                                              onChange={e => handleUploadLetterAckSlip(wl, e)}
+                                              className="hidden"
+                                            />
+                                          </label>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  <div className="inline-flex items-center justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        printWarningCumReminderLetters([letterTarget], {
+                                          invoices,
+                                          schoolName,
+                                        })
+                                      }
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                                    >
+                                      <Printer className="w-3 h-3 text-amber-400" />
+                                      <span>Print / PDF</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        downloadWarningLettersPdf([letterTarget], {
+                                          invoices,
+                                          schoolName,
+                                          customFilename: `warning_letter_${wl.letterNo}.pdf`,
+                                        })
+                                      }
+                                      className="p-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer"
+                                      title="Download Letter PDF"
+                                    >
+                                      <Download className="w-3.5 h-3.5" />
+                                    </button>
+                                    {isAdmin && onDeleteWarningLetter && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onDeleteWarningLetter(wl.id)}
+                                        className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                                        title="Delete Warning Letter (Admin Only)"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {memberWarningLetters.length === 0 && (
+                            <tr>
+                              <td colSpan={6} className="py-8 text-center text-slate-400">
+                                No Warning cum Reminder letters have been issued to this member yet.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -5318,18 +5636,38 @@ export const MembersView: React.FC<MembersViewProps> = ({
       {previewAttachment && (
         <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-2xl w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <h3 className="text-sm font-bold text-slate-900">{previewAttachment.title}</h3>
-              <button onClick={() => setPreviewAttachment(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3 gap-2">
+              <h3 className="text-sm font-bold text-slate-900 truncate">{previewAttachment.title}</h3>
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={previewAttachment.url}
+                  download={previewAttachment.title.replace(/[^a-zA-Z0-9_-]/g, '_')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-400 text-xs font-bold"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download</span>
+                </a>
+                <button onClick={() => setPreviewAttachment(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
             <div className="bg-slate-100 rounded-xl p-4 flex items-center justify-center max-h-[70vh] overflow-auto">
-              <img
-                src={previewAttachment.url}
-                alt={previewAttachment.title}
-                className="max-w-full max-h-[62vh] object-contain rounded-lg shadow-sm"
-              />
+              {previewAttachment.url.startsWith('data:application/pdf') ||
+              previewAttachment.url.includes('type=pdf') ||
+              previewAttachment.url.toLowerCase().endsWith('.pdf') ? (
+                <iframe
+                  src={previewAttachment.url}
+                  title={previewAttachment.title}
+                  className="w-full h-[62vh] rounded-lg border border-slate-200 bg-white"
+                />
+              ) : (
+                <img
+                  src={previewAttachment.url}
+                  alt={previewAttachment.title}
+                  className="max-w-full max-h-[62vh] object-contain rounded-lg shadow-sm"
+                />
+              )}
             </div>
           </div>
         </div>
