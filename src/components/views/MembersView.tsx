@@ -1019,7 +1019,9 @@ export const MembersView: React.FC<MembersViewProps> = ({
         routeId: rt?.id || '',
         routeCode: resolvedRouteCode,
         monthlyFee: effectiveFee,
-        concessionAmount: isAdmin ? Number(concessionAmount) || 0 : 0,
+        concessionAmount: isAdmin
+          ? Number(concessionAmount) || 0
+          : Number(existingMember?.concessionAmount) || 0,
         ...(isAdmin
           ? {
               previousDues: Number(previousDues) || 0,
@@ -5537,11 +5539,40 @@ export const MembersView: React.FC<MembersViewProps> = ({
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold"
                     >
                       <option value="">-- Unassigned / Select Route --</option>
-                      {(availableRoutes.length > 0 ? availableRoutes : routes).map(r => (
-                        <option key={r.id} value={r.id}>
-                          {r.code} ({r.vehicleNumber || 'No Vehicle'})
-                        </option>
-                      ))}
+                      {availableRoutes.length > 0 && availableRoutes.length < routes.length ? (
+                        <>
+                          <optgroup label="Matching Village Routes">
+                            {availableRoutes
+                              .filter(r => r.active !== false || r.id === selectedRouteId)
+                              .map(r => (
+                                <option key={r.id} value={r.id}>
+                                  {r.code} ({r.vehicleNumber || 'No Vehicle'})
+                                </option>
+                              ))}
+                          </optgroup>
+                          <optgroup label="All Other Active Routes">
+                            {routes
+                              .filter(
+                                r =>
+                                  !availableRoutes.some(ar => ar.id === r.id) &&
+                                  (r.active !== false || r.id === selectedRouteId)
+                              )
+                              .map(r => (
+                                <option key={r.id} value={r.id}>
+                                  {r.code} ({r.vehicleNumber || 'No Vehicle'})
+                                </option>
+                              ))}
+                          </optgroup>
+                        </>
+                      ) : (
+                        routes
+                          .filter(r => r.active !== false || r.id === selectedRouteId)
+                          .map(r => (
+                            <option key={r.id} value={r.id}>
+                              {r.code} ({r.vehicleNumber || 'No Vehicle'})
+                            </option>
+                          ))
+                      )}
                     </select>
                   </div>
                 </div>

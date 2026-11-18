@@ -1258,7 +1258,33 @@ export const MastersView: React.FC<MastersViewProps> = ({
                                     );
                                   }
                                   setRouteVillageSearch('');
-                                  setDeselectedNewMemberIds([]);
+                                  const existingVilNameSet = new Set(
+                                    sortedVillages
+                                      .filter(v => resolvedVilIds.includes(v.id))
+                                      .map(v => v.name.trim().toLowerCase())
+                                  );
+                                  const otherRouteMemberIds = activeTransportMembers
+                                    .filter(s => {
+                                      const onThisRoute = s.routeId === r.id || s.routeCode === r.code;
+                                      if (onThisRoute) return false;
+                                      const hasOtherActiveRoute = Boolean(
+                                        s.routeId &&
+                                          s.routeCode &&
+                                          s.routeCode !== 'Unassigned' &&
+                                          routes.some(
+                                            or =>
+                                              (or.id === s.routeId || or.code === s.routeCode) &&
+                                              or.active !== false
+                                          )
+                                      );
+                                      if (!hasOtherActiveRoute) return false;
+                                      return (
+                                        (!!s.villageId && resolvedVilIds.includes(s.villageId)) ||
+                                        (!!s.villageName && existingVilNameSet.has(s.villageName.trim().toLowerCase()))
+                                      );
+                                    })
+                                    .map(s => s.id);
+                                  setDeselectedNewMemberIds(otherRouteMemberIds);
                                   setShowRouteComparisonStep(false);
                                   setIsRouteModalOpen(true);
                                 }}

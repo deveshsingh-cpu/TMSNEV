@@ -390,30 +390,32 @@ export class SheetsDatabaseManager {
   }
 
   private rebuildScheduledServices() {
-    this.scheduledServices = this.routes.map((r) => {
-      const veh = this.vehicles.find((v) => v.id === r.vehicleId || v.registrationNumber === r.vehicleNumber);
-      const assignedStudents = this.students.filter(
-        (s) => (s.routeId === r.id || s.routeCode === r.code) && s.transportStatus !== 'Left'
-      ).length;
-      const defaultDep = r.tripNumber === 1 ? '06:40 AM' : r.tripNumber === 2 ? '07:45 AM' : '08:30 AM';
-      const defaultArr = r.tripNumber === 1 ? '07:30 AM' : r.tripNumber === 2 ? '08:30 AM' : '09:15 AM';
-      return {
-        id: `svc-${r.id}`,
-        vehicleNumber: r.vehicleNumber,
-        tripNumber: r.tripNumber,
-        shiftName: `Trip ${r.tripNumber} — ${r.name || r.code}`,
-        routeId: r.id,
-        routeName: `${r.code}${r.name ? ` (${r.name})` : ''}`,
-        driverName: veh?.assignedDriverName || 'Unassigned Driver',
-        helperName: veh?.assignedHelperName || '—',
-        direction: 'Morning & Afternoon',
-        campus: r.campus,
-        assignedCount: assignedStudents,
-        capacity: veh?.capacity || 40,
-        departureTime: r.departureTime || defaultDep,
-        arrivalTime: r.arrivalTime || defaultArr,
-      };
-    });
+    this.scheduledServices = this.routes
+      .filter((r) => r.active !== false)
+      .map((r) => {
+        const veh = this.vehicles.find((v) => v.id === r.vehicleId || v.registrationNumber === r.vehicleNumber);
+        const assignedStudents = this.students.filter(
+          (s) => (s.routeId === r.id || s.routeCode === r.code) && s.transportStatus !== 'Left'
+        ).length;
+        const defaultDep = r.tripNumber === 1 ? '06:40 AM' : r.tripNumber === 2 ? '07:45 AM' : '08:30 AM';
+        const defaultArr = r.tripNumber === 1 ? '07:30 AM' : r.tripNumber === 2 ? '08:30 AM' : '09:15 AM';
+        return {
+          id: `svc-${r.id}`,
+          vehicleNumber: r.vehicleNumber,
+          tripNumber: r.tripNumber,
+          shiftName: `Trip ${r.tripNumber} — ${r.name || r.code}`,
+          routeId: r.id,
+          routeName: `${r.code}${r.name ? ` (${r.name})` : ''}`,
+          driverName: veh?.assignedDriverName || 'Unassigned Driver',
+          helperName: veh?.assignedHelperName || '—',
+          direction: 'Morning & Afternoon',
+          campus: r.campus,
+          assignedCount: assignedStudents,
+          capacity: veh?.capacity || 40,
+          departureTime: r.departureTime || defaultDep,
+          arrivalTime: r.arrivalTime || defaultArr,
+        };
+      });
   }
 
   private initGoogleServiceAccount(customCreds?: {
@@ -1284,13 +1286,17 @@ export class SheetsDatabaseManager {
         this.sortVillagesAlphabetically();
       }
       if ((tabMap.get('Vehicles_Master') || []).length >= 1) {
-        this.vehicles = this.parseRowsFromSheet<Vehicle>(tabMap.get('Vehicles_Master'), true);
+        this.vehicles = this.parseRowsFromSheet<Vehicle>(tabMap.get('Vehicles_Master'), true).filter(
+          v => !this.explicitlyDeletedIds.has(v.id)
+        );
       }
       if ((tabMap.get('Vehicle_Assignments') || []).length >= 1) {
         this.vehicleAssignments = this.parseRowsFromSheet<VehicleAssignmentRecord>(tabMap.get('Vehicle_Assignments'), true);
       }
       if ((tabMap.get('Routes_Master') || []).length >= 1) {
-        this.routes = this.parseRowsFromSheet<Route>(tabMap.get('Routes_Master'), true);
+        this.routes = this.parseRowsFromSheet<Route>(tabMap.get('Routes_Master'), true).filter(
+          r => !this.explicitlyDeletedIds.has(r.id)
+        );
       }
       if ((tabMap.get('Members_Transport') || []).length >= 1) {
         this.students = this.parseRowsFromSheet<StudentMember>(tabMap.get('Members_Transport'), true);
@@ -1466,6 +1472,9 @@ export class SheetsDatabaseManager {
             this.flushToGoogleSheetsRemote([
               'School_Masters',
               'System_Users',
+              'Vehicles_Master',
+              'Routes_Master',
+              'Daily_Trips',
               'Expense_Heads',
               'Warning_Letters',
               'Fee_Receipts',
@@ -3712,6 +3721,7 @@ export class SheetsDatabaseManager {
       if (vehicleData.id) {
         const idx = this.vehicles.findIndex(v => v.id === vehicleData.id);
         if (idx >= 0) {
+          const prevReg = String(this.vehicles[idx].registrationNumber || '').trim().toUpperCase();
           this.vehicles[idx] = {
             ...this.vehicles[idx],
             ...vehicleData,
@@ -3720,6 +3730,42 @@ export class SheetsDatabaseManager {
             expectedMileageKmPerL: mileageThreshold,
             baselineMileageKmPerLitre: mileageThreshold,
           } as Vehicle;
+
+          // Cascade vehicle registration rename to linked Routes, Members, and today's Daily Trips
+          if (prevReg !== reg) {
+            const digitsOnly = reg.replace(/\D/g, '');
+            const newLast4 = digitsOnly.length >= 4
+              ? digitsOnly.slice(-4)
+              : reg.slice(-4).replace(/\s/g, '');
+            const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
+
+            for (const rt of this.routes) {
+              if (rt.vehicleId === vehicleData.id) {
+                const oldCode = rt.code;
+                const cmpCode = rt.campusCode || rt.campus || 'Sr';
+                const newCode = `${cmpCode}/${newLast4}/${rt.tripNumber}`;
+                rt.vehicleNumber = reg;
+                rt.vehicleLast4 = newLast4;
+                rt.code = newCode;
+
+                for (const st of this.students) {
+                  if (st.routeId === rt.id || (oldCode && st.routeCode === oldCode)) {
+                    st.routeId = rt.id;
+                    st.routeCode = newCode;
+                  }
+                }
+                for (const trp of this.trips) {
+                  if (trp.routeId === rt.id && trp.date >= todayIst) {
+                    trp.routeName = newCode;
+                    trp.vehicleNumber = reg;
+                    trp.vehicleId = rt.vehicleId;
+                  }
+                }
+              }
+            }
+          }
+
+          this.rebuildScheduledServices();
           await this.internalSyncToGoogleSheets();
           return this.vehicles[idx];
         }
@@ -3787,6 +3833,7 @@ export class SheetsDatabaseManager {
           );
         }
       }
+      this.explicitlyDeletedIds.add(id);
       this.vehicles = this.vehicles.filter(v => v.id !== id);
       await this.internalSyncToGoogleSheets();
       return { success: true };
@@ -4129,7 +4176,17 @@ export class SheetsDatabaseManager {
         : null;
 
       for (const student of this.students) {
-        if (student.transportStatus === 'Left') continue;
+        const wasOnThisRoute =
+          student.routeId === savedRoute.id ||
+          (!!previousRouteCode && student.routeCode === previousRouteCode);
+
+        if (student.transportStatus === 'Left') {
+          if (wasOnThisRoute) {
+            student.routeId = savedRoute.id;
+            student.routeCode = savedRoute.code;
+          }
+          continue;
+        }
 
         const coverage = this.doesRouteCoverStudentStopOrVillage(
           savedRoute,
@@ -4140,10 +4197,6 @@ export class SheetsDatabaseManager {
         );
         const belongsToCoveredVillageOrStop =
           coverage.matchesStopExplicitly || coverage.matchesVillageFallback;
-
-        const wasOnThisRoute =
-          student.routeId === savedRoute.id ||
-          (!!previousRouteCode && student.routeCode === previousRouteCode);
 
         if (belongsToCoveredVillageOrStop) {
           if (confirmedSet ? confirmedSet.has(student.id) : true) {
@@ -4189,6 +4242,16 @@ export class SheetsDatabaseManager {
         }
       }
 
+      // Sync today's and future Daily Trips if route code or vehicle changed
+      const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
+      for (const trp of this.trips) {
+        if (trp.routeId === savedRoute.id && trp.date >= todayIst) {
+          trp.routeName = savedRoute.code;
+          trp.vehicleNumber = savedRoute.vehicleNumber;
+          trp.vehicleId = savedRoute.vehicleId;
+        }
+      }
+
       this.rebuildScheduledServices();
       await this.internalSyncToGoogleSheets();
       return savedRoute;
@@ -4199,20 +4262,18 @@ export class SheetsDatabaseManager {
     return this.enqueueWrite(async () => {
       const rt = this.routes.find(r => r.id === id);
       if (rt) {
-        const linkedMembers = this.students.filter(
-          s => s.routeId === id || s.routeCode === rt.code
+        const linkedActiveMembers = this.students.filter(
+          s => (s.routeId === id || s.routeCode === rt.code) && s.transportStatus !== 'Left'
         );
-        const linkedTrips = this.trips.filter(t => t.routeId === id);
-        if (linkedMembers.length > 0 || linkedTrips.length > 0) {
-          const deps: string[] = [];
-          if (linkedMembers.length > 0) deps.push(`${linkedMembers.length} member(s)`);
-          if (linkedTrips.length > 0) deps.push(`${linkedTrips.length} daily trip(s)`);
+        if (linkedActiveMembers.length > 0) {
           throw new Error(
-            `Cannot delete Route "${rt.code}" because it is linked to ${deps.join(' and ')}. Please clear all its dependencies first.`
+            `Cannot delete Route "${rt.code}" because it still has ${linkedActiveMembers.length} active/suspended member(s). Please shift those members to another route first.`
           );
         }
       }
+      this.explicitlyDeletedIds.add(id);
       this.routes = this.routes.filter(r => r.id !== id);
+      this.rebuildScheduledServices();
       await this.internalSyncToGoogleSheets();
       return { success: true };
     });
@@ -5183,10 +5244,21 @@ export class SheetsDatabaseManager {
     const jrInod2Route = this.routes.find(
       r => normalizeCode(r.code) === 'jrinod2' || r.id === 'rot-1793117542005'
     );
+    const shouldBootstrapInitialSeed =
+      this.students.length === 0 && (!this.isGoogleConfigured || this.hasHydratedFromSheets);
+
+    if (!this.tripsMaster.some(t => Number(t.tripNumber) === 3)) {
+      this.tripsMaster.push({
+        id: 'trp-3',
+        tripNumber: 3,
+        description: 'Trip 3 — Third Shift',
+      });
+    }
+
     let jr37942Route = this.routes.find(
       r => normalizeCode(r.code) === 'jr37942' || r.id === 'rot-jr37942'
     );
-    if (!jr37942Route) {
+    if (shouldBootstrapInitialSeed && !jr37942Route) {
       const veh3794 = this.vehicles.find(
         v => v.id === 'veh-1793009414958' || v.registrationNumber === '3794'
       );
@@ -5218,7 +5290,7 @@ export class SheetsDatabaseManager {
     let jr37931Route = this.routes.find(
       r => normalizeCode(r.code) === 'jr37931' || r.id === 'rot-jr37931'
     );
-    if (!jr37931Route) {
+    if (shouldBootstrapInitialSeed && !jr37931Route) {
       const veh3793 = this.vehicles.find(
         v => v.id === 'veh-1793009457043' || v.registrationNumber === '3793'
       );
@@ -5253,7 +5325,7 @@ export class SheetsDatabaseManager {
         normalizeCode(r.code) === 'jr37932' ||
         r.id === 'rot-jr37932'
     );
-    if (!jr37932Route) {
+    if (shouldBootstrapInitialSeed && !jr37932Route) {
       const veh3793 = this.vehicles.find(v =>
         v.registrationNumber.includes('3793')
       );
@@ -5289,7 +5361,7 @@ export class SheetsDatabaseManager {
         r.id === 'rot-1793120194793' ||
         r.id === 'rot-jrximo1'
     );
-    if (!jrXimo1Route) {
+    if (shouldBootstrapInitialSeed && !jrXimo1Route) {
       const vehMaximo = this.vehicles.find(
         v =>
           v.id === 'veh-1793009480244' ||
@@ -5327,7 +5399,7 @@ export class SheetsDatabaseManager {
         normalizeCode(r.code) === 'jrximo2' ||
         r.id === 'rot-jrximo2'
     );
-    if (!jrXimo2Route) {
+    if (shouldBootstrapInitialSeed && !jrXimo2Route) {
       const vehMaximo = this.vehicles.find(
         v =>
           v.id === 'veh-1793009480244' ||
@@ -5365,7 +5437,7 @@ export class SheetsDatabaseManager {
         normalizeCode(r.code) === 'jrxylo2' ||
         r.id === 'rot-jrxylo2'
     );
-    if (!jrXylo2Route) {
+    if (shouldBootstrapInitialSeed && !jrXylo2Route) {
       const vehXylo = this.vehicles.find(
         v =>
           v.id === 'veh-1793009497184' ||
@@ -5403,20 +5475,12 @@ export class SheetsDatabaseManager {
       this.routes.push(jrXylo2Route);
     }
 
-    if (!this.tripsMaster.some(t => Number(t.tripNumber) === 3)) {
-      this.tripsMaster.push({
-        id: 'trp-3',
-        tripNumber: 3,
-        description: 'Trip 3 — Third Shift',
-      });
-    }
-
     let jr71753Route = this.routes.find(
       r =>
         normalizeCode(r.code) === 'jr71753' ||
         r.id === 'rot-jr71753'
     );
-    if (!jr71753Route) {
+    if (shouldBootstrapInitialSeed && !jr71753Route) {
       const veh7175 = this.vehicles.find(
         v =>
           v.id === 'veh-1793009507193' ||
@@ -5453,7 +5517,7 @@ export class SheetsDatabaseManager {
         normalizeCode(r.code) === 'jr71783' ||
         r.id === 'rot-jr71783'
     );
-    if (!jr71783Route) {
+    if (shouldBootstrapInitialSeed && !jr71783Route) {
       const veh7178 = this.vehicles.find(
         v =>
           v.id === 'veh-1793009518747' ||
@@ -5495,7 +5559,7 @@ export class SheetsDatabaseManager {
         normalizeCode(r.code) === 'jroplo2' ||
         r.id === 'rot-jroplo2'
     );
-    if (!jrOplo2Route) {
+    if (shouldBootstrapInitialSeed && !jrOplo2Route) {
       const vehMarco = this.vehicles.find(
         v =>
           v.id === 'veh-1793009533994' ||
@@ -9705,117 +9769,318 @@ export class SheetsDatabaseManager {
       }
     }
 
-    for (const batch of routeSeedBatches) {
-      const targetRouteId = batch.routeObj?.id || batch.fallbackRouteId;
-      const targetRouteCode = batch.routeObj?.code || batch.fallbackRouteCode;
-      for (let i = 0; i < batch.members.length; i++) {
-        const item = batch.members[i];
-        const deterministicId = `${batch.seedPrefix}-${i + 1}`;
-        const existing = this.students.find(s => {
-          if (s.id === deterministicId) return true;
+    // Only seed initial members when the database has zero members; NEVER overwrite user-edited route assignments on existing live data
+    if (shouldBootstrapInitialSeed) {
+      for (const batch of routeSeedBatches) {
+        const targetRouteId = batch.routeObj?.id || batch.fallbackRouteId;
+        const targetRouteCode = batch.routeObj?.code || batch.fallbackRouteCode;
+        for (let i = 0; i < batch.members.length; i++) {
+          const item = batch.members[i];
+          const deterministicId = `${batch.seedPrefix}-${i + 1}`;
+          const matchedVil = findMatchingVillage(item.villageMatch);
+          const firstStop = matchedVil?.stops?.[0];
+          const villageId = matchedVil?.id || '';
+          const villageName = matchedVil?.name || item.villageMatch;
+          const stopId = firstStop?.id || '';
+          const stopName = firstStop?.name || villageName;
+          const rawFee =
+            normalizeVillage(villageName) === 'old school'
+              ? 0
+              : firstStop?.fee !== undefined && firstStop?.fee !== null
+              ? Number(firstStop.fee)
+              : matchedVil?.monthlyRate !== undefined && matchedVil?.monthlyRate !== null
+              ? Number(matchedVil.monthlyRate)
+              : 800;
+          const fee = isNaN(rawFee) ? 0 : Math.max(0, rawFee);
+
+          const inferredCampus = this.inferCampusFromClass(
+            item.className,
+            batch.routeObj?.campus || 'Sr'
+          );
+
+          const rawSeedAdm = String(item.admissionNo || '').trim();
+          const normalizedSeedAdm = /^\d+\/\d+$/.test(rawSeedAdm) ? `NEV${rawSeedAdm}` : rawSeedAdm;
+
+          const newStudent: StudentMember = {
+            id: deterministicId,
+            admissionNo: normalizedSeedAdm,
+            name: item.name,
+            profilePhoto: '',
+            memberType: 'Student',
+            class: item.className,
+            section: item.section || 'A',
+            gender: item.gender,
+            campus: inferredCampus,
+            academicSession: this.config.currentAcademicSession || '2026-2027',
+            fatherName: item.fatherName,
+            mobile: item.mobile,
+            address: villageName,
+            routeId: targetRouteId,
+            routeCode: targetRouteCode,
+            villageId,
+            villageName,
+            pickupDropStopId: stopId,
+            pickupDropStopName: stopName,
+            morningStopId: stopId,
+            morningStopName: stopName,
+            eveningStopId: stopId,
+            eveningStopName: stopName,
+            serviceType: 'both',
+            transportStatus: 'Active',
+            emergencyContact: item.emergencyContact || item.mobile,
+            monthlyFee: fee,
+            concessionAmount: 0,
+            balanceDue: 0,
+            joiningDate: todayStr,
+            documents: [],
+            specialHistory: [],
+            version: 1,
+          };
+
+          this.students.push(newStudent);
+          this.ensureAutoFeeForMember(newStudent);
+          changed = true;
+        }
+      }
+    }
+
+    // One-time idempotent migration for Vehicle 0626->2073, MAXIMO->7022, and new Vehicle 0626 (XYLO Trip 1 + Katokhar/Teghra/Mohammadpur -> Trip 1, XYLO Trip 2 -> Trip 2)
+    if (
+      (!this.isGoogleConfigured || this.hasHydratedFromSheets) &&
+      this.students.length > 0 &&
+      !(this.config as any).appliedVehicle2073_7022_0626Shift_v1
+    ) {
+      // 1. Vehicle 2073 (renamed from old 0626, veh-1793009334623)
+      const rtSr2073_1 = this.routes.find(r => r.id === 'rot-1793104600020');
+      if (rtSr2073_1) {
+        rtSr2073_1.code = 'Sr/2073/1';
+        rtSr2073_1.vehicleId = 'veh-1793009334623';
+        rtSr2073_1.vehicleNumber = '2073';
+        rtSr2073_1.vehicleLast4 = '2073';
+        for (const s of this.students) {
+          if (s.routeId === rtSr2073_1.id) {
+            s.routeCode = 'Sr/2073/1';
+          }
+        }
+      }
+      const rtJr2073_2 = this.routes.find(r => r.id === 'rot-1793010433329');
+      if (rtJr2073_2) {
+        rtJr2073_2.code = 'Jr/2073/2';
+        rtJr2073_2.vehicleId = 'veh-1793009334623';
+        rtJr2073_2.vehicleNumber = '2073';
+        rtJr2073_2.vehicleLast4 = '2073';
+        for (const s of this.students) {
+          if (s.routeId === rtJr2073_2.id) {
+            s.routeCode = 'Jr/2073/2';
+          }
+        }
+      }
+
+      // 2. Vehicle 7022 (renamed from MAXIMO, veh-1793009480244)
+      const rtJr7022_1 = this.routes.find(r => r.id === 'rot-1793120194793');
+      if (rtJr7022_1) {
+        rtJr7022_1.code = 'Jr/7022/1';
+        rtJr7022_1.vehicleId = 'veh-1793009480244';
+        rtJr7022_1.vehicleNumber = '7022';
+        rtJr7022_1.vehicleLast4 = '7022';
+        for (const s of this.students) {
           if (
-            item.admissionNo.trim() &&
-            s.admissionNo.trim().toLowerCase() === item.admissionNo.trim().toLowerCase() &&
-            s.name.trim().toLowerCase() === item.name.trim().toLowerCase() &&
-            normalizeCode(s.routeCode || '') === normalizeCode(batch.fallbackRouteCode)
+            s.routeId === 'rot-1793120194793' ||
+            s.routeId === 'rot-jrximo1' ||
+            normalizeCode(s.routeCode || '') === 'jrximo1' ||
+            normalizeCode(s.routeCode || '') === 'jrmaximo1'
           ) {
-            return true;
+            s.routeId = rtJr7022_1.id;
+            s.routeCode = 'Jr/7022/1';
           }
+        }
+      }
+      const rtJr7022_2 = this.routes.find(r => r.id === 'rot-1793120806527');
+      if (rtJr7022_2) {
+        rtJr7022_2.code = 'Jr/7022/2';
+        rtJr7022_2.vehicleId = 'veh-1793009480244';
+        rtJr7022_2.vehicleNumber = '7022';
+        rtJr7022_2.vehicleLast4 = '7022';
+        for (const s of this.students) {
           if (
-            !item.admissionNo.trim() &&
-            s.name.trim().toLowerCase() === item.name.trim().toLowerCase() &&
-            normalizeVillage(s.villageName || '') === normalizeVillage(item.villageMatch) &&
-            normalizeCode(s.routeCode || '') === normalizeCode(batch.fallbackRouteCode)
+            s.routeId === 'rot-1793120806527' ||
+            s.routeId === 'rot-jrximo2' ||
+            normalizeCode(s.routeCode || '') === 'jrximo2' ||
+            normalizeCode(s.routeCode || '') === 'jrmaximo2'
           ) {
-            return true;
+            s.routeId = rtJr7022_2.id;
+            s.routeCode = 'Jr/7022/2';
           }
-          return false;
-        });
-        if (existing) {
-          if (existing.id === deterministicId) {
-            if (existing.routeId !== targetRouteId || existing.routeCode !== targetRouteCode) {
-              existing.routeId = targetRouteId;
-              existing.routeCode = targetRouteCode;
-              changed = true;
-            }
-            const expectedCampus = this.inferCampusFromClass(
-              existing.class || item.className,
-              batch.routeObj?.campus || 'Sr'
-            );
-            if (existing.campus !== expectedCampus) {
-              existing.campus = expectedCampus;
-              changed = true;
-            }
+        }
+      }
+      // Remove bogus auto-seeded duplicate routes rot-jrximo1 / rot-jrximo2 / rot-jrxylo2
+      for (const bogusId of ['rot-jrximo1', 'rot-jrximo2', 'rot-jrxylo2']) {
+        this.explicitlyDeletedIds.add(bogusId);
+      }
+      this.routes = this.routes.filter(
+        r => !['rot-jrximo1', 'rot-jrximo2', 'rot-jrxylo2'].includes(r.id)
+      );
+
+      // 3. New Vehicle 0626 (veh-1794979466774) — 1st Trip (Sr/0626/1, rot-1794981011297)
+      const newVeh0626 = this.vehicles.find(
+        v => v.id === 'veh-1794979466774' || v.registrationNumber === '0626'
+      );
+      const rtNewSr0626_1 = this.routes.find(
+        r =>
+          r.id === 'rot-1794981011297' ||
+          (newVeh0626 && r.vehicleId === newVeh0626.id && Number(r.tripNumber) === 1)
+      );
+      if (rtNewSr0626_1) {
+        rtNewSr0626_1.code = 'Sr/0626/1';
+        rtNewSr0626_1.vehicleNumber = '0626';
+        rtNewSr0626_1.vehicleLast4 = '0626';
+        rtNewSr0626_1.active = true;
+
+        const targetShiftVillages = new Set(['katokhar', 'teghra', 'mohammadpur']);
+        for (const s of this.students) {
+          const isXylo1Member =
+            s.routeId === 'rot-1793104832357' ||
+            normalizeCode(s.routeCode || '') === 'srxylo1';
+          const isKtmVillageMember = targetShiftVillages.has(
+            normalizeVillage(s.villageName || '')
+          );
+          if (isXylo1Member || isKtmVillageMember) {
+            s.routeId = rtNewSr0626_1.id;
+            s.routeCode = 'Sr/0626/1';
           }
-          continue;
         }
 
-        const matchedVil = findMatchingVillage(item.villageMatch);
-        const firstStop = matchedVil?.stops?.[0];
-        const villageId = matchedVil?.id || '';
-        const villageName = matchedVil?.name || item.villageMatch;
-        const stopId = firstStop?.id || '';
-        const stopName = firstStop?.name || villageName;
-        const rawFee =
-          normalizeVillage(villageName) === 'old school'
-            ? 0
-            : firstStop?.fee !== undefined && firstStop?.fee !== null
-            ? Number(firstStop.fee)
-            : matchedVil?.monthlyRate !== undefined && matchedVil?.monthlyRate !== null
-            ? Number(matchedVil.monthlyRate)
-            : 800;
-        const fee = isNaN(rawFee) ? 0 : Math.max(0, rawFee);
-
-        const routeId = batch.routeObj?.id || batch.fallbackRouteId;
-        const routeCode = batch.routeObj?.code || batch.fallbackRouteCode;
-        const inferredCampus = this.inferCampusFromClass(
-          item.className,
-          batch.routeObj?.campus || 'Sr'
-        );
-
-        const rawSeedAdm = String(item.admissionNo || '').trim();
-        const normalizedSeedAdm = /^\d+\/\d+$/.test(rawSeedAdm) ? `NEV${rawSeedAdm}` : rawSeedAdm;
-
-        const newStudent: StudentMember = {
-          id: deterministicId,
-          admissionNo: normalizedSeedAdm,
-          name: item.name,
-          profilePhoto: '',
-          memberType: 'Student',
-          class: item.className,
-          section: item.section || 'A',
-          gender: item.gender,
-          campus: inferredCampus,
-          academicSession: this.config.currentAcademicSession || '2026-2027',
-          fatherName: item.fatherName,
-          mobile: item.mobile,
-          address: villageName,
-          routeId,
-          routeCode,
-          villageId,
-          villageName,
-          pickupDropStopId: stopId,
-          pickupDropStopName: stopName,
-          morningStopId: stopId,
-          morningStopName: stopName,
-          eveningStopId: stopId,
-          eveningStopName: stopName,
-          serviceType: 'both',
-          transportStatus: 'Active',
-          emergencyContact: item.emergencyContact || item.mobile,
-          monthlyFee: fee,
-          concessionAmount: 0,
-          balanceDue: 0,
-          joiningDate: todayStr,
-          documents: [],
-          specialHistory: [],
-          version: 1,
-        };
-
-        this.students.push(newStudent);
-        this.ensureAutoFeeForMember(newStudent);
-        changed = true;
+        // Remove Katokhar, Teghra, and Mohammadpur from Sr/OPLO/1 (rot-1793104522784) so they belong cleanly to Sr/0626/1
+        const rtSrOplo1 = this.routes.find(r => r.id === 'rot-1793104522784');
+        if (rtSrOplo1) {
+          const ktmVilIds = new Set(
+            this.villages
+              .filter(v => targetShiftVillages.has(normalizeVillage(v.name)))
+              .map(v => v.id)
+          );
+          const ktmStopIds = new Set(
+            this.villages
+              .filter(v => targetShiftVillages.has(normalizeVillage(v.name)))
+              .flatMap(v => (v.stops || []).map(st => st.id))
+          );
+          rtSrOplo1.villageIds = (rtSrOplo1.villageIds || []).filter(id => !ktmVilIds.has(id));
+          rtSrOplo1.villageNames = (rtSrOplo1.villageNames || []).filter(
+            vn => !targetShiftVillages.has(normalizeVillage(vn))
+          );
+          rtSrOplo1.stops = (rtSrOplo1.stops || []).filter(
+            st =>
+              !ktmStopIds.has(st.id) &&
+              !targetShiftVillages.has(normalizeVillage((st as any).villageName || st.name || ''))
+          );
+          rtSrOplo1.stopIds = (rtSrOplo1.stopIds || []).filter(id => !ktmStopIds.has(id));
+          rtSrOplo1.stopNames = rtSrOplo1.stops.map(st => st.name);
+        }
       }
+
+      // 4. New Vehicle 0626 (veh-1794979466774) — 2nd Trip (Jr/0626/2, rot-1794981144024)
+      const rtNewJr0626_2 = this.routes.find(
+        r =>
+          r.id === 'rot-1794981144024' ||
+          (newVeh0626 && r.vehicleId === newVeh0626.id && Number(r.tripNumber) === 2)
+      );
+      if (rtNewJr0626_2) {
+        rtNewJr0626_2.code = 'Jr/0626/2';
+        rtNewJr0626_2.vehicleNumber = '0626';
+        rtNewJr0626_2.vehicleLast4 = '0626';
+        rtNewJr0626_2.active = true;
+
+        for (const s of this.students) {
+          const isXylo2Member =
+            s.routeId === 'rot-1793120996145' ||
+            s.routeId === 'rot-jrxylo2' ||
+            normalizeCode(s.routeCode || '') === 'jrxylo2';
+          if (isXylo2Member) {
+            s.routeId = rtNewJr0626_2.id;
+            s.routeCode = 'Jr/0626/2';
+          }
+        }
+      }
+
+      // Mark retired 0-member XYLO routes inactive so they don't hijack village auto-matching
+      for (const oldXyloId of ['rot-1793104832357', 'rot-1793120996145']) {
+        const oldXyloRt = this.routes.find(r => r.id === oldXyloId);
+        if (oldXyloRt) {
+          const remaining = this.students.filter(
+            s => s.routeId === oldXyloRt.id && s.transportStatus !== 'Left'
+          ).length;
+          if (remaining === 0) {
+            oldXyloRt.active = false;
+          }
+        }
+      }
+
+      // 5. Sync >= 2026-11-18 Daily_Trips labels for 2073 & 7022 and ensure 2026-11-18 Daily_Trips exist for new 0626 routes
+      for (const trp of this.trips) {
+        if (trp.date >= '2026-11-18') {
+          if (trp.routeId === 'rot-1793104600020') {
+            trp.routeName = 'Sr/2073/1';
+            trp.vehicleNumber = '2073';
+            trp.vehicleId = 'veh-1793009334623';
+          } else if (trp.routeId === 'rot-1793010433329') {
+            trp.routeName = 'Jr/2073/2';
+            trp.vehicleNumber = '2073';
+            trp.vehicleId = 'veh-1793009334623';
+          } else if (trp.routeId === 'rot-1793120194793') {
+            trp.routeName = 'Jr/7022/1';
+            trp.vehicleNumber = '7022';
+            trp.vehicleId = 'veh-1793009480244';
+          } else if (trp.routeId === 'rot-1793120806527') {
+            trp.routeName = 'Jr/7022/2';
+            trp.vehicleNumber = '7022';
+            trp.vehicleId = 'veh-1793009480244';
+            trp.rosterCount = this.students.filter(
+              s => s.routeId === 'rot-1793120806527' && s.transportStatus !== 'Left'
+            ).length;
+          } else if (trp.routeId === 'rot-1793104522784') {
+            trp.rosterCount = this.students.filter(
+              s => s.routeId === 'rot-1793104522784' && s.transportStatus !== 'Left'
+            ).length;
+          }
+        }
+      }
+
+      const activeTripDates = Array.from(
+        new Set(this.trips.filter(t => t.date >= '2026-11-18').map(t => t.date))
+      );
+      for (const dtStr of activeTripDates) {
+        for (const newRt of [rtNewSr0626_1, rtNewJr0626_2]) {
+          if (!newRt) continue;
+          const exists = this.trips.some(t => t.date === dtStr && t.routeId === newRt.id);
+          if (!exists) {
+            const rosterLen = this.students.filter(
+              s => s.routeId === newRt.id && s.transportStatus !== 'Left'
+            ).length;
+            this.trips.push({
+              id: `dt-${newRt.id}-${dtStr}`,
+              date: dtStr,
+              campus: newRt.campus,
+              routeId: newRt.id,
+              routeName: newRt.code,
+              vehicleId: newRt.vehicleId,
+              vehicleNumber: newRt.vehicleNumber,
+              driverName: newVeh0626?.assignedDriverName || 'Assigned Driver',
+              helperName: newVeh0626?.assignedHelperName,
+              tripNumber: newRt.tripNumber,
+              shiftName: `Trip ${newRt.tripNumber} — ${newRt.code}`,
+              status: 'Ready',
+              rosterCount: rosterLen,
+              presentCount: 0,
+              absentCount: 0,
+              mismatchCount: 0,
+              plannedStartTime: newRt.tripNumber === 1 ? '06:40 AM' : '07:45 AM',
+              plannedEndTime: newRt.tripNumber === 1 ? '07:30 AM' : '08:30 AM',
+            });
+          }
+        }
+      }
+
+      (this.config as any).appliedVehicle2073_7022_0626Shift_v1 = true;
+      changed = true;
     }
 
     // One-time idempotent restoration of Riddhi Krishna's (NEV837/22, stu-sr71751-9) 02-11-2026 fee receipt after Google Sheets hydration
@@ -10064,7 +10329,7 @@ export class SheetsDatabaseManager {
           ? data.pickupDropStopName.trim()
           : defaultStop?.name || resolvedVillageName;
 
-      // Resolve best matching Route for the student's Village / Stop so changing village/stop auto-attaches to the new route
+      // Resolve best matching Route for the student's Village / Stop, while always respecting explicit user route choices
       const autoMatchedRoute = this.findBestRouteForVillageOrStop(
         resolvedVillageId,
         resolvedVillageName,
@@ -10075,16 +10340,7 @@ export class SheetsDatabaseManager {
       const explicitRoute = this.routes.find(
         r => r.id === data.routeId || (data.routeCode && r.code === data.routeCode)
       );
-      const explicitCoversVillage =
-        explicitRoute &&
-        ((resolvedVillageId && explicitRoute.villageIds.includes(resolvedVillageId)) ||
-          (resolvedVillageName &&
-            explicitRoute.villageNames.some(
-              vn => vn.trim().toLowerCase() === resolvedVillageName.trim().toLowerCase()
-            )));
-      const resolvedRoute = explicitCoversVillage
-        ? explicitRoute
-        : autoMatchedRoute || explicitRoute;
+      const resolvedRoute = explicitRoute || autoMatchedRoute;
 
       if (this.routes.length === 0 || (!resolvedRoute && !data.routeId && !data.routeCode?.trim())) {
         throw new Error('Mandatory prerequisite record missing: Please select a valid Assigned Route from Route Master.');
@@ -10148,9 +10404,19 @@ export class SheetsDatabaseManager {
             (resolvedVillageName && resolvedVillageName !== existing.villageName) ||
             (stopId && stopId !== existing.pickupDropStopId) ||
             (stopName && stopName !== existing.pickupDropStopName);
-          const finalRoute = villageOrStopChanged
-            ? autoMatchedRoute || resolvedRoute
-            : resolvedRoute;
+          const routeExplicitlyChanged = Boolean(
+            explicitRoute &&
+              explicitRoute.id !== existing.routeId &&
+              explicitRoute.code !== existing.routeCode
+          );
+          const existingRouteObj = this.routes.find(
+            r => r.id === existing.routeId || r.code === existing.routeCode
+          );
+          const finalRoute = routeExplicitlyChanged
+            ? explicitRoute
+            : villageOrStopChanged
+            ? autoMatchedRoute || explicitRoute || existingRouteObj
+            : explicitRoute || existingRouteObj || autoMatchedRoute;
 
           const updated: StudentMember = {
             ...existing,
