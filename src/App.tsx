@@ -790,6 +790,13 @@ export function App() {
     await api.deleteRoute(id);
     await loadAllData();
   };
+  const handleUpdateRouteTimings = async (
+    routeIdOrCode: string,
+    payload: { arrivalTime?: string; departureTime?: string }
+  ) => {
+    await api.updateRouteTimings(routeIdOrCode, payload);
+    await loadAllData();
+  };
 
   const handleSaveVehicleAssignment = async (data: Partial<VehicleAssignmentRecord>) => {
     await api.assignVehicleDriverHelper({
@@ -2277,6 +2284,7 @@ export function App() {
                   isReadOnly={isPrincipal}
                   initialSubTab={activeSubTab || 'routes'}
                   onOpenPrintPack={handleOpenPrintPack}
+                  onUpdateRouteTimings={isPrincipal ? undefined : handleUpdateRouteTimings}
                 />
               )}
 
@@ -2309,6 +2317,7 @@ export function App() {
                   attendanceRecords={attendanceRecords}
                   absenteeCalls={absenteeCalls}
                   routes={routes}
+                  services={services}
                   students={students}
                   initialSubTab={activeSubTab || 'board'}
                   externalTargetRoute={externalTargetRoute}

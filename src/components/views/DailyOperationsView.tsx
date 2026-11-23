@@ -5,7 +5,7 @@ import {
   Phone, AlertTriangle, Clock, UserCheck, MessageSquare, ShieldAlert, Send
 } from 'lucide-react';
 import {
-  DailyTrip, TripAttendanceRecord, Route, StudentMember, CampusMaster, Vehicle, UserRole, AbsenteeCallRecord
+  DailyTrip, TripAttendanceRecord, Route, ScheduledService, StudentMember, CampusMaster, Vehicle, UserRole, AbsenteeCallRecord
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview, exportToCsv } from '../../utils/exportPrint.js';
 import {
@@ -15,6 +15,10 @@ import {
   AttendanceAcknowledgement,
   MemberAttendanceDiscrepancyItem,
 } from '../../utils/attendanceAlerts.js';
+import {
+  resolveRouteScheduleTimings,
+  compareActualToScheduledTime,
+} from '../../utils/scheduleTimings.js';
 
 interface DailyOperationsViewProps {
   schoolName?: string;
@@ -26,6 +30,7 @@ interface DailyOperationsViewProps {
   trips: DailyTrip[];
   attendanceRecords: TripAttendanceRecord[];
   routes: Route[];
+  services?: ScheduledService[];
   students?: StudentMember[];
   absenteeCalls?: AbsenteeCallRecord[];
   initialSubTab?: string;
@@ -160,6 +165,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
   trips,
   attendanceRecords,
   routes,
+  services = [],
   students = [],
   absenteeCalls = [],
   initialSubTab,
@@ -2639,6 +2645,27 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
       const stats = getSlotSummaryStats(slotDef);
       const overrideSlotKey = `${veh.id}:${targetSummaryCampus || 'ALL'}:${summaryDate || 'ALL'}:${slotDef.slotKey}`;
       const ov = timingOverrides[overrideSlotKey] || {};
+      const finalInTime = ov.inTime !== undefined ? ov.inTime : stats.inTime;
+      const finalOutTime = ov.outTime !== undefined ? ov.outTime : stats.outTime;
+      const matchingService = services.find(
+        (svc) =>
+          (slotDef.route && (svc.routeId === slotDef.route.id || svc.routeName === slotDef.route.code)) ||
+          (slotDef.trip && (svc.routeId === slotDef.trip.routeId || svc.routeName === slotDef.trip.routeName))
+      );
+      const hasScheduledTarget = Boolean(slotDef.route || slotDef.trip || matchingService);
+      const resolvedSched = hasScheduledTarget
+        ? resolveRouteScheduleTimings(
+            slotDef.route || (slotDef.trip ? { tripNumber: slotDef.trip.tripNumber } : undefined),
+            matchingService
+          )
+        : null;
+      const inRecon = resolvedSched
+        ? compareActualToScheduledTime(finalInTime, resolvedSched.morningArrivalTime)
+        : { actualMinutes: null, scheduledMinutes: null, diffMinutes: null, isLate: false, isOnTime: false };
+      const outRecon = resolvedSched
+        ? compareActualToScheduledTime(finalOutTime, resolvedSched.eveningDepartureTime)
+        : { actualMinutes: null, scheduledMinutes: null, diffMinutes: null, isLate: false, isOnTime: false };
+
       return {
         slotKey: slotDef.slotKey,
         overrideSlotKey,
@@ -2648,11 +2675,17 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         hasRouteOrTrip: Boolean(slotDef.route || slotDef.trip),
         totalMembersCount: stats.totalMembersCount,
         totalMembersDisplay: stats.totalMembersDisplay,
-        inTime: ov.inTime !== undefined ? ov.inTime : stats.inTime,
+        inTime: finalInTime,
         inStrength: ov.inStrength !== undefined ? ov.inStrength : stats.inStr,
-        outTime: ov.outTime !== undefined ? ov.outTime : stats.outTime,
+        outTime: finalOutTime,
         outStrength: ov.outStrength !== undefined ? ov.outStrength : stats.outStr,
         remark: ov.remark !== undefined ? ov.remark : stats.remark,
+        scheduledInTime: resolvedSched?.morningArrivalTime || '',
+        scheduledOutTime: resolvedSched?.eveningDepartureTime || '',
+        isInLate: inRecon.isLate,
+        inDiffMinutes: inRecon.diffMinutes,
+        isOutLate: outRecon.isLate,
+        outDiffMinutes: outRecon.diffMinutes,
       };
     });
 
@@ -2725,9 +2758,21 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             trip: slot.tripLabel,
             route: slot.routeCode || '—',
             totalMembers: slot.totalMembersCount ?? '—',
+            scheduledInTime: slot.scheduledInTime || '—',
             inTime: slot.inTime || '—',
+            inStatus: slot.inTime
+              ? slot.isInLate
+                ? `Late (+${slot.inDiffMinutes}m)`
+                : 'On Time'
+              : '—',
             inStrength: slot.inStrength || '—',
+            scheduledOutTime: slot.scheduledOutTime || '—',
             outTime: slot.outTime || '—',
+            outStatus: slot.outTime
+              ? slot.isOutLate
+                ? `Late (+${slot.outDiffMinutes}m)`
+                : 'On Time'
+              : '—',
             outStrength: slot.outStrength || '—',
             remark: slot.remark || '—',
           }))
@@ -2773,9 +2818,9 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
             ${slot.routeCode ? `<div style="font-size:9px;font-weight:600;color:#475569;">${esc(slot.routeCode)}</div>` : ''}
           </td>
           <td style="text-align:center;font-weight:700;background:#f8fafc;">${esc(slot.totalMembersDisplay || '—')}</td>
-          <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.inTime || '—')}</td>
+          <td style="text-align:center;font-family:monospace;font-weight:700;color:${slot.isInLate ? '#dc2626' : '#000000'};">${esc(slot.inTime || '—')}</td>
           <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.inStrength || '—')}</td>
-          <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.outTime || '—')}</td>
+          <td style="text-align:center;font-family:monospace;font-weight:700;color:${slot.isOutLate ? '#dc2626' : '#000000'};">${esc(slot.outTime || '—')}</td>
           <td style="text-align:center;font-family:monospace;font-weight:700;">${esc(slot.outStrength || '—')}</td>
           <td style="font-size:10.5px;line-height:1.35;white-space:pre-wrap;word-break:break-word;">${esc(slot.remark || '—')}</td>
         </tr>`
@@ -2791,6 +2836,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
         <head>
           <title>Transport Timings - ${esc(schoolName || 'Narendra Edu Valley')}</title>
           <style>
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             body { font-family: Arial, sans-serif; padding: 14px; color: #0f172a; }
             table { width: 100%; border-collapse: collapse; border: 2px solid #0f172a; font-size: 11.5px; }
             th, td { border: 1px solid #0f172a; padding: 5px 7px; vertical-align: middle; word-wrap: break-word; overflow-wrap: break-word; }
@@ -2833,6 +2879,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
               <tr><td colspan="6"><strong>Campus Incharge:</strong> ${esc(campusInchargeName || '________________')}</td><td colspan="4"><strong>Filled By:</strong> ${esc(filledByName || '________________')}</td></tr>
               <tr><td colspan="6" style="padding:12px 8px;">Signature:</td><td colspan="4" style="padding:12px 8px;">Signature:</td></tr>
               <tr><td colspan="10" style="white-space:pre-wrap;word-break:break-word;line-height:1.45;"><strong>Remarks:</strong> ${esc(effectiveFooterRemark)}</td></tr>
+              <tr><td colspan="10" style="font-size:10px;background:#f8fafc;color:#334155;"><strong>Schedule Reconciliation Legend:</strong> <span style="color:#000000;font-weight:700;">Black Font</span> = On or Before Vehicle Schedule Time &nbsp;|&nbsp; <span style="color:#dc2626;font-weight:700;">Red Font</span> = Late (Beyond Vehicle Schedule Time)</td></tr>
             </tbody>
           </table>
         </body>
@@ -3027,9 +3074,13 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   { header: 'Trip', accessor: (r) => r.trip },
                   { header: 'Route', accessor: (r) => r.route },
                   { header: 'Total Members', accessor: (r) => r.totalMembers },
+                  { header: 'Scheduled In', accessor: (r) => r.scheduledInTime },
                   { header: 'In Time', accessor: (r) => r.inTime },
+                  { header: 'In Status', accessor: (r) => r.inStatus },
                   { header: 'Morning Strength', accessor: (r) => r.inStrength },
+                  { header: 'Scheduled Out', accessor: (r) => r.scheduledOutTime },
                   { header: 'Out Time', accessor: (r) => r.outTime },
+                  { header: 'Out Status', accessor: (r) => r.outStatus },
                   { header: 'Evening Strength', accessor: (r) => r.outStrength },
                   { header: 'Remarks', accessor: (r) => r.remark },
                 ]}
@@ -3224,103 +3275,135 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                   </span>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {isRouteMarkedHoliday ? (
-                    <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
-                      Holiday (H) — Arrival &amp; Departure Time Not Applicable
-                    </span>
-                  ) : boardMode === 'arrival' ? (
-                    <>
-                      <span
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
-                          isArrivalTimeMarked
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            : 'bg-amber-50 text-amber-900 border-amber-300'
-                        }`}
-                      >
-                        {isArrivalTimeMarked
-                          ? `✓ Arrival Time: ${effectiveInTime}`
-                          : isReadOnly
-                          ? 'Arrival Time: Not Marked'
-                          : '⚠ Mark Arrival Time First'}
-                      </span>
-                      {!isReadOnly && (
+                {(() => {
+                  const boardSvc = services.find(
+                    (svc) =>
+                      (selectedRouteObj &&
+                        (svc.routeId === selectedRouteObj.id || svc.routeName === selectedRouteObj.code)) ||
+                      (currentTrip &&
+                        (svc.routeId === currentTrip.routeId || svc.routeName === currentTrip.routeName))
+                  );
+                  const boardSched = resolveRouteScheduleTimings(
+                    selectedRouteObj || (currentTrip ? { tripNumber: currentTrip.tripNumber } : undefined),
+                    boardSvc
+                  );
+                  const boardInRecon = compareActualToScheduledTime(
+                    effectiveInTime,
+                    boardSched.morningArrivalTime
+                  );
+                  const boardOutRecon = compareActualToScheduledTime(
+                    effectiveOutTime,
+                    boardSched.eveningDepartureTime
+                  );
+
+                  return (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isRouteMarkedHoliday ? (
+                        <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                          Holiday (H) — Arrival &amp; Departure Time Not Applicable
+                        </span>
+                      ) : boardMode === 'arrival' ? (
                         <>
-                          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
-                            <span className="text-[10px] font-bold text-slate-500 uppercase">Arrival (In) Time:</span>
-                            <input
-                              type="time"
-                              value={tripInTime}
-                              onChange={(e) => setTripInTime(e.target.value)}
-                              className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setTripInTime(getCurrentSystemTimeHHMM())}
-                              className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
-                              title="Auto-select current system time"
-                            >
-                              Now
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleMarkTripArrivalOrDeparture('Arrived')}
-                            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-2xs"
+                          <span
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                              isArrivalTimeMarked
+                                ? boardInRecon.isLate
+                                  ? 'bg-red-50 text-red-700 border-red-300'
+                                  : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                : 'bg-amber-50 text-amber-900 border-amber-300'
+                            }`}
                           >
-                            <ArrowDownLeft className="w-3.5 h-3.5" />
-                            <span>{isArrivalTimeMarked ? 'Update Arrival Time' : 'Mark Arrival'}</span>
-                          </button>
+                            {isArrivalTimeMarked
+                              ? boardInRecon.isLate
+                                ? `✓ Arrival: ${effectiveInTime} • Late (+${boardInRecon.diffMinutes}m vs ${boardSched.morningArrivalTime})`
+                                : `✓ Arrival: ${effectiveInTime} • On Time (Sched ${boardSched.morningArrivalTime})`
+                              : isReadOnly
+                              ? `Arrival Time: Not Marked (Sched ${boardSched.morningArrivalTime})`
+                              : `⚠ Mark Arrival First (Sched ${boardSched.morningArrivalTime})`}
+                          </span>
+                          {!isReadOnly && (
+                            <>
+                              <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
+                                <span className="text-[10px] font-bold text-slate-500 uppercase">Arrival (In) Time:</span>
+                                <input
+                                  type="time"
+                                  value={tripInTime}
+                                  onChange={(e) => setTripInTime(e.target.value)}
+                                  className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setTripInTime(getCurrentSystemTimeHHMM())}
+                                  className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
+                                  title="Auto-select current system time"
+                                >
+                                  Now
+                                </button>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleMarkTripArrivalOrDeparture('Arrived')}
+                                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-2xs"
+                              >
+                                <ArrowDownLeft className="w-3.5 h-3.5" />
+                                <span>{isArrivalTimeMarked ? 'Update Arrival Time' : 'Mark Arrival'}</span>
+                              </button>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                              isDepartureTimeMarked
+                                ? boardOutRecon.isLate
+                                  ? 'bg-red-50 text-red-700 border-red-300'
+                                  : 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                : 'bg-amber-50 text-amber-900 border-amber-300'
+                            }`}
+                          >
+                            {isDepartureTimeMarked
+                              ? boardOutRecon.isLate
+                                ? `✓ Departure: ${effectiveOutTime} • Late (+${boardOutRecon.diffMinutes}m vs ${boardSched.eveningDepartureTime})`
+                                : `✓ Departure: ${effectiveOutTime} • On Time (Sched ${boardSched.eveningDepartureTime})`
+                              : isReadOnly
+                              ? `Departure Time: Not Marked (Sched ${boardSched.eveningDepartureTime})`
+                              : `⚠ Mark Departure First (Sched ${boardSched.eveningDepartureTime})`}
+                          </span>
+                          {!isReadOnly && (
+                            <>
+                              <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
+                                <span className="text-[10px] font-bold text-slate-500 uppercase">Departure (Out) Time:</span>
+                                <input
+                                  type="time"
+                                  value={tripOutTime}
+                                  onChange={(e) => setTripOutTime(e.target.value)}
+                                  className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setTripOutTime(getCurrentSystemTimeHHMM())}
+                                  className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
+                                  title="Auto-select current system time"
+                                >
+                                  Now
+                                </button>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleMarkTripArrivalOrDeparture('Departed')}
+                                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-2xs"
+                              >
+                                <ArrowUpRight className="w-3.5 h-3.5" />
+                                <span>{isDepartureTimeMarked ? 'Update Departure Time' : 'Mark Departure'}</span>
+                              </button>
+                            </>
+                          )}
                         </>
                       )}
-                    </>
-                  ) : (
-                    <>
-                      <span
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
-                          isDepartureTimeMarked
-                            ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
-                            : 'bg-amber-50 text-amber-900 border-amber-300'
-                        }`}
-                      >
-                        {isDepartureTimeMarked
-                          ? `✓ Departure Time: ${effectiveOutTime}`
-                          : isReadOnly
-                          ? 'Departure Time: Not Marked'
-                          : '⚠ Mark Departure Time First'}
-                      </span>
-                      {!isReadOnly && (
-                        <>
-                          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-xl text-xs">
-                            <span className="text-[10px] font-bold text-slate-500 uppercase">Departure (Out) Time:</span>
-                            <input
-                              type="time"
-                              value={tripOutTime}
-                              onChange={(e) => setTripOutTime(e.target.value)}
-                              className="font-mono font-bold text-slate-800 bg-transparent focus:outline-hidden"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setTripOutTime(getCurrentSystemTimeHHMM())}
-                              className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer ml-1"
-                              title="Auto-select current system time"
-                            >
-                              Now
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleMarkTripArrivalOrDeparture('Departed')}
-                            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-2xs"
-                          >
-                            <ArrowUpRight className="w-3.5 h-3.5" />
-                            <span>{isDepartureTimeMarked ? 'Update Departure Time' : 'Mark Departure'}</span>
-                          </button>
-                        </>
-                      )}
-                    </>
-                  )}
-                </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -4557,7 +4640,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                             <td className="border border-slate-800 py-1.5 px-2 text-center align-middle bg-slate-50/80 font-mono font-bold tabular-nums text-slate-900">
                               {slot.totalMembersDisplay || '—'}
                             </td>
-                            <td className="border border-slate-800 p-1 text-center align-middle">
+                            <td
+                              className="border border-slate-800 p-1 text-center align-middle"
+                              title={
+                                slot.scheduledInTime
+                                  ? slot.inTime
+                                    ? slot.isInLate
+                                      ? `Morning Arrival Late by ${slot.inDiffMinutes} min (Scheduled: ${slot.scheduledInTime})`
+                                      : `Morning Arrival On Time (Scheduled: ${slot.scheduledInTime})`
+                                    : `Scheduled Morning Arrival: ${slot.scheduledInTime}`
+                                  : undefined
+                              }
+                            >
                               <input
                                 type="text"
                                 readOnly={isReadOnly}
@@ -4566,7 +4660,9 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                   updateOverride(slot.overrideSlotKey, 'inTime', e.target.value)
                                 }
                                 placeholder="—"
-                                className="w-full text-center font-mono font-bold tabular-nums text-xs bg-transparent focus:outline-hidden"
+                                className={`w-full text-center font-mono font-bold tabular-nums text-xs bg-transparent focus:outline-hidden ${
+                                  slot.isInLate ? 'text-red-600' : 'text-black'
+                                }`}
                               />
                             </td>
                             <td className="border border-slate-800 p-1 text-center align-middle">
@@ -4581,7 +4677,18 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                 className="w-full text-center font-mono font-bold tabular-nums text-xs text-emerald-800 bg-transparent focus:outline-hidden"
                               />
                             </td>
-                            <td className="border border-slate-800 p-1 text-center align-middle">
+                            <td
+                              className="border border-slate-800 p-1 text-center align-middle"
+                              title={
+                                slot.scheduledOutTime
+                                  ? slot.outTime
+                                    ? slot.isOutLate
+                                      ? `Evening Departure Late by ${slot.outDiffMinutes} min (Scheduled: ${slot.scheduledOutTime})`
+                                      : `Evening Departure On Time (Scheduled: ${slot.scheduledOutTime})`
+                                    : `Scheduled Evening Departure: ${slot.scheduledOutTime}`
+                                  : undefined
+                              }
+                            >
                               <input
                                 type="text"
                                 readOnly={isReadOnly}
@@ -4590,7 +4697,9 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                                   updateOverride(slot.overrideSlotKey, 'outTime', e.target.value)
                                 }
                                 placeholder="—"
-                                className="w-full text-center font-mono font-bold tabular-nums text-xs bg-transparent focus:outline-hidden"
+                                className={`w-full text-center font-mono font-bold tabular-nums text-xs bg-transparent focus:outline-hidden ${
+                                  slot.isOutLate ? 'text-red-600' : 'text-black'
+                                }`}
                               />
                             </td>
                             <td className="border border-slate-800 p-1 text-center align-middle">
@@ -4695,6 +4804,14 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = ({
                         className="flex-1 bg-transparent focus:outline-hidden font-normal text-xs leading-relaxed whitespace-pre-wrap break-words resize-y"
                       />
                     </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td colSpan={10} className="border border-slate-800 py-1.5 px-3 bg-slate-50/70 text-[11px] font-semibold text-slate-700">
+                    <span className="font-bold text-slate-900">Timing Legend (Reconciled with Vehicle Schedule):</span>{' '}
+                    <span className="font-bold text-black">Black Font</span> = On or Before Scheduled Morning Arrival / Evening Departure{' '}
+                    <span className="mx-1.5 text-slate-400">|</span>{' '}
+                    <span className="font-bold text-red-600">Red Font</span> = Late (Beyond Scheduled Time)
                   </td>
                 </tr>
               </tbody>

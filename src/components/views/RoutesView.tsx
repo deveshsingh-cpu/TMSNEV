@@ -3,6 +3,11 @@ import { MapPin, Bus, Filter, Search, X, ChevronDown, ChevronUp, Users, Clock, E
 import { Route, ScheduledService, Village, TransportStop, Vehicle, CampusMaster, StudentMember } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview, exportToCsv } from '../../utils/exportPrint.js';
 import { api } from '../../services/api.js';
+import {
+  resolveRouteScheduleTimings,
+  toHtmlTimeInputValue,
+  formatTime12Hour,
+} from '../../utils/scheduleTimings.js';
 
 interface RoutesViewProps {
   schoolName?: string;
@@ -21,6 +26,10 @@ interface RoutesViewProps {
     weekStartDate: string,
     weekEndDate?: string
   ) => Promise<void>;
+  onUpdateRouteTimings?: (
+    routeIdOrCode: string,
+    payload: { arrivalTime?: string; departureTime?: string }
+  ) => Promise<void>;
 }
 
 export const RoutesView: React.FC<RoutesViewProps> = ({
@@ -35,6 +44,7 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
   students = [],
   initialSubTab = 'routes',
   onOpenPrintPack,
+  onUpdateRouteTimings,
 }) => {
   const [activeTab, setActiveTab] = useState<'routes' | 'multi_trips' | 'villages_stops' | 'pack'>(
     initialSubTab === 'services'
@@ -743,7 +753,20 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                   { header: 'Campus', accessor: (s) => getCampusLabel(s.campus || '') },
                   { header: 'Driver', accessor: (s) => s.driverName || '—' },
                   { header: 'Helper', accessor: (s) => s.helperName || '—' },
-                  { header: 'Timing', accessor: (s) => `${s.departureTime || s.plannedStartTime || ''} - ${s.arrivalTime || s.plannedEndTime || ''}` },
+                  {
+                    header: 'Morning Arrival (In)',
+                    accessor: (s) => {
+                      const rt = routes.find(r => r.id === s.routeId || r.code === s.routeName);
+                      return resolveRouteScheduleTimings(rt, s).morningArrivalTime;
+                    },
+                  },
+                  {
+                    header: 'Evening Departure (Out)',
+                    accessor: (s) => {
+                      const rt = routes.find(r => r.id === s.routeId || r.code === s.routeName);
+                      return resolveRouteScheduleTimings(rt, s).eveningDepartureTime;
+                    },
+                  },
                   { header: 'Assigned Members', accessor: (s) => s.assignedCount ?? 0 },
                 ]}
               />
@@ -1317,8 +1340,12 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                         );
                         const isMembersExpanded = Boolean(expandedServiceMembers[svc.id]);
                         const isEditingTime = editingTimingServiceId === svc.id;
-                        const currentDep = svc.departureTime || svc.plannedStartTime || '06:30 AM';
-                        const currentArr = svc.arrivalTime || svc.plannedEndTime || '07:35 AM';
+                        const matchedRoute = routes.find(
+                          r => r.id === svc.routeId || r.code === svc.routeName
+                        );
+                        const resolvedTimings = resolveRouteScheduleTimings(matchedRoute, svc);
+                        const currentArr = resolvedTimings.morningArrivalTime;
+                        const currentDep = resolvedTimings.eveningDepartureTime;
 
                         return (
                           <div key={svc.id} className="p-4 space-y-3 text-xs">
@@ -1361,26 +1388,28 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
 
                               <div className="flex flex-wrap items-center gap-2">
                                 {isEditingTime ? (
-                                  <div className="flex flex-wrap items-center gap-2 bg-amber-50 p-2 rounded-xl border border-amber-300">
+                                  <div className="flex flex-wrap items-center gap-2 bg-amber-50 p-2.5 rounded-xl border border-amber-300">
                                     <div>
-                                      <label className="block text-[10px] font-bold text-slate-600">Departure</label>
+                                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                                        Morning Arrival (In)
+                                      </label>
                                       <input
-                                        type="text"
-                                        value={editDepartureTime}
-                                        onChange={e => setEditDepartureTime(e.target.value)}
-                                        placeholder="e.g. 06:30 AM"
-                                        className="w-24 px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold"
-                                      />
-                                    </div>
-                                    <span className="text-slate-400 font-bold mt-3">&rarr;</span>
-                                    <div>
-                                      <label className="block text-[10px] font-bold text-slate-600">Arrival</label>
-                                      <input
-                                        type="text"
+                                        type="time"
                                         value={editArrivalTime}
                                         onChange={e => setEditArrivalTime(e.target.value)}
-                                        placeholder="e.g. 07:35 AM"
-                                        className="w-24 px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold"
+                                        className="px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900"
+                                      />
+                                    </div>
+                                    <span className="text-slate-400 font-bold mt-4">|</span>
+                                    <div>
+                                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                                        Evening Departure (Out)
+                                      </label>
+                                      <input
+                                        type="time"
+                                        value={editDepartureTime}
+                                        onChange={e => setEditDepartureTime(e.target.value)}
+                                        className="px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900"
                                       />
                                     </div>
                                     <button
@@ -1389,16 +1418,25 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                                       onClick={async () => {
                                         setSavingTiming(true);
                                         try {
-                                          await api.updateRouteTimings(svc.routeId || svc.routeName, {
-                                            departureTime: editDepartureTime.trim() || currentDep,
-                                            arrivalTime: editArrivalTime.trim() || currentArr,
-                                          });
+                                          const nextPayload = {
+                                            arrivalTime: editArrivalTime.trim()
+                                              ? formatTime12Hour(editArrivalTime)
+                                              : currentArr,
+                                            departureTime: editDepartureTime.trim()
+                                              ? formatTime12Hour(editDepartureTime)
+                                              : currentDep,
+                                          };
+                                          if (onUpdateRouteTimings) {
+                                            await onUpdateRouteTimings(svc.routeId || svc.routeName, nextPayload);
+                                          } else {
+                                            await api.updateRouteTimings(svc.routeId || svc.routeName, nextPayload);
+                                          }
                                           setEditingTimingServiceId(null);
                                         } finally {
                                           setSavingTiming(false);
                                         }
                                       }}
-                                      className="mt-3 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
+                                      className="mt-4 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
                                     >
                                       <Check className="w-3.5 h-3.5" />
                                       <span>{savingTiming ? 'Saving...' : 'Save'}</span>
@@ -1406,27 +1444,42 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
                                     <button
                                       type="button"
                                       onClick={() => setEditingTimingServiceId(null)}
-                                      className="mt-3 p-1.5 text-slate-500 hover:text-slate-800 rounded-lg cursor-pointer"
+                                      className="mt-4 p-1.5 text-slate-500 hover:text-slate-800 rounded-lg cursor-pointer"
                                     >
                                       <X className="w-4 h-4" />
                                     </button>
                                   </div>
                                 ) : (
                                   <>
-                                    <div className="px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 font-mono text-slate-800 font-semibold flex items-center gap-1.5">
-                                      <Clock className="w-3.5 h-3.5 text-amber-600" />
-                                      <span>{currentDep} &rarr; {currentArr}</span>
+                                    <div
+                                      className="px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 font-mono text-slate-800 font-semibold flex flex-wrap items-center gap-2"
+                                      title="Linked to Attendance Sheet & Summary Sheet: Arrival = Morning In Time, Departure = Evening Out Time"
+                                    >
+                                      <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                      <span>
+                                        <span className="font-sans text-[10px] font-bold uppercase text-emerald-700 mr-1">
+                                          Morning Arrival:
+                                        </span>
+                                        {currentArr}
+                                      </span>
+                                      <span className="text-slate-300">•</span>
+                                      <span>
+                                        <span className="font-sans text-[10px] font-bold uppercase text-indigo-700 mr-1">
+                                          Evening Departure:
+                                        </span>
+                                        {currentDep}
+                                      </span>
                                     </div>
                                     {!isReadOnly && (
                                       <button
                                         type="button"
                                         onClick={() => {
                                           setEditingTimingServiceId(svc.id);
-                                          setEditDepartureTime(currentDep);
-                                          setEditArrivalTime(currentArr);
+                                          setEditArrivalTime(toHtmlTimeInputValue(currentArr));
+                                          setEditDepartureTime(toHtmlTimeInputValue(currentDep));
                                         }}
                                         className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg font-bold text-xs cursor-pointer flex items-center gap-1"
-                                        title="Change Route / Trip Timings"
+                                        title="Set Morning Arrival & Evening Departure Schedule Timings"
                                       >
                                         <Edit2 className="w-3 h-3 text-amber-600" />
                                         <span>Change Timing</span>

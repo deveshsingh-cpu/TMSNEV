@@ -24,6 +24,11 @@ import {
   StaffAttendanceRecord, StaffAttendanceStatus, StaffAdvanceRecord, StaffPayrollRecord, HolidayRecord,
   SystemUser, UserRole, SessionMonthCode, MemberLifecycleRequest, AbsenteeCallRecord, MemberComplaintRecord
 } from '../../types/index.js';
+import {
+  getDefaultMorningArrivalTime,
+  getDefaultEveningDepartureTime,
+  formatTime12Hour,
+} from '../../utils/scheduleTimings.js';
 
 export const ALL_ERP_SHEET_TABS = [
   'School_Masters',
@@ -397,8 +402,8 @@ export class SheetsDatabaseManager {
         const assignedStudents = this.students.filter(
           (s) => (s.routeId === r.id || s.routeCode === r.code) && s.transportStatus !== 'Left'
         ).length;
-        const defaultDep = r.tripNumber === 1 ? '06:40 AM' : r.tripNumber === 2 ? '07:45 AM' : '08:30 AM';
-        const defaultArr = r.tripNumber === 1 ? '07:30 AM' : r.tripNumber === 2 ? '08:30 AM' : '09:15 AM';
+        const defaultArr = getDefaultMorningArrivalTime(r.tripNumber);
+        const defaultDep = getDefaultEveningDepartureTime(r.tripNumber);
         return {
           id: `svc-${r.id}`,
           vehicleNumber: r.vehicleNumber,
@@ -412,8 +417,8 @@ export class SheetsDatabaseManager {
           campus: r.campus,
           assignedCount: assignedStudents,
           capacity: veh?.capacity || 40,
-          departureTime: r.departureTime || defaultDep,
           arrivalTime: r.arrivalTime || defaultArr,
+          departureTime: r.departureTime || defaultDep,
         };
       });
   }
@@ -1473,9 +1478,15 @@ export class SheetsDatabaseManager {
               'School_Masters',
               'System_Users',
               'Vehicles_Master',
+              'Vehicle_Assignments',
               'Routes_Master',
               'Daily_Trips',
+              'Daily_Log_Book_24H',
+              'Driver_Fuel_Advances',
+              'Vehicle_Maintenance',
               'Expense_Heads',
+              'Expenses_Fuel_Ledger',
+              'Journal_Vouchers',
               'Warning_Letters',
               'Fee_Receipts',
               'Fee_Invoices',
@@ -3731,19 +3742,24 @@ export class SheetsDatabaseManager {
             baselineMileageKmPerLitre: mileageThreshold,
           } as Vehicle;
 
-          // Cascade vehicle registration rename to linked Routes, Members, and today's Daily Trips
+          // Cascade vehicle registration rename to linked Routes, Members, Daily Trips, Expenses, Log Book, Fuel Advances, Maintenance, Assignments & Vouchers
           if (prevReg !== reg) {
+            const vehId = vehicleData.id;
+            const normUpper = (s?: string) => String(s || '').trim().toUpperCase();
+            const matchesRenamedVehicle = (recVehId?: string, recVehNum?: string) =>
+              recVehId ? recVehId === vehId : Boolean(prevReg && normUpper(recVehNum) === prevReg);
+
             const digitsOnly = reg.replace(/\D/g, '');
             const newLast4 = digitsOnly.length >= 4
               ? digitsOnly.slice(-4)
               : reg.slice(-4).replace(/\s/g, '');
-            const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
 
             for (const rt of this.routes) {
-              if (rt.vehicleId === vehicleData.id) {
+              if (matchesRenamedVehicle(rt.vehicleId, rt.vehicleNumber)) {
                 const oldCode = rt.code;
                 const cmpCode = rt.campusCode || rt.campus || 'Sr';
                 const newCode = `${cmpCode}/${newLast4}/${rt.tripNumber}`;
+                rt.vehicleId = vehId;
                 rt.vehicleNumber = reg;
                 rt.vehicleLast4 = newLast4;
                 rt.code = newCode;
@@ -3755,12 +3771,74 @@ export class SheetsDatabaseManager {
                   }
                 }
                 for (const trp of this.trips) {
-                  if (trp.routeId === rt.id && trp.date >= todayIst) {
+                  if (trp.routeId === rt.id || (!trp.routeId && oldCode && trp.routeName === oldCode)) {
+                    trp.routeId = rt.id;
                     trp.routeName = newCode;
                     trp.vehicleNumber = reg;
-                    trp.vehicleId = rt.vehicleId;
+                    trp.vehicleId = vehId;
+                    trp.shiftName = `Trip ${rt.tripNumber} — ${rt.name || newCode}`;
                   }
                 }
+              }
+            }
+
+            for (const trp of this.trips) {
+              if (matchesRenamedVehicle(trp.vehicleId, trp.vehicleNumber)) {
+                trp.vehicleId = vehId;
+                trp.vehicleNumber = reg;
+              }
+            }
+
+            const updatedExpenseVoucherNos = new Set<string>();
+            const updatedExpenseVoucherIds = new Set<string>();
+            for (const exp of this.expenses) {
+              if (exp.vehicleNumber !== 'General' && matchesRenamedVehicle(exp.vehicleId, exp.vehicleNumber)) {
+                exp.vehicleId = vehId;
+                exp.vehicleNumber = reg;
+                if (exp.expenseNo) updatedExpenseVoucherNos.add(`JV-${exp.expenseNo}`);
+                if (exp.voucherId) updatedExpenseVoucherIds.add(exp.voucherId);
+              }
+            }
+
+            for (const vch of this.vouchers) {
+              const isLinkedToRenamedExp =
+                updatedExpenseVoucherIds.has(vch.id) || updatedExpenseVoucherNos.has(vch.voucherNo);
+              if (Array.isArray(vch.lines)) {
+                for (const line of vch.lines) {
+                  if (isLinkedToRenamedExp && line.debit > 0) {
+                    line.costCenter = reg;
+                  } else if (prevReg && normUpper(line.costCenter) === prevReg) {
+                    line.costCenter = reg;
+                  }
+                }
+              }
+            }
+
+            for (const log of this.odometerLogs) {
+              if (matchesRenamedVehicle(log.vehicleId, log.vehicleNumber)) {
+                log.vehicleId = vehId;
+                log.vehicleNumber = reg;
+              }
+            }
+
+            for (const fa of this.fuelAdvances) {
+              if (matchesRenamedVehicle(fa.vehicleId, fa.vehicleNumber)) {
+                fa.vehicleId = vehId;
+                fa.vehicleNumber = reg;
+              }
+            }
+
+            for (const m of this.maintenance) {
+              if (matchesRenamedVehicle(m.vehicleId, m.vehicleNumber)) {
+                m.vehicleId = vehId;
+                m.vehicleNumber = reg;
+              }
+            }
+
+            for (const va of this.vehicleAssignments) {
+              if (matchesRenamedVehicle(va.vehicleId, va.vehicleNumber)) {
+                va.vehicleId = vehId;
+                va.vehicleNumber = reg;
               }
             }
           }
@@ -4296,11 +4374,20 @@ export class SheetsDatabaseManager {
       if (!route) {
         throw new Error('Route not found for updating schedule timings.');
       }
-      if (payload.departureTime !== undefined) {
-        route.departureTime = payload.departureTime.trim();
-      }
       if (payload.arrivalTime !== undefined) {
-        route.arrivalTime = payload.arrivalTime.trim();
+        const cleanedArr = payload.arrivalTime.trim();
+        route.arrivalTime = cleanedArr ? formatTime12Hour(cleanedArr) : '';
+      }
+      if (payload.departureTime !== undefined) {
+        const cleanedDep = payload.departureTime.trim();
+        route.departureTime = cleanedDep ? formatTime12Hour(cleanedDep) : '';
+      }
+      const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
+      for (const trp of this.trips) {
+        if ((trp.routeId === route.id || trp.routeName === route.code) && trp.date >= todayIst) {
+          if (route.arrivalTime) trp.plannedStartTime = route.arrivalTime;
+          if (route.departureTime) trp.plannedEndTime = route.departureTime;
+        }
       }
       this.rebuildScheduledServices();
       await this.internalSyncToGoogleSheets();
@@ -10081,6 +10168,103 @@ export class SheetsDatabaseManager {
 
       (this.config as any).appliedVehicle2073_7022_0626Shift_v1 = true;
       changed = true;
+    }
+
+    // Keep all vehicleId-linked Expenses, Log Book entries, Fuel Advances, Maintenance, Assignments, Vouchers & Route Trips aligned with current Vehicle Master registrationNumber
+    if (!this.isGoogleConfigured || this.hasHydratedFromSheets) {
+      const vehById = new Map<string, Vehicle>();
+      for (const v of this.vehicles) {
+        if (v.id && v.registrationNumber) vehById.set(v.id, v);
+      }
+      const routeById = new Map<string, Route>();
+      for (const r of this.routes) {
+        if (r.id) routeById.set(r.id, r);
+      }
+
+      const expVoucherSyncMap = new Map<string, string>();
+      for (const exp of this.expenses) {
+        if (exp.vehicleNumber !== 'General' && exp.vehicleId && vehById.has(exp.vehicleId)) {
+          const targetReg = vehById.get(exp.vehicleId)!.registrationNumber;
+          if (exp.vehicleNumber !== targetReg) {
+            exp.vehicleNumber = targetReg;
+            changed = true;
+          }
+          if (exp.expenseNo) expVoucherSyncMap.set(`JV-${exp.expenseNo}`, targetReg);
+          if (exp.voucherId) expVoucherSyncMap.set(exp.voucherId, targetReg);
+        }
+      }
+
+      for (const vch of this.vouchers) {
+        const expectedCostCenter =
+          expVoucherSyncMap.get(vch.id) || expVoucherSyncMap.get(vch.voucherNo);
+        if (expectedCostCenter && Array.isArray(vch.lines)) {
+          for (const line of vch.lines) {
+            if (line.debit > 0 && line.costCenter !== expectedCostCenter) {
+              line.costCenter = expectedCostCenter;
+              changed = true;
+            }
+          }
+        }
+      }
+
+      for (const log of this.odometerLogs) {
+        if (log.vehicleId && vehById.has(log.vehicleId)) {
+          const targetReg = vehById.get(log.vehicleId)!.registrationNumber;
+          if (log.vehicleNumber !== targetReg) {
+            log.vehicleNumber = targetReg;
+            changed = true;
+          }
+        }
+      }
+
+      for (const fa of this.fuelAdvances) {
+        if (fa.vehicleId && vehById.has(fa.vehicleId)) {
+          const targetReg = vehById.get(fa.vehicleId)!.registrationNumber;
+          if (fa.vehicleNumber !== targetReg) {
+            fa.vehicleNumber = targetReg;
+            changed = true;
+          }
+        }
+      }
+
+      for (const m of this.maintenance) {
+        if (m.vehicleId && vehById.has(m.vehicleId)) {
+          const targetReg = vehById.get(m.vehicleId)!.registrationNumber;
+          if (m.vehicleNumber !== targetReg) {
+            m.vehicleNumber = targetReg;
+            changed = true;
+          }
+        }
+      }
+
+      for (const va of this.vehicleAssignments) {
+        if (va.vehicleId && vehById.has(va.vehicleId)) {
+          const targetReg = vehById.get(va.vehicleId)!.registrationNumber;
+          if (va.vehicleNumber !== targetReg) {
+            va.vehicleNumber = targetReg;
+            changed = true;
+          }
+        }
+      }
+
+      for (const trp of this.trips) {
+        const rt = trp.routeId ? routeById.get(trp.routeId) : undefined;
+        if (rt && rt.vehicleId && vehById.has(rt.vehicleId)) {
+          const targetReg = vehById.get(rt.vehicleId)!.registrationNumber;
+          if (trp.vehicleNumber !== targetReg || trp.routeName !== rt.code || trp.vehicleId !== rt.vehicleId) {
+            trp.vehicleId = rt.vehicleId;
+            trp.vehicleNumber = targetReg;
+            trp.routeName = rt.code;
+            changed = true;
+          }
+        } else if (trp.vehicleId && vehById.has(trp.vehicleId)) {
+          const targetReg = vehById.get(trp.vehicleId)!.registrationNumber;
+          if (trp.vehicleNumber !== targetReg) {
+            trp.vehicleNumber = targetReg;
+            changed = true;
+          }
+        }
+      }
     }
 
     // One-time idempotent restoration of Riddhi Krishna's (NEV837/22, stu-sr71751-9) 02-11-2026 fee receipt after Google Sheets hydration
