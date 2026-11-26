@@ -6,7 +6,7 @@ import {
   ExpenseRecord, DesignationMaster, TripMaster, CampusMaster, MemberTypeMaster, CandidateResume,
   VehicleAssignmentRecord, DisciplineRecord, ExpenseHead, IncomeHead, IncomeRecord,
   StaffAttendanceRecord, StaffAttendanceStatus, StaffAdvanceRecord, StaffPayrollRecord, HolidayRecord,
-  SystemUser, AbsenteeCallRecord, MemberComplaintRecord, UserRole
+  SystemUser, AbsenteeCallRecord, MemberComplaintRecord, UserRole, FuelBillExtractionResult
 } from '../types/index.js';
 
 export interface SheetsTabInfo {
@@ -840,6 +840,63 @@ export const api = {
       body: JSON.stringify(payload),
     });
     return parseApiJson(res, 'Failed to update expense approval');
+  },
+  readFuelBill: async (payload: {
+    imageDataUrl?: string;
+    expenseId?: string;
+    expectedAmount?: number;
+    vehicleNumber?: string;
+    narrationHint?: string;
+  }): Promise<{ extraction: FuelBillExtractionResult }> => {
+    const res = await fetch('/api/expenses/read-bill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return parseApiJson(res, 'Failed to read attached bill');
+  },
+  scanExpenseBill: async (
+    id: string,
+    options?: { apply?: boolean; savePumpRateToConfig?: boolean; updatedBy?: string }
+  ): Promise<{
+    extraction: FuelBillExtractionResult;
+    expense: ExpenseRecord;
+    updatedRates?: Partial<Record<'Diesel' | 'Petrol' | 'CNG', number>>;
+  }> => {
+    const res = await fetch(`/api/expenses/${encodeURIComponent(id)}/read-bill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || { apply: true, savePumpRateToConfig: true }),
+    });
+    return parseApiJson(res, 'Failed to scan expense bill');
+  },
+  scanAttachedFuelBills: async (options?: {
+    limit?: number;
+    rescanAll?: boolean;
+    saveLatestPumpRatesToConfig?: boolean;
+    updatedBy?: string;
+  }): Promise<{
+    scannedCount: number;
+    updatedCount: number;
+    remainingPendingCount: number;
+    updatedRates: Partial<Record<'Diesel' | 'Petrol' | 'CNG', number>>;
+    results: Array<{
+      expenseId: string;
+      expenseNo: string;
+      vehicleNumber: string;
+      date: string;
+      amount: number;
+      status: 'updated' | 'unreadable' | 'error';
+      extraction?: FuelBillExtractionResult;
+      error?: string;
+    }>;
+  }> => {
+    const res = await fetch('/api/expenses/scan-attached-bills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || { limit: 15, saveLatestPumpRatesToConfig: true }),
+    });
+    return parseApiJson(res, 'Failed to batch scan attached fuel bills');
   },
 
   // Dynamic Expense Heads & Income Heads & Incomes

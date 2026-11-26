@@ -102,7 +102,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     fees_group: false,
     expenses_group: true,
     accounts_group: true,
+    fleet_group: true,
     masters_group: false,
+    reports_group: false,
     assistant_vehicles_group: true,
     incharge_operations_group: true,
   });
@@ -122,10 +124,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       setExpandedGroups((prev) => ({ ...prev, members_group: true }));
     } else if (activeKey === 'resumes' || activeKey === 'staff') {
       setExpandedGroups((prev) => ({ ...prev, employees_group: true }));
-    } else if (activeKey === 'routes' || (activeKey === 'vehicles' && activeSubTab === 'maintenance')) {
+    } else if (activeKey === 'routes') {
       setExpandedGroups((prev) => ({
         ...prev,
         routes_group: true,
+      }));
+    } else if (activeKey === 'vehicles') {
+      setExpandedGroups((prev) => ({
+        ...prev,
+        fleet_group: true,
         assistant_vehicles_group: true,
       }));
     } else if (activeKey === 'operations') {
@@ -141,22 +148,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
       (activeKey === 'accounts' &&
         (activeSubTab === 'income' ||
           activeSubTab === 'day_book' ||
-          activeSubTab === 'student_ledger' ||
-          activeSubTab === 'vehicle_ledger'))
+          activeSubTab === 'student_ledger'))
     ) {
       setExpandedGroups((prev) => ({
         ...prev,
         expenses_group: true,
         accounts_group: true,
       }));
-    } else if (activeKey === 'accounts' || activeKey === 'vehicles') {
+    } else if (activeKey === 'accounts') {
       setExpandedGroups((prev) => ({
         ...prev,
         accounts_group: true,
-        assistant_vehicles_group: true,
       }));
     } else if (activeKey === 'masters') {
       setExpandedGroups((prev) => ({ ...prev, masters_group: true }));
+    } else if (activeKey === 'reports') {
+      setExpandedGroups((prev) => ({ ...prev, reports_group: true }));
     }
   }, [activeKey, activeSubTab]);
 
@@ -226,6 +233,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'as-rt-routes', label: '1- Active Routes & Stops', navKey: 'routes', subTab: 'routes' },
         { id: 'as-rt-services', label: '2- Vehicle Schedule', navKey: 'routes', subTab: 'services' },
         { id: 'as-rt-pack', label: '3- Print Route List', navKey: 'routes', subTab: 'pack' },
+        { id: 'as-rt-villages', label: '4- Villages & Stops', navKey: 'routes', subTab: 'villages_stops' },
       ],
     },
     {
@@ -268,8 +276,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'as-ex-expenses', label: '1- Enter Expense Bills', navKey: 'expenses', subTab: 'expenses' },
         { id: 'as-ex-daybook', label: '2- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
         { id: 'as-ac-stu', label: '3- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
-        { id: 'as-ac-veh', label: '4- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
-        { id: 'as-ac-tb', label: '5- Trial Balance', navKey: 'accounts', subTab: 'trial_balance' },
+        { id: 'as-ac-tb', label: '4- Trial Balance', navKey: 'accounts', subTab: 'trial_balance' },
       ],
     },
     {
@@ -281,20 +288,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
       subItems: [
         { id: 'as-led-daybook', label: '1- Print / View Day Book', navKey: 'accounts', subTab: 'day_book' },
         { id: 'as-led-stu', label: '2- Member Fee Ledger', navKey: 'accounts', subTab: 'student_ledger' },
-        { id: 'as-led-veh', label: '3- Vehicle Cost Ledger', navKey: 'accounts', subTab: 'vehicle_ledger' },
-        { id: 'as-led-tb', label: '4- Trial Balance', navKey: 'accounts', subTab: 'trial_balance' },
+        { id: 'as-led-tb', label: '3- Trial Balance', navKey: 'accounts', subTab: 'trial_balance' },
       ],
     },
     {
       key: 'assistant_vehicles_group',
-      label: '9- Log Book & Work Orders',
+      label: '9- Fleet Management',
       icon: <Truck className="w-5 h-5" />,
       defaultNavKey: 'vehicles',
       defaultSubTab: 'odometer',
       subItems: [
-        { id: 'as-odo', label: '1- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
-        { id: 'as-fuel', label: '2- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
-        { id: 'as-maint', label: '3- Raise Work Order Request', navKey: 'vehicles', subTab: 'maintenance' },
+        { id: 'as-odo', label: '1- Daily Log Book', navKey: 'vehicles', subTab: 'odometer' },
+        { id: 'as-cost', label: '2- Vehicle Cost Center', navKey: 'vehicles', subTab: 'cost_center' },
+        { id: 'as-stat', label: '3- Statutory Details', navKey: 'vehicles', subTab: 'statutory' },
+        { id: 'as-maint', label: '4- Work Orders & Maintenance', navKey: 'vehicles', subTab: 'maintenance' },
+        { id: 'as-fuel', label: '5- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
       ],
     },
   ];
@@ -400,7 +408,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'rt-routes', label: '1- Active Routes & Stops', navKey: 'routes', subTab: 'routes' },
         { id: 'rt-services', label: '2- Vehicle Schedule', navKey: 'routes', subTab: 'services' },
         { id: 'rt-pack', label: '3- Print Route List', navKey: 'routes', subTab: 'pack' },
-        { id: 'rt-maint', label: '4- Work Orders & Maintenance', navKey: 'vehicles', subTab: 'maintenance' },
+        { id: 'rt-villages', label: '4- Villages & Stops', navKey: 'routes', subTab: 'villages_stops' },
       ],
     },
     {
@@ -498,30 +506,37 @@ export const Sidebar: React.FC<SidebarProps> = ({
           subTab: 'student_ledger',
         },
         {
-          id: 'ac-veh',
-          label: '3- Vehicle Cost Ledger',
-          navKey: 'accounts',
-          subTab: 'vehicle_ledger',
-        },
-        { id: 'ac-odo', label: '4- Vehicle Log Book (24-Hr)', navKey: 'vehicles', subTab: 'odometer' },
-        { id: 'ac-fuel', label: '5- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
-        {
           id: 'ac-vch',
-          label: '6- Vouchers & Chart of A/C',
+          label: '3- Vouchers & Chart of A/C',
           navKey: 'accounts',
           subTab: 'vouchers',
         },
         {
           id: 'ac-tb',
-          label: '7- Trial Balance',
+          label: '4- Trial Balance',
           navKey: 'accounts',
           subTab: 'trial_balance',
         },
       ],
     },
     {
+      key: 'fleet_group',
+      label: '9- Fleet Management',
+      icon: <Truck className="w-5 h-5" />,
+      defaultNavKey: 'vehicles',
+      defaultSubTab: 'odometer',
+      allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
+      subItems: [
+        { id: 'fl-odo', label: '1- Daily Log Book', navKey: 'vehicles', subTab: 'odometer' },
+        { id: 'fl-cost', label: '2- Vehicle Cost Center', navKey: 'vehicles', subTab: 'cost_center' },
+        { id: 'fl-stat', label: '3- Statutory Details', navKey: 'vehicles', subTab: 'statutory' },
+        { id: 'fl-maint', label: '4- Work Orders & Maintenance', navKey: 'vehicles', subTab: 'maintenance' },
+        { id: 'fl-fuel', label: '5- Driver Fuel Advances', navKey: 'vehicles', subTab: 'fuel' },
+      ],
+    },
+    {
       key: 'masters_group',
-      label: '9- Masters & Fees Setup',
+      label: '10- Masters & Fees Setup',
       icon: <Layers className="w-5 h-5" />,
       defaultNavKey: 'masters',
       defaultSubTab: 'fees_setup',
@@ -584,11 +599,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ],
     },
     {
-      key: 'reports',
-      label: '10- Business Reports',
+      key: 'reports_group',
+      label: '11- Business Reports',
       icon: <BarChart3 className="w-5 h-5" />,
       defaultNavKey: 'reports',
+      defaultSubTab: 'members',
       allowedRoles: ['Admin', 'Principal', 'Transport Coordinator'],
+      subItems: [
+        { id: 'rep-members', label: '1- Member Consolidated Dues', navKey: 'reports', subTab: 'members' },
+        { id: 'rep-fleet', label: '2- Fleet Mileage & Cost/Km', navKey: 'reports', subTab: 'fleet' },
+        { id: 'rep-finance', label: '3- Income & Expense Ledger', navKey: 'reports', subTab: 'finance' },
+        { id: 'rep-payroll', label: '4- Staff Payroll Audit', navKey: 'reports', subTab: 'payroll' },
+        { id: 'rep-routes', label: '5- Route Occupancy & Revenue', navKey: 'reports', subTab: 'routes' },
+      ],
     },
   ];
 

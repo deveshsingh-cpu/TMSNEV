@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  IndianRupee, Plus, Search, Calendar, Tag, X, Upload, Eye, Trash2, Lock, Check, Ban, ShieldCheck, Pencil
+  IndianRupee, Plus, Search, Calendar, Tag, X, Upload, Eye, Trash2, Lock, Check, Ban, ShieldCheck, Pencil,
+  ScanText, Loader2, CheckCircle2, AlertTriangle
 } from 'lucide-react';
-import { ExpenseRecord, ExpenseHead, Vehicle, Route, Student } from '../../types/index.js';
+import { ExpenseRecord, ExpenseHead, Vehicle, Route, Student, SchoolConfig, FuelBillExtractionResult } from '../../types/index.js';
+import { api } from '../../services/api.js';
 import { PrintExportToolbar, FilterPopover } from '../../utils/exportPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
+import { getRateForFuelType, inferFuelTypeFromText } from '../../utils/logBookReconciliation.js';
 import {
   normalizeCampus,
   formatCampusLabel,
@@ -16,6 +19,8 @@ import {
 
 interface ExpensesViewProps {
   schoolName?: string;
+  config?: SchoolConfig;
+  onUpdateConfig?: (cfg: Partial<SchoolConfig>) => Promise<any>;
   isAdmin?: boolean;
   currentRole?: string;
   userCampus?: string;
@@ -41,6 +46,8 @@ interface ExpensesViewProps {
 
 export const ExpensesView: React.FC<ExpensesViewProps> = ({
   schoolName,
+  config,
+  onUpdateConfig,
   isAdmin = true,
   currentRole = 'Admin',
   userCampus,
@@ -119,6 +126,8 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const [narration, setNarration] = useState('');
   const [odometerReading, setOdometerReading] = useState<string>('');
   const [fuelLitres, setFuelLitres] = useState<string>('');
+  const [fuelTypeFed, setFuelTypeFed] = useState<'Diesel' | 'Petrol' | 'CNG' | 'Electric'>('Diesel');
+  const [fuelRateInput, setFuelRateInput] = useState<string>('');
   const [driverName, setDriverName] = useState<string>('');
   const [editingExpense, setEditingExpense] = useState<ExpenseRecord | null>(null);
   const [editApprovalStatus, setEditApprovalStatus] = useState<'Approved' | 'Pending Approval' | 'Rejected'>('Approved');
@@ -126,6 +135,19 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const [expenseFormError, setExpenseFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [previewBill, setPreviewBill] = useState<{ title: string; url: string } | null>(null);
+  const [isReadingBillModal, setIsReadingBillModal] = useState(false);
+  const [billReadStatus, setBillReadStatus] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+    extraction?: FuelBillExtractionResult;
+  } | null>(null);
+  const [saveExtractedRateToConfig, setSaveExtractedRateToConfig] = useState(true);
+  const [scanningRowId, setScanningRowId] = useState<string | null>(null);
+  const [isBatchScanningBills, setIsBatchScanningBills] = useState(false);
+  const [batchScanBanner, setBatchScanBanner] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   // Expense Head creator / editor state
   const [editingHead, setEditingHead] = useState<ExpenseHead | null>(null);
@@ -164,12 +186,16 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     setDriverName('');
     setOdometerReading('');
     setFuelLitres('');
+    setFuelTypeFed('Diesel');
+    setFuelRateInput('');
     setAmount('');
     setPaymentMode('Cash');
     setVendorName('');
     setBillNumber('');
     setBillPhoto('');
     setBillFileName('');
+    setBillReadStatus(null);
+    setSaveExtractedRateToConfig(true);
     setNarration('');
     setShowInlineHeadCreator(false);
     setExpenseDate(todayStr);
@@ -190,6 +216,12 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     setVehicleNumber(exp.vehicleNumber || 'General');
     const matchedVeh = vehicles.find((v) => v.registrationNumber === exp.vehicleNumber);
     setDriverName(exp.driverName || matchedVeh?.assignedDriverName || '');
+    const resolvedFt =
+      exp.fuelType || inferFuelTypeFromText(exp.narration) || matchedVeh?.fuelType || 'Diesel';
+    setFuelTypeFed(resolvedFt);
+    const cfgRate = getRateForFuelType(config?.fuelRates, resolvedFt);
+    const resolvedRate = exp.fuelRate && exp.fuelRate > 0 ? exp.fuelRate : cfgRate;
+    setFuelRateInput(resolvedRate > 0 ? String(resolvedRate) : '');
     setOdometerReading(
       exp.odometerReading !== undefined && exp.odometerReading !== null && exp.odometerReading > 0
         ? String(exp.odometerReading)
@@ -206,6 +238,12 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     setBillNumber(exp.billNumber || '');
     setBillPhoto(exp.billPhoto || '');
     setBillFileName('');
+    setBillReadStatus(
+      exp.billExtractedSummary
+        ? { type: 'success', message: exp.billExtractedSummary }
+        : null
+    );
+    setSaveExtractedRateToConfig(true);
     setNarration(exp.narration || '');
     setEditApprovalStatus(exp.approvalStatus || 'Approved');
     setShowInlineHeadCreator(false);
@@ -215,14 +253,105 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   const selectedHeadObj = expenseHeads.find((h) => h.name === category);
   const categoryNeedsApproval = !!selectedHeadObj?.requiresApproval;
 
+  const runReadBillInModal = async (overrideDataUrl?: string) => {
+    const imgSrc = overrideDataUrl ?? billPhoto;
+    if (!imgSrc) return;
+    setIsReadingBillModal(true);
+    setBillReadStatus(null);
+    try {
+      const payload =
+        imgSrc.startsWith('data:')
+          ? {
+              imageDataUrl: imgSrc,
+              expectedAmount: Number(amount) > 0 ? Number(amount) : undefined,
+              vehicleNumber,
+              narrationHint: narration,
+            }
+          : editingExpense?.id
+          ? {
+              expenseId: editingExpense.id,
+              expectedAmount: Number(amount) > 0 ? Number(amount) : undefined,
+              vehicleNumber,
+              narrationHint: narration,
+            }
+          : null;
+
+      if (!payload) {
+        setBillReadStatus({
+          type: 'warning',
+          message: 'Please attach or re-upload the bill photo to read.',
+        });
+        return;
+      }
+
+      const { extraction } = await api.readFuelBill(payload);
+
+      if (
+        extraction.fuelType === 'Diesel' ||
+        extraction.fuelType === 'Petrol' ||
+        extraction.fuelType === 'CNG'
+      ) {
+        setFuelTypeFed(extraction.fuelType);
+      }
+
+      const effectiveAmt = Number(amount) > 0 ? Number(amount) : Number(extraction.totalAmount || 0);
+      if (extraction.ratePerUnit && extraction.ratePerUnit > 0) {
+        setFuelRateInput(String(extraction.ratePerUnit));
+      }
+      if (extraction.quantity && extraction.quantity > 0) {
+        setFuelLitres(String(extraction.quantity));
+      } else if (extraction.ratePerUnit && extraction.ratePerUnit > 0 && effectiveAmt > 0) {
+        setFuelLitres(String(Math.round((effectiveAmt / extraction.ratePerUnit) * 100) / 100));
+      }
+
+      if ((!amount || Number(amount) <= 0) && extraction.totalAmount && extraction.totalAmount > 0) {
+        setAmount(String(extraction.totalAmount));
+      }
+      if (!vendorName.trim() && extraction.vendorName) {
+        setVendorName(extraction.vendorName);
+      }
+      if (!billNumber.trim() && extraction.billNumber) {
+        setBillNumber(extraction.billNumber);
+      }
+
+      const unit = extraction.fuelType === 'CNG' ? 'kg' : 'L';
+      const detailBits = [
+        extraction.fuelType !== 'Unknown' ? extraction.fuelType : null,
+        extraction.ratePerUnit ? `₹${extraction.ratePerUnit}/${unit}` : null,
+        extraction.quantity ? `${extraction.quantity} ${unit}` : null,
+        extraction.totalAmount ? `Bill ₹${extraction.totalAmount}` : null,
+      ].filter(Boolean);
+
+      setBillReadStatus({
+        type: extraction.isReadableBill ? 'success' : 'warning',
+        message:
+          detailBits.length > 0
+            ? `${detailBits.join(' · ')} — ${extraction.summary}`
+            : extraction.summary,
+        extraction,
+      });
+    } catch (err: any) {
+      setBillReadStatus({
+        type: 'error',
+        message: err?.message || 'Could not read bill automatically.',
+      });
+    } finally {
+      setIsReadingBillModal(false);
+    }
+  };
+
   const handleBillPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setBillFileName(file.name);
     setRemoveExistingBill(false);
+    setBillReadStatus(null);
     try {
       const compressed = await readFileCompressed(file, 900, 0.72);
       setBillPhoto(compressed);
+      if (String(category || '').toLowerCase().includes('fuel')) {
+        void runReadBillInModal(compressed);
+      }
     } catch {
       // ignore
     }
@@ -253,9 +382,78 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     (e) => e.approvalStatus !== 'Pending Approval' && e.approvalStatus !== 'Rejected'
   );
   const pendingExpensesCount = scopedExpenses.filter((e) => e.approvalStatus === 'Pending Approval').length;
+  const pendingFuelBillsCount = scopedExpenses.filter((e) => {
+    if (!String(e.category || '').toLowerCase().includes('fuel')) return false;
+    if (!e.billPhoto) return false;
+    const hasPriceAndQty = Number(e.fuelRate) > 0 && Number(e.fuelLitres) > 0;
+    return !e.billScannedAt && !hasPriceAndQty;
+  }).length;
   const totalFilteredSpend = approvedExpenses.reduce((sum, e) => sum + e.amount, 0);
   const totalCashSpend = approvedExpenses.filter((e) => e.paymentMode === 'Cash').reduce((sum, e) => sum + e.amount, 0);
   const totalOnlineSpend = totalFilteredSpend - totalCashSpend;
+
+  const handleScanSingleExpenseRow = async (exp: ExpenseRecord) => {
+    setBatchScanBanner(null);
+    setScanningRowId(exp.id);
+    try {
+      const { extraction, updatedRates } = await api.scanExpenseBill(exp.id, {
+        apply: true,
+        savePumpRateToConfig: Boolean(onUpdateConfig),
+        updatedBy: currentRole,
+      });
+      const rateBits = Object.entries(updatedRates || {})
+        .filter(([, v]) => Number(v) > 0)
+        .map(([k, v]) => `${k} ₹${v}/${k === 'CNG' ? 'kg' : 'L'}`);
+      setBatchScanBanner({
+        type: 'success',
+        message: `${exp.expenseNo}: ${extraction.summary}${
+          rateBits.length > 0 ? ` (Updated local rate: ${rateBits.join(', ')})` : ''
+        }`,
+      });
+    } catch (err: any) {
+      setBatchScanBanner({
+        type: 'error',
+        message: `${exp.expenseNo}: ${err?.message || 'Failed to read attached bill.'}`,
+      });
+    } finally {
+      setScanningRowId(null);
+    }
+  };
+
+  const handleBatchScanAttachedFuelBills = async () => {
+    setBatchScanBanner(null);
+    setIsBatchScanningBills(true);
+    try {
+      const res = await api.scanAttachedFuelBills({
+        limit: 15,
+        saveLatestPumpRatesToConfig: Boolean(onUpdateConfig),
+        updatedBy: currentRole,
+      });
+      const rateBits = Object.entries(res.updatedRates || {})
+        .filter(([, v]) => Number(v) > 0)
+        .map(([k, v]) => `${k} ₹${v}/${k === 'CNG' ? 'kg' : 'L'}`);
+      setBatchScanBanner({
+        type: 'success',
+        message:
+          res.scannedCount === 0
+            ? 'All attached fuel bills have already been read.'
+            : `Read ${res.updatedCount} of ${res.scannedCount} fuel bill(s)${
+                rateBits.length > 0 ? ` · Pump rates found: ${rateBits.join(', ')}` : ''
+              }.${
+                res.remainingPendingCount > 0
+                  ? ` ${res.remainingPendingCount} more bill(s) left — click again to continue.`
+                  : ''
+              }`,
+      });
+    } catch (err: any) {
+      setBatchScanBanner({
+        type: 'error',
+        message: err?.message || 'Failed to scan attached fuel bills.',
+      });
+    } finally {
+      setIsBatchScanningBills(false);
+    }
+  };
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -269,6 +467,16 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       setIsSubmitting(true);
       const selectedVehObj = vehicles.find((v) => v.registrationNumber === vehicleNumber);
       const targetCamp = lockedCampus || expenseCampus;
+
+      const isFuelCategory = String(category || '').toLowerCase().includes('fuel');
+      const numericAmt = Number(amount);
+      const numericRate = Number(fuelRateInput);
+      const computedOrTypedLitres =
+        vehicleNumber !== 'General' && fuelLitres.trim() !== ''
+          ? Number(fuelLitres)
+          : vehicleNumber !== 'General' && isFuelCategory && numericAmt > 0 && numericRate > 0
+          ? Math.round((numericAmt / numericRate) * 100) / 100
+          : undefined;
 
       if (editingExpense && onUpdateExpense) {
         await onUpdateExpense(editingExpense.id, {
@@ -285,15 +493,25 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
             vehicleNumber !== 'General' && odometerReading.trim() !== ''
               ? Number(odometerReading)
               : undefined,
-          fuelLitres:
-            vehicleNumber !== 'General' && fuelLitres.trim() !== ''
-              ? Number(fuelLitres)
+          fuelLitres: computedOrTypedLitres,
+          fuelType: vehicleNumber !== 'General' && isFuelCategory ? fuelTypeFed : undefined,
+          fuelRate:
+            vehicleNumber !== 'General' && isFuelCategory && numericRate > 0
+              ? numericRate
               : undefined,
-          amount: Number(amount),
+          amount: numericAmt,
           paymentMode,
           vendorName: vendorName.trim() || 'Direct Vendor',
           billNumber,
           billPhoto: removeExistingBill ? '' : billPhoto || undefined,
+          billExtractedSummary: removeExistingBill
+            ? undefined
+            : billReadStatus?.message || editingExpense.billExtractedSummary,
+          billScannedAt: removeExistingBill
+            ? undefined
+            : billReadStatus?.extraction
+            ? new Date().toISOString()
+            : editingExpense.billScannedAt,
           removeBillPhoto: removeExistingBill,
           narration: narration.trim() || `${category} expenditure (${targetCamp} Campus)`,
           approvalStatus: editApprovalStatus,
@@ -313,18 +531,41 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
             vehicleNumber !== 'General' && odometerReading.trim() !== ''
               ? Number(odometerReading)
               : undefined,
-          fuelLitres:
-            vehicleNumber !== 'General' && fuelLitres.trim() !== ''
-              ? Number(fuelLitres)
+          fuelLitres: computedOrTypedLitres,
+          fuelType: vehicleNumber !== 'General' && isFuelCategory ? fuelTypeFed : undefined,
+          fuelRate:
+            vehicleNumber !== 'General' && isFuelCategory && numericRate > 0
+              ? numericRate
               : undefined,
-          amount: Number(amount),
+          amount: numericAmt,
           paymentMode,
           vendorName: vendorName.trim() || 'Direct Vendor',
           billNumber,
           billPhoto: billPhoto || undefined,
+          billExtractedSummary: billReadStatus?.message,
+          billScannedAt: billReadStatus?.extraction ? new Date().toISOString() : undefined,
           narration: narration.trim() || `${category} expenditure (${targetCamp} Campus)`,
           recordedBy: `${currentRole} (${targetCamp} Campus)`,
           requiresApproval: categoryNeedsApproval,
+        });
+      }
+      if (
+        onUpdateConfig &&
+        saveExtractedRateToConfig &&
+        isFuelCategory &&
+        numericRate > 0 &&
+        (fuelTypeFed === 'Diesel' || fuelTypeFed === 'Petrol' || fuelTypeFed === 'CNG')
+      ) {
+        await onUpdateConfig({
+          fuelRates: {
+            ...(config?.fuelRates || {}),
+            [fuelTypeFed]: Math.round(numericRate * 100) / 100,
+            location: config?.fuelRates?.location || 'Chainpur, Siwan, Bihar 841203',
+            updatedAt: new Date().toISOString(),
+            updatedBy: currentRole,
+          },
+        }).catch(() => {
+          // Do not fail expense creation if config rate save fails separately
         });
       }
       setIsModalOpen(false);
@@ -340,6 +581,8 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       setNarration('');
       setOdometerReading('');
       setFuelLitres('');
+      setFuelTypeFed('Diesel');
+      setFuelRateInput('');
       setShowInlineHeadCreator(false);
     } catch (err: any) {
       console.error('Failed to save expense:', err);
@@ -575,6 +818,27 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
             </>
           )}
 
+          {activeTab === 'expenses' && currentRole !== 'Principal' && pendingFuelBillsCount > 0 && (
+            <button
+              type="button"
+              disabled={isBatchScanningBills}
+              onClick={handleBatchScanAttachedFuelBills}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition-colors shadow-xs cursor-pointer whitespace-nowrap"
+              title="Use bill reader to extract pump price, fuel type & litres from attached fuel slips"
+            >
+              {isBatchScanningBills ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ScanText className="w-3.5 h-3.5" />
+              )}
+              <span>
+                {isBatchScanningBills
+                  ? 'Reading Fuel Bills...'
+                  : `Read Attached Fuel Bills (${pendingFuelBillsCount})`}
+              </span>
+            </button>
+          )}
+
           {activeTab === 'expenses' && currentRole !== 'Principal' && (
             <button
               onClick={handleOpenAddModal}
@@ -592,6 +856,31 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       {/* =================================================================== */}
       {activeTab === 'expenses' && (
         <div className="space-y-4">
+          {batchScanBanner && (
+            <div
+              className={`rounded-xl px-4 py-3 border text-xs flex items-center justify-between gap-3 ${
+                batchScanBanner.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-semibold">
+                {batchScanBanner.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                )}
+                <span>{batchScanBanner.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBatchScanBanner(null)}
+                className="p-1 rounded hover:bg-black/5 cursor-pointer shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           {/* Summary Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-white rounded-xl p-4 border border-slate-200 shadow-2xs flex items-center justify-between">
@@ -723,10 +1012,44 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                                   <span>Bill</span>
                                 </button>
                               )}
+                              {exp.billPhoto &&
+                                currentRole !== 'Principal' &&
+                                String(exp.category || '').toLowerCase().includes('fuel') && (
+                                  <button
+                                    type="button"
+                                    disabled={scanningRowId === exp.id || isBatchScanningBills}
+                                    onClick={() => handleScanSingleExpenseRow(exp)}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-900 hover:bg-indigo-200 disabled:opacity-50 text-[10px] font-bold cursor-pointer"
+                                    title="Read fuel price & qty from attached bill"
+                                  >
+                                    {scanningRowId === exp.id ? (
+                                      <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                    ) : (
+                                      <ScanText className="w-2.5 h-2.5" />
+                                    )}
+                                    <span>{exp.billScannedAt ? 'Re-read' : 'Read Bill'}</span>
+                                  </button>
+                                )}
                             </div>
                           </td>
                           <td className="py-3 px-3 text-slate-700 max-w-xs">
                             <div>{exp.narration}</div>
+                            {(Number(exp.fuelLitres) > 0 || Number(exp.fuelRate) > 0) && (
+                              <div className="text-[11px] font-mono font-bold text-emerald-700 mt-0.5">
+                                {exp.fuelType || inferFuelTypeFromText(exp.narration) || 'Fuel'}
+                                {Number(exp.fuelLitres) > 0
+                                  ? ` · ${Number(exp.fuelLitres).toFixed(2)} ${exp.fuelType === 'CNG' ? 'kg' : 'L'}`
+                                  : ''}
+                                {Number(exp.fuelRate) > 0
+                                  ? ` @ ₹${Number(exp.fuelRate).toFixed(2)}/${exp.fuelType === 'CNG' ? 'kg' : 'L'}`
+                                  : ''}
+                              </div>
+                            )}
+                            {exp.billExtractedSummary && (
+                              <div className="text-[10px] text-indigo-700 mt-0.5 truncate" title={exp.billExtractedSummary}>
+                                Bill OCR: {exp.billExtractedSummary}
+                              </div>
+                            )}
                             <div className="text-[10px] text-slate-400 mt-0.5">
                               Mode: {exp.paymentMode} • By {exp.recordedBy}
                             </div>
@@ -1146,6 +1469,13 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                       const v = vehicles.find((veh) => veh.registrationNumber === val);
                       if (v) {
                         setDriverName(v.assignedDriverName || '');
+                        const ft = v.fuelType || 'Diesel';
+                        setFuelTypeFed(ft);
+                        const cfgRate = getRateForFuelType(config?.fuelRates, ft);
+                        setFuelRateInput(cfgRate > 0 ? String(cfgRate) : '');
+                        if (cfgRate > 0 && Number(amount) > 0) {
+                          setFuelLitres(String(Math.round((Number(amount) / cfgRate) * 100) / 100));
+                        }
                       } else {
                         setDriverName('');
                       }
@@ -1161,7 +1491,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                       )}
                     {vehicles.map((v) => (
                       <option key={v.id} value={v.registrationNumber}>
-                        {v.registrationNumber} ({v.type})
+                        {v.registrationNumber} ({v.type} · {v.fuelType || 'Diesel'})
                       </option>
                     ))}
                   </select>
@@ -1169,46 +1499,117 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
               </div>
 
               {vehicleNumber !== 'General' && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 rounded-xl bg-indigo-50/70 border border-indigo-200">
-                  <div>
-                    <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
-                      Assigned Driver (Auto)
-                    </label>
-                    <input
-                      type="text"
-                      value={driverName}
-                      onChange={(e) => setDriverName(e.target.value)}
-                      placeholder="Driver Name"
-                      className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-bold text-slate-900"
-                    />
+                <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
+                        Assigned Driver (Auto)
+                      </label>
+                      <input
+                        type="text"
+                        value={driverName}
+                        onChange={(e) => setDriverName(e.target.value)}
+                        placeholder="Driver Name"
+                        className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
+                        Current Odometer (km)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={odometerReading}
+                        onChange={(e) => setOdometerReading(e.target.value)}
+                        placeholder="Optional"
+                        className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-mono font-bold text-slate-900"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
-                      Current Odometer (km)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={odometerReading}
-                      onChange={(e) => setOdometerReading(e.target.value)}
-                      placeholder="Optional"
-                      className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-mono font-bold text-slate-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
-                      Fuel Litres (if Fuel)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      value={fuelLitres}
-                      onChange={(e) => setFuelLitres(e.target.value)}
-                      placeholder="e.g. 25.5 L"
-                      className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-mono"
-                    />
-                  </div>
+
+                  {String(category || '').toLowerCase().includes('fuel') && (
+                    <div className="pt-2 border-t border-indigo-200/70 space-y-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
+                            Fuel Fed in Vehicle *
+                          </label>
+                          <select
+                            value={fuelTypeFed}
+                            onChange={(e) => {
+                              const nextFt = e.target.value as any;
+                              setFuelTypeFed(nextFt);
+                              const cfgRate = getRateForFuelType(config?.fuelRates, nextFt);
+                              if (cfgRate > 0) {
+                                setFuelRateInput(String(cfgRate));
+                                if (Number(amount) > 0) {
+                                  setFuelLitres(
+                                    String(Math.round((Number(amount) / cfgRate) * 100) / 100)
+                                  );
+                                }
+                              }
+                            }}
+                            className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-bold text-slate-900"
+                          >
+                            <option value="Diesel">Diesel (Litres)</option>
+                            <option value="Petrol">Petrol (Litres)</option>
+                            <option value="CNG">CNG (Kg)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
+                            Pump Rate ({fuelTypeFed === 'CNG' ? '₹/kg' : '₹/L'})
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={fuelRateInput}
+                            onChange={(e) => {
+                              const nextRate = e.target.value;
+                              setFuelRateInput(nextRate);
+                              if (Number(nextRate) > 0 && Number(amount) > 0) {
+                                setFuelLitres(
+                                  String(Math.round((Number(amount) / Number(nextRate)) * 100) / 100)
+                                );
+                              }
+                            }}
+                            placeholder="Chainpur pump rate"
+                            className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-mono font-bold text-slate-900"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-indigo-950 mb-1 text-[11px]">
+                            Fuel Qty ({fuelTypeFed === 'CNG' ? 'kg' : 'Litres'})
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={fuelLitres}
+                            onChange={(e) => setFuelLitres(e.target.value)}
+                            placeholder="Exact bill qty or auto"
+                            className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs font-mono font-bold text-emerald-800"
+                          />
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-indigo-900/80">
+                        Qty is taken directly from bill qty above, or calculated as Amount ÷ Chainpur/Siwan pump rate for {fuelTypeFed}. Saved rates (Chainpur 841203): Diesel{' '}
+                        <strong>
+                          {config?.fuelRates?.Diesel ? `₹${config.fuelRates.Diesel}/L` : 'Not set'}
+                        </strong>{' '}
+                        · Petrol{' '}
+                        <strong>
+                          {config?.fuelRates?.Petrol ? `₹${config.fuelRates.Petrol}/L` : 'Not set'}
+                        </strong>{' '}
+                        · CNG{' '}
+                        <strong>
+                          {config?.fuelRates?.CNG ? `₹${config.fuelRates.CNG}/kg` : 'Not set'}
+                        </strong>
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1275,7 +1676,20 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     step="any"
                     placeholder="e.g. 2500"
                     value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                    onChange={(e) => {
+                      const nextAmt = e.target.value;
+                      setAmount(nextAmt);
+                      if (
+                        vehicleNumber !== 'General' &&
+                        String(category || '').toLowerCase().includes('fuel') &&
+                        Number(nextAmt) > 0 &&
+                        Number(fuelRateInput) > 0
+                      ) {
+                        setFuelLitres(
+                          String(Math.round((Number(nextAmt) / Number(fuelRateInput)) * 100) / 100)
+                        );
+                      }
+                    }}
                     className="w-full p-2.5 rounded-xl border border-slate-200 font-mono font-bold text-slate-900"
                   />
                 </div>
@@ -1383,6 +1797,19 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                       </span>
                       <button
                         type="button"
+                        onClick={() => runReadBillInModal()}
+                        disabled={isReadingBillModal}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 text-[11px] font-bold cursor-pointer"
+                      >
+                        {isReadingBillModal ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <ScanText className="w-3 h-3" />
+                        )}
+                        <span>{isReadingBillModal ? 'Reading Bill...' : 'Read Price & Qty from Bill'}</span>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() =>
                           setPreviewBill({
                             title: editingExpense
@@ -1400,6 +1827,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                         onClick={() => {
                           setBillPhoto('');
                           setBillFileName('');
+                          setBillReadStatus(null);
                           setRemoveExistingBill(true);
                         }}
                         className="px-2 py-1 rounded-lg bg-rose-50 text-rose-700 hover:bg-rose-100 text-[11px] font-semibold cursor-pointer"
@@ -1409,6 +1837,48 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     </>
                   )}
                 </div>
+                {isReadingBillModal && (
+                  <div className="text-[11px] text-indigo-700 font-semibold flex items-center gap-1.5 pt-1">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Reading fuel type, pump rate (₹/L), quantity &amp; vendor from attached bill...</span>
+                  </div>
+                )}
+                {!isReadingBillModal && billReadStatus && (
+                  <div
+                    className={`p-2 rounded-lg border text-[11px] font-medium flex items-start gap-2 ${
+                      billReadStatus.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : billReadStatus.type === 'warning'
+                        ? 'bg-amber-50 border-amber-200 text-amber-900'
+                        : 'bg-rose-50 border-rose-200 text-rose-800'
+                    }`}
+                  >
+                    {billReadStatus.type === 'success' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                    )}
+                    <div className="flex-1 space-y-1">
+                      <div>{billReadStatus.message}</div>
+                      {onUpdateConfig &&
+                        billReadStatus.extraction?.ratePerUnit &&
+                        billReadStatus.extraction.fuelType !== 'Unknown' && (
+                          <label className="inline-flex items-center gap-1.5 text-[10px] font-bold cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={saveExtractedRateToConfig}
+                              onChange={(e) => setSaveExtractedRateToConfig(e.target.checked)}
+                              className="rounded accent-emerald-600"
+                            />
+                            <span>
+                              Update saved Chainpur {billReadStatus.extraction.fuelType} rate to ₹
+                              {billReadStatus.extraction.ratePerUnit} on Save
+                            </span>
+                          </label>
+                        )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               </div>

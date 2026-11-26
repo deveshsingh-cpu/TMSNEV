@@ -1423,73 +1423,40 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Sub-Module Navigation Bar */}
-      <div className="bg-slate-900 text-white p-3 rounded-2xl border border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-2 print:hidden">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setActiveTab('receipts')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'receipts'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <IndianRupee className="w-3.5 h-3.5" />
-            <span>{isReadOnly ? 'Fee Receipts & Register' : 'Collect Fees & Receipts'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('billing')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'billing'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span>Monthly Invoices</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('demand_slip')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'demand_slip'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Demand Slip &amp; Phone Follow-up</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('monthly_matrix')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'monthly_matrix'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <BarChart3 className="w-3.5 h-3.5" />
-            <span>Month-wise Fee &amp; Previous Dues</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('recovery')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'recovery'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Phone className="w-3.5 h-3.5" />
-            <span>Warning Letters &amp; Recovery</span>
-          </button>
+      {/* Active Sub-Module Title & Campus Scope Bar */}
+      <div className="bg-slate-900 text-white p-3.5 rounded-2xl border border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-2 print:hidden">
+        <div className="flex items-center gap-2.5 px-1">
+          <span className="w-8 h-8 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center shrink-0">
+            {activeTab === 'receipts' ? (
+              <IndianRupee className="w-4 h-4" />
+            ) : activeTab === 'billing' ? (
+              <FileText className="w-4 h-4" />
+            ) : activeTab === 'demand_slip' ? (
+              <Printer className="w-4 h-4" />
+            ) : activeTab === 'monthly_matrix' ? (
+              <BarChart3 className="w-4 h-4" />
+            ) : (
+              <Phone className="w-4 h-4" />
+            )}
+          </span>
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+              Fees &amp; Collection Sub-Module
+            </div>
+            <h2 className="text-sm font-bold text-white leading-tight">
+              {activeTab === 'receipts'
+                ? isReadOnly
+                  ? '1- Fee Receipts & Register'
+                  : '1- Collect Fees & Receipts'
+                : activeTab === 'billing'
+                ? '2- Monthly Invoices'
+                : activeTab === 'demand_slip'
+                ? '3- Demand Slip & Phone Follow-up'
+                : activeTab === 'monthly_matrix'
+                ? '4- Month-wise Fee & Previous Dues'
+                : '5- Warning Letters & Recovery'}
+            </h2>
+          </div>
         </div>
 
         {lockedCampus ? (

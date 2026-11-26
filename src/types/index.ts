@@ -192,6 +192,14 @@ export interface SchoolConfig {
   effectiveBillingStartMonth?: string; // e.g. '2026-11'
   lastAutoBilledMonth?: string;
   restoredRiddhi261102LiveSynced?: boolean;
+  fuelRates?: {
+    Diesel?: number;
+    Petrol?: number;
+    CNG?: number;
+    location?: string;
+    updatedAt?: string;
+    updatedBy?: string;
+  };
 }
 
 export interface TransportStop {
@@ -551,10 +559,25 @@ export interface Employee {
   joiningDate: string;
 }
 
+export type LogBookPhotoSlot =
+  | 'odometerPhoto'
+  | 'exteriorFrontPhoto'
+  | 'exteriorLhsPhoto'
+  | 'exteriorRhsPhoto'
+  | 'exteriorBackPhoto'
+  | 'insidePhoto';
+
 // Daily Log Book
 export interface OdometerLog {
   id: string;
   date: string;
+  entryTime?: string;
+  recordedAtIso?: string;
+  previousLogId?: string;
+  previousDate?: string;
+  previousTime?: string;
+  timeDiffMinutes?: number;
+  timeDiffLabel?: string;
   vehicleId: string;
   vehicleNumber: string;
   driverName: string;
@@ -566,6 +589,18 @@ export interface OdometerLog {
   fuelCost?: number;
   achievedMileageKmPerLitre?: number;
   neatnessChecked: boolean;
+  cleanOutside?: boolean;
+  cleanInside?: boolean;
+  hasStepny?: boolean;
+  hasJack?: boolean;
+  hasRod?: boolean;
+  mobileCheckedInMorning?: boolean;
+  odometerPhoto?: string;
+  exteriorFrontPhoto?: string;
+  exteriorLhsPhoto?: string;
+  exteriorRhsPhoto?: string;
+  exteriorBackPhoto?: string;
+  insidePhoto?: string;
   defectsReported?: string;
   recordedBy: string;
   shiftName?: string;
@@ -912,6 +947,8 @@ export interface ExpenseRecord {
   driverName?: string;
   odometerReading?: number;
   fuelLitres?: number;
+  fuelType?: 'Diesel' | 'Petrol' | 'CNG' | 'Electric';
+  fuelRate?: number;
   vendorName: string;
   billNumber?: string;
   amount: number;
@@ -921,12 +958,26 @@ export interface ExpenseRecord {
   voucherNo?: string;
   recordedBy: string;
   billPhoto?: string;
+  billExtractedSummary?: string;
+  billScannedAt?: string;
   requiresApproval?: boolean;
   approvalStatus?: 'Approved' | 'Pending Approval' | 'Rejected';
   approvedBy?: string;
   approvedDate?: string;
   approvedAt?: string;
   rejectionReason?: string;
+}
+
+export interface FuelBillExtractionResult {
+  isReadableBill: boolean;
+  fuelType: 'Diesel' | 'Petrol' | 'CNG' | 'Unknown';
+  ratePerUnit: number | null;
+  quantity: number | null;
+  totalAmount: number | null;
+  billNumber: string | null;
+  vendorName: string | null;
+  billDate: string | null;
+  summary: string;
 }
 
 export interface IncomeHead {
@@ -976,6 +1027,7 @@ export interface FuelAdvanceAndPurchase {
   advanceGiven?: number;
   litresPurchased: number;
   litres?: number;
+  fuelType?: 'Diesel' | 'Petrol' | 'CNG' | 'Electric';
   ratePerLitre: number;
   fuelRate?: number;
   actualBillAmount: number;

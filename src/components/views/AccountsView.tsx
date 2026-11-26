@@ -1863,90 +1863,44 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Quick Navigation Bar for Day Book, Member Fee Ledger, Vehicle Cost Ledger & Accounts */}
-      <div className="bg-slate-900 text-white p-3 rounded-2xl border border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 print:hidden">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => handleSelectTab('day_book')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'day_book'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5" />
-            <span>Print / View Day Book</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleSelectTab('student_ledger')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'student_ledger'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <GraduationCap className="w-3.5 h-3.5" />
-            <span>Member Fee Ledger</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleSelectTab('vehicle_ledger')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'vehicle_ledger'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Truck className="w-3.5 h-3.5" />
-            <span>Vehicle Cost Ledger</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleSelectTab('trial_balance')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'trial_balance'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Scale className="w-3.5 h-3.5" />
-            <span>Trial Balance</span>
-          </button>
-
-          {currentRole !== 'Transport Assistant' && (
-            <>
-              <button
-                type="button"
-                onClick={() => handleSelectTab('income')}
-                className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activeTab === 'income'
-                    ? 'bg-amber-500 text-slate-950 shadow-xs'
-                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-                }`}
-              >
-                <IndianRupee className="w-3.5 h-3.5" />
-                <span>Other Income</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleSelectTab('vouchers')}
-                className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activeTab === 'vouchers'
-                    ? 'bg-amber-500 text-slate-950 shadow-xs'
-                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
-                }`}
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>Vouchers</span>
-              </button>
-            </>
-          )}
+      {/* Active Sub-Module Header & Campus View Bar */}
+      <div className="bg-slate-900 text-white p-3.5 rounded-2xl border border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 print:hidden">
+        <div className="flex items-center gap-2.5 px-1">
+          <span className="w-8 h-8 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center shrink-0">
+            {activeTab === 'day_book' ? (
+              <BookOpen className="w-4 h-4" />
+            ) : activeTab === 'student_ledger' ? (
+              <GraduationCap className="w-4 h-4" />
+            ) : activeTab === 'trial_balance' ? (
+              <Scale className="w-4 h-4" />
+            ) : activeTab === 'income' ? (
+              <IndianRupee className="w-4 h-4" />
+            ) : (
+              <FileText className="w-4 h-4" />
+            )}
+          </span>
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+              Ledger &amp; Accounts Sub-Module
+            </div>
+            <h2 className="text-sm font-bold text-white leading-tight">
+              {activeTab === 'day_book'
+                ? 'Print / View Day Book'
+                : activeTab === 'student_ledger'
+                ? 'Member Fee Ledger'
+                : activeTab === 'trial_balance'
+                ? 'Trial Balance'
+                : activeTab === 'income'
+                ? 'Other Income & Heads'
+                : activeTab === 'vouchers'
+                ? 'Vouchers & Chart of Accounts'
+                : activeTab === 'route_outstanding'
+                ? 'Route-wise Outstanding Details'
+                : activeTab === 'demand_slip'
+                ? 'Demand Slip & Follow-up'
+                : 'Financial Ledger'}
+            </h2>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">

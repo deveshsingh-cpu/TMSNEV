@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   BarChart3,
   Users,
@@ -60,10 +60,21 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   staffPayrolls = [],
   staffAdvances = [],
   odometerLogs = [],
+  initialSubTab = 'members',
 }) => {
+  const resolveReportTab = (sub?: string): 'members' | 'fleet' | 'finance' | 'payroll' | 'routes' => {
+    if (sub === 'fleet' || sub === 'finance' || sub === 'payroll' || sub === 'routes') return sub;
+    return 'members';
+  };
   const [reportType, setReportType] = useState<
     'members' | 'fleet' | 'finance' | 'payroll' | 'routes'
-  >('members');
+  >(() => resolveReportTab(initialSubTab));
+
+  useEffect(() => {
+    if (initialSubTab) {
+      setReportType(resolveReportTab(initialSubTab));
+    }
+  }, [initialSubTab]);
 
   // Filters for Member Report
   const [searchQuery, setSearchQuery] = useState('');
@@ -441,14 +452,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
       </div>
 
-      {/* Top Executive Summary Cards */}
+      {/* Top Executive KPI Overview (Navigate between report sub-modules via Sidebar) */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
         <div
-          onClick={() => setReportType('members')}
-          className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+          className={`p-4 rounded-2xl border transition-all ${
             reportType === 'members'
               ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-              : 'bg-white border-slate-200 hover:border-slate-300 text-slate-900'
+              : 'bg-white border-slate-200 text-slate-900'
           }`}
         >
           <div className="flex items-center justify-between">
@@ -464,11 +474,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
 
         <div
-          onClick={() => setReportType('fleet')}
-          className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+          className={`p-4 rounded-2xl border transition-all ${
             reportType === 'fleet'
               ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-              : 'bg-white border-slate-200 hover:border-slate-300 text-slate-900'
+              : 'bg-white border-slate-200 text-slate-900'
           }`}
         >
           <div className="flex items-center justify-between">
@@ -482,11 +491,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
 
         <div
-          onClick={() => setReportType('finance')}
-          className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+          className={`p-4 rounded-2xl border transition-all ${
             reportType === 'finance'
               ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-              : 'bg-white border-slate-200 hover:border-slate-300 text-slate-900'
+              : 'bg-white border-slate-200 text-slate-900'
           }`}
         >
           <div className="flex items-center justify-between">
@@ -502,11 +510,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
 
         <div
-          onClick={() => setReportType('payroll')}
-          className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+          className={`p-4 rounded-2xl border transition-all ${
             reportType === 'payroll'
               ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-              : 'bg-white border-slate-200 hover:border-slate-300 text-slate-900'
+              : 'bg-white border-slate-200 text-slate-900'
           }`}
         >
           <div className="flex items-center justify-between">
@@ -520,11 +527,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
 
         <div
-          onClick={() => setReportType('routes')}
-          className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+          className={`p-4 rounded-2xl border transition-all ${
             reportType === 'routes'
               ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-              : 'bg-white border-slate-200 hover:border-slate-300 text-slate-900'
+              : 'bg-white border-slate-200 text-slate-900'
           }`}
         >
           <div className="flex items-center justify-between">
@@ -536,29 +542,6 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             Stop-wise tariff &amp; seat utilization
           </div>
         </div>
-      </div>
-
-      {/* Report Category Tabs */}
-      <div className="flex flex-wrap items-center gap-2 bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs">
-        {[
-          { id: 'members', label: '1. Member Consolidated Dues & Status' },
-          { id: 'fleet', label: '2. Fleet Mileage Threshold & Cost/Km' },
-          { id: 'finance', label: '3. Income, Expense & Net Cash Ledger' },
-          { id: 'payroll', label: '4. Staff Attendance, CL & Payroll Audit' },
-          { id: 'routes', label: '5. Route Occupancy & Revenue Potential' },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setReportType(tab.id as any)}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-              reportType === tab.id
-                ? 'bg-amber-500 text-slate-950 shadow-2xs'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
       </div>
 
       {/* =====================================================================

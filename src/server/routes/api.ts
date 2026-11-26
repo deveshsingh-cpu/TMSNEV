@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import zlib from 'zlib';
 import { sheetsDb } from '../sheets/sheetsService.js';
+import { readFuelBillFromDataUrl, BillReaderError } from '../gemini/billReader.js';
 
 export const apiRouter = Router();
 
@@ -97,6 +98,21 @@ apiRouter.get('/attachments/receipt/:id', (req: Request, res: Response) => {
 
 apiRouter.get('/attachments/warning-letter/:id', (req: Request, res: Response) => {
   sendDataUrlAttachment(res, sheetsDb.getWarningLetterAttachmentRaw(req.params.id));
+});
+
+apiRouter.get('/attachments/logbook/:id/:slot', (req: Request, res: Response) => {
+  const allowedSlots = new Set([
+    'odometerPhoto',
+    'exteriorFrontPhoto',
+    'exteriorLhsPhoto',
+    'exteriorRhsPhoto',
+    'exteriorBackPhoto',
+    'insidePhoto',
+  ]);
+  if (!allowedSlots.has(req.params.slot)) {
+    return res.status(400).json({ error: 'Invalid photo slot.' });
+  }
+  sendDataUrlAttachment(res, sheetsDb.getOdometerPhotoRaw(req.params.id, req.params.slot as any));
 });
 
 // 1. Google Sheets Connection & Diagnostic Status
@@ -726,6 +742,186 @@ apiRouter.delete('/expenses/:id', async (req: Request, res: Response) => {
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// Read attached fuel bill via server-side Gemini Vision
+apiRouter.post('/expenses/read-bill', async (req: Request, res: Response) => {
+  try {
+    const { imageDataUrl, expenseId, expectedAmount, vehicleNumber, narrationHint } = req.body || {};
+    let sourceDataUrl = typeof imageDataUrl === 'string' ? imageDataUrl : '';
+    let ctxAmt = expectedAmount !== undefined ? Number(expectedAmount) : undefined;
+    let ctxVeh = typeof vehicleNumber === 'string' ? vehicleNumber : undefined;
+    let ctxNarr = typeof narrationHint === 'string' ? narrationHint : undefined;
+
+    if (!sourceDataUrl && typeof expenseId === 'string' && expenseId.trim()) {
+      const exp = sheetsDb.getExpenseByIdOrNo(expenseId);
+      const rawAtt = sheetsDb.getExpenseAttachmentRaw(expenseId);
+      if (!rawAtt) {
+        return res.status(404).json({ error: 'No bill photo attachment found on this expense.' });
+      }
+      sourceDataUrl = rawAtt;
+      if (!ctxAmt && exp) ctxAmt = exp.amount;
+      if (!ctxVeh && exp) ctxVeh = exp.vehicleNumber;
+      if (!ctxNarr && exp) ctxNarr = exp.narration;
+    }
+
+    if (!sourceDataUrl) {
+      return res.status(400).json({ error: 'Please attach or provide a bill photo to read.' });
+    }
+
+    const extraction = await readFuelBillFromDataUrl(sourceDataUrl, {
+      expectedAmount: ctxAmt,
+      vehicleNumber: ctxVeh,
+      narrationHint: ctxNarr,
+    });
+    res.json({ extraction });
+  } catch (err: any) {
+    const status = err instanceof BillReaderError ? err.statusCode : 500;
+    res.status(status).json({ error: err?.message || 'Failed to read attached bill.' });
+  }
+});
+
+apiRouter.post('/expenses/:id/read-bill', async (req: Request, res: Response) => {
+  try {
+    const exp = sheetsDb.getExpenseByIdOrNo(req.params.id);
+    if (!exp) {
+      return res.status(404).json({ error: 'Expense record not found.' });
+    }
+    const rawAtt = sheetsDb.getExpenseAttachmentRaw(exp.id);
+    if (!rawAtt) {
+      return res.status(404).json({ error: 'No bill photo attached to this expense record.' });
+    }
+
+    const { apply = true, savePumpRateToConfig = true, updatedBy } = req.body || {};
+    const extraction = await readFuelBillFromDataUrl(rawAtt, {
+      expectedAmount: exp.amount,
+      vehicleNumber: exp.vehicleNumber,
+      narrationHint: exp.narration,
+    });
+
+    if (!apply) {
+      return res.json({ extraction, expense: exp });
+    }
+
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim() || 'Bill Reader';
+    const { updatedExpenses, updatedRates } = await sheetsDb.applyBatchFuelBillExtractions(
+      [{ expenseId: exp.id, extraction }],
+      {
+        saveLatestPumpRatesToConfig: Boolean(savePumpRateToConfig),
+        updatedBy: updatedBy || callerRole,
+      }
+    );
+
+    res.json({
+      extraction,
+      expense: updatedExpenses[0] || exp,
+      updatedRates,
+    });
+  } catch (err: any) {
+    const status = err instanceof BillReaderError ? err.statusCode : 500;
+    res.status(status).json({ error: err?.message || 'Failed to read expense bill.' });
+  }
+});
+
+apiRouter.post('/expenses/scan-attached-bills', async (req: Request, res: Response) => {
+  try {
+    const { limit = 15, rescanAll = false, saveLatestPumpRatesToConfig = true, updatedBy } = req.body || {};
+    const maxBatch = Math.min(25, Math.max(1, Number(limit) || 15));
+
+    const allFuelWithAttachments = sheetsDb
+      .getExpenses(undefined, undefined)
+      .filter((e) => {
+        const isFuel = String(e.category || '').toLowerCase().includes('fuel');
+        if (!isFuel) return false;
+        const hasAtt = Boolean(sheetsDb.getExpenseAttachmentRaw(e.id));
+        if (!hasAtt) return false;
+        if (rescanAll) return true;
+        const missingPriceOrQty = !(Number(e.fuelRate) > 0 && Number(e.fuelLitres) > 0);
+        return !e.billScannedAt && missingPriceOrQty;
+      });
+
+    const batch = allFuelWithAttachments.slice(0, maxBatch);
+    if (batch.length === 0) {
+      return res.json({
+        scannedCount: 0,
+        updatedCount: 0,
+        remainingPendingCount: 0,
+        updatedRates: {},
+        results: [],
+      });
+    }
+
+    const extractedItems: Array<{ expenseId: string; extraction: Awaited<ReturnType<typeof readFuelBillFromDataUrl>> }> = [];
+    const results: Array<{
+      expenseId: string;
+      expenseNo: string;
+      vehicleNumber: string;
+      date: string;
+      amount: number;
+      status: 'updated' | 'unreadable' | 'error';
+      extraction?: Awaited<ReturnType<typeof readFuelBillFromDataUrl>>;
+      error?: string;
+    }> = [];
+
+    for (const exp of batch) {
+      const rawAtt = sheetsDb.getExpenseAttachmentRaw(exp.id);
+      if (!rawAtt) continue;
+      try {
+        const extraction = await readFuelBillFromDataUrl(rawAtt, {
+          expectedAmount: exp.amount,
+          vehicleNumber: exp.vehicleNumber,
+          narrationHint: exp.narration,
+        });
+        extractedItems.push({ expenseId: exp.id, extraction });
+        results.push({
+          expenseId: exp.id,
+          expenseNo: exp.expenseNo,
+          vehicleNumber: exp.vehicleNumber || 'General',
+          date: exp.date,
+          amount: exp.amount,
+          status: extraction.isReadableBill ? 'updated' : 'unreadable',
+          extraction,
+        });
+      } catch (err: any) {
+        // Abort batch immediately on API key or permission misconfiguration
+        if (
+          err instanceof BillReaderError &&
+          (err.statusCode === 400 || err.statusCode === 403 || err.statusCode === 503)
+        ) {
+          throw err;
+        }
+        results.push({
+          expenseId: exp.id,
+          expenseNo: exp.expenseNo,
+          vehicleNumber: exp.vehicleNumber || 'General',
+          date: exp.date,
+          amount: exp.amount,
+          status: 'error',
+          error: err?.message || 'Failed to read bill',
+        });
+      }
+    }
+
+    const callerRole = String(req.headers['x-erp-user-role'] || '').trim() || 'Bill Reader';
+    const persisted =
+      extractedItems.length > 0
+        ? await sheetsDb.applyBatchFuelBillExtractions(extractedItems, {
+            saveLatestPumpRatesToConfig: Boolean(saveLatestPumpRatesToConfig),
+            updatedBy: updatedBy || callerRole,
+          })
+        : { updatedExpenses: [], updatedRates: {} };
+
+    res.json({
+      scannedCount: results.length,
+      updatedCount: results.filter((r) => r.status === 'updated').length,
+      remainingPendingCount: Math.max(0, allFuelWithAttachments.length - batch.length),
+      updatedRates: persisted.updatedRates,
+      results,
+    });
+  } catch (err: any) {
+    const status = err instanceof BillReaderError ? err.statusCode : 500;
+    res.status(status).json({ error: err?.message || 'Failed to scan attached fuel bills.' });
   }
 });
 

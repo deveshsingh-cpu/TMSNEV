@@ -536,30 +536,6 @@ export const RoutesView: React.FC<RoutesViewProps> = ({
               ? `${routeRosterMembers.length} Members`
               : `${filteredRoutes.length} Routes`}
           </span>
-
-          <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
-            {(
-              [
-                { id: 'routes', label: '1- Active Routes & Stops' },
-                { id: 'multi_trips', label: '2- Vehicle Schedule' },
-                { id: 'pack', label: '3- Print Route List' },
-                { id: 'villages_stops', label: 'Villages & Stops' },
-              ] as const
-            ).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTab(t.id)}
-                className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
-                  activeTab === t.id
-                    ? 'bg-slate-900 text-amber-400 shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">

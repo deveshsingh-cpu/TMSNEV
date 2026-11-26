@@ -2504,7 +2504,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>Member Fee Ledger ({lockedAssistantCampus || 'Sr'})</span>
             </button>
             <button
-              onClick={() => onNavigate('accounts' as any, 'vehicle_ledger')}
+              onClick={() => onNavigate('vehicles' as any, 'cost_center')}
               className="py-2 px-3 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 font-bold text-xs rounded-xl border border-indigo-400/30 transition-colors flex items-center justify-center gap-2 cursor-pointer"
             >
               <Bus className="w-3.5 h-3.5 text-sky-400 shrink-0" />
@@ -3316,7 +3316,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         <div
-          onClick={() => onNavigate('vehicles', 'directory')}
+          onClick={() => onNavigate('vehicles', 'statutory')}
           className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-2xs hover:border-slate-300 transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between">
@@ -4502,7 +4502,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {expiringVehicles.slice(0, 5).map((v) => (
                 <div
                   key={v.id}
-                  onClick={() => onNavigate('vehicles', 'directory')}
+                  onClick={() => onNavigate('vehicles', 'statutory')}
                   className="p-2.5 rounded-xl bg-rose-50/60 border border-rose-100 flex items-center justify-between text-xs cursor-pointer hover:bg-rose-50"
                 >
                   <div>

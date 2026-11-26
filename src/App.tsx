@@ -603,7 +603,9 @@ export function App() {
         normalizedKey = 'dashboard';
         targetSubTab = '';
       } else if (normalizedKey === 'routes') {
-        targetSubTab = 'pack';
+        if (!['routes', 'services', 'pack', 'villages_stops'].includes(targetSubTab)) {
+          targetSubTab = 'routes';
+        }
       } else if (normalizedKey === 'staff') {
         targetSubTab = 'attendance';
       } else if (normalizedKey === 'expenses') {
@@ -636,6 +638,18 @@ export function App() {
       } else if (normalizedKey === 'accounts' && !targetSubTab) {
         targetSubTab = 'day_book';
       }
+    }
+
+    // Route Vehicle Cost Center & Fleet statutory shortcuts directly to the unified Fleet Management module
+    if (normalizedKey === 'accounts' && targetSubTab === 'vehicle_ledger') {
+      normalizedKey = 'vehicles';
+      targetSubTab = 'cost_center';
+    } else if (normalizedKey === 'vehicles' && (targetSubTab === 'directory' || targetSubTab === 'fleet')) {
+      targetSubTab = 'statutory';
+    } else if (normalizedKey === 'vehicles' && !targetSubTab) {
+      targetSubTab = 'odometer';
+    } else if (normalizedKey === 'reports' && !targetSubTab) {
+      targetSubTab = 'members';
     }
 
     setActiveNav(normalizedKey);
@@ -2291,6 +2305,8 @@ export function App() {
               {activeNav === 'vehicles' && (
                 <VehiclesView
                   schoolName={config.schoolName}
+                  config={config}
+                  onUpdateConfig={isAdmin || activeRole === 'Transport Coordinator' ? handleUpdateConfig : undefined}
                   currentRole={activeRole}
                   vehicles={vehicles}
                   odometerLogs={odometerLogs}
@@ -2302,6 +2318,8 @@ export function App() {
                   onSettleFuelAdvance={handleSettleFuelAdvance}
                   onAddMaintenance={handleAddMaintenance}
                   onUpdateMaintenanceStatus={handleUpdateMaintenanceStatus}
+                  onSaveVehicle={isPrincipal ? undefined : handleSaveVehicle}
+                  onDeleteExpense={isAdmin ? handleDeleteExpense : undefined}
                 />
               )}
 
@@ -2381,6 +2399,8 @@ export function App() {
               {activeNav === 'expenses' && (
                 <ExpensesView
                   schoolName={config.schoolName}
+                  config={config}
+                  onUpdateConfig={isAdmin || activeRole === 'Transport Coordinator' ? handleUpdateConfig : undefined}
                   isAdmin={isAdmin}
                   currentRole={activeRole}
                   userCampus={currentUser?.campus}
@@ -2448,10 +2468,21 @@ export function App() {
 
               {activeNav === 'reports' && (
                 <ReportsView
+                  schoolName={config.schoolName}
                   summary={reportsSummary}
                   students={students}
                   trips={dailyTrips}
                   vehicles={vehicles}
+                  routes={routes}
+                  invoices={invoices}
+                  receipts={receipts}
+                  expenses={expenses}
+                  incomes={otherIncomes}
+                  employees={employees}
+                  staffPayrolls={staffPayrolls}
+                  staffAdvances={staffAdvances}
+                  odometerLogs={odometerLogs}
+                  initialSubTab={activeSubTab || 'members'}
                 />
               )}
 

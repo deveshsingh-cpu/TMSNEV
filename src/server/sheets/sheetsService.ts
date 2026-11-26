@@ -22,13 +22,21 @@ import {
   CandidateResume, ScheduledService, SuspensionAndPermissionEvent,
   VehicleAssignmentRecord, DisciplineRecord, ExpenseHead, IncomeHead, IncomeRecord,
   StaffAttendanceRecord, StaffAttendanceStatus, StaffAdvanceRecord, StaffPayrollRecord, HolidayRecord,
-  SystemUser, UserRole, SessionMonthCode, MemberLifecycleRequest, AbsenteeCallRecord, MemberComplaintRecord
+  SystemUser, UserRole, SessionMonthCode, MemberLifecycleRequest, AbsenteeCallRecord, MemberComplaintRecord,
+  LogBookPhotoSlot, FuelBillExtractionResult
 } from '../../types/index.js';
 import {
   getDefaultMorningArrivalTime,
   getDefaultEveningDepartureTime,
   formatTime12Hour,
 } from '../../utils/scheduleTimings.js';
+import {
+  LOG_BOOK_PHOTO_SLOTS,
+  getIstDateTimeParts,
+  findPreviousLogForVehicle,
+  getLogComparableTimestampMs,
+  formatTimeDifferenceLabel,
+} from '../../utils/logBookReconciliation.js';
 
 export const ALL_ERP_SHEET_TABS = [
   'School_Masters',
@@ -1351,7 +1359,38 @@ export class SheetsDatabaseManager {
           : remote;
       }
       if ((tabMap.get('Daily_Log_Book_24H') || []).length >= 1) {
-        const remote = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true);
+        const prevPhotoMap = new Map<string, Partial<Record<LogBookPhotoSlot, string>>>();
+        for (const oldLog of this.odometerLogs) {
+          const slotData: Partial<Record<LogBookPhotoSlot, string>> = {};
+          let hasAny = false;
+          for (const slot of LOG_BOOK_PHOTO_SLOTS) {
+            const val = oldLog[slot.key];
+            if (typeof val === 'string' && val.startsWith('data:')) {
+              slotData[slot.key] = val;
+              hasAny = true;
+            }
+          }
+          if (hasAny && oldLog.id) {
+            prevPhotoMap.set(oldLog.id, slotData);
+          }
+        }
+        const remote = this.parseRowsFromSheet<OdometerLog>(tabMap.get('Daily_Log_Book_24H'), true).map(
+          (row) => {
+            const cachedPhotos = prevPhotoMap.get(row.id);
+            if (!cachedPhotos) return row;
+            const merged: OdometerLog = { ...row };
+            for (const slot of LOG_BOOK_PHOTO_SLOTS) {
+              const currVal = merged[slot.key];
+              if (
+                cachedPhotos[slot.key] &&
+                (!currVal || currVal === '[ATTACHMENT_STORED]')
+              ) {
+                merged[slot.key] = cachedPhotos[slot.key];
+              }
+            }
+            return merged;
+          }
+        );
         this.odometerLogs = keepRecentLocalLedgers
           ? this.unionPermanentRecords(this.odometerLogs, remote)
           : remote;
@@ -1667,6 +1706,11 @@ export class SheetsDatabaseManager {
     return exp?.billPhoto;
   }
 
+  public getExpenseByIdOrNo(idOrNo: string): ExpenseRecord | undefined {
+    const clean = String(idOrNo || '').trim();
+    return this.expenses.find(e => e.id === clean || e.expenseNo === clean);
+  }
+
   public getReceiptAttachmentRaw(idOrNo: string): string | undefined {
     const clean = String(idOrNo || '').trim();
     const rec = this.receipts.find(r => r.id === clean || r.receiptNo === clean);
@@ -1677,6 +1721,14 @@ export class SheetsDatabaseManager {
     const clean = String(idOrNo || '').trim();
     const wl = this.warningLetters.find(w => w.id === clean || w.letterNo === clean);
     return wl?.acknowledgementSlip;
+  }
+
+  public getOdometerPhotoRaw(logId: string, slot: LogBookPhotoSlot): string | undefined {
+    const clean = String(logId || '').trim();
+    const log = this.odometerLogs.find(o => o.id === clean);
+    if (!log) return undefined;
+    const val = log[slot];
+    return typeof val === 'string' && val.startsWith('data:') ? val : undefined;
   }
 
   public getBootstrapSnapshot(options?: { includeAttendance?: boolean }) {
@@ -1730,6 +1782,18 @@ export class SheetsDatabaseManager {
       return w;
     });
 
+    const liteOdometerLogs = this.getOdometerLogs().map(o => {
+      let cloned: OdometerLog | null = null;
+      for (const slot of LOG_BOOK_PHOTO_SLOTS) {
+        const val = o[slot.key];
+        if (typeof val === 'string' && val.startsWith('data:')) {
+          if (!cloned) cloned = { ...o };
+          cloned[slot.key] = `/api/attachments/logbook/${encodeURIComponent(o.id)}/${slot.key}?v=${val.length}`;
+        }
+      }
+      return cloned || o;
+    });
+
     const includeAttendance = options?.includeAttendance !== false;
 
     return {
@@ -1760,7 +1824,7 @@ export class SheetsDatabaseManager {
       expenseHeads: [...this.getExpenseHeads()],
       incomeHeads: [...this.getIncomeHeads()],
       incomes: [...this.getIncomes()],
-      odometerLogs: [...this.getOdometerLogs()],
+      odometerLogs: liteOdometerLogs,
       fuelAdvances: [...this.getFuelAdvances()],
       maintenance: [...this.getMaintenanceRequests()],
       accounts: [...accounts],
@@ -2489,7 +2553,10 @@ export class SheetsDatabaseManager {
               o.neatnessChecked ? 'Yes' : 'No',
               o.defectsReported || '',
               o.recordedBy,
-              stripLargeBase64ForSheetCell(o),
+              stripLargeBase64ForSheetCell(
+                o,
+                LOG_BOOK_PHOTO_SLOTS.map(s => s.key)
+              ),
             ]),
           ],
         },
@@ -10967,29 +11034,77 @@ export class SheetsDatabaseManager {
     return this.odometerLogs;
   }
 
-  public async recordOdometerEntry(entry: Omit<OdometerLog, 'id'>): Promise<OdometerLog> {
+  public async recordOdometerEntry(entry: Omit<OdometerLog, 'id'> & { reading?: number }): Promise<OdometerLog> {
     return this.enqueueWrite(async () => {
       const vehicle = this.vehicles.find(v => v.id === entry.vehicleId || v.registrationNumber === entry.vehicleNumber);
       if (!vehicle) throw new Error('Mandatory prerequisite missing: Please select a valid Vehicle.');
       if (!entry.driverName || !entry.driverName.trim()) {
-        throw new Error('Driver Name is mandatory to record a 24-Hour Vehicle Log Book entry.');
+        throw new Error('Driver Name is mandatory to record a Daily Vehicle Log Book entry.');
       }
 
-      const startKm = Number(entry.startOdometer);
-      const endKm = Number(entry.endOdometer);
+      // Auto-track exact IST timestamp at moment of submission
+      const now = new Date();
+      const ist = getIstDateTimeParts(now);
+      const entryDate = entry.date || ist.dateStr;
+      const entryTime = entry.entryTime || ist.timeStr;
+      const recordedAtIso = entry.recordedAtIso || ist.iso;
 
-      if (isNaN(startKm) || isNaN(endKm) || startKm < 0) {
-        throw new Error('Valid Starting and Ending Odometer readings are mandatory.');
+      // Locate yesterday's / chronologically previous Log Book entry for this vehicle
+      const previousLog = findPreviousLogForVehicle(
+        this.odometerLogs,
+        vehicle.id,
+        vehicle.registrationNumber,
+        {
+          beforeTimestampMs: Date.parse(recordedAtIso) || Date.now(),
+        }
+      );
+
+      const startKm =
+        previousLog !== undefined
+          ? Number(previousLog.endOdometer ?? previousLog.closingOdometer ?? previousLog.startOdometer ?? 0)
+          : entry.startOdometer !== undefined && !isNaN(Number(entry.startOdometer))
+          ? Number(entry.startOdometer)
+          : Number(vehicle.currentOdometer || 0);
+
+      const rawEnd = entry.endOdometer ?? entry.reading ?? entry.closingOdometer;
+      const endKm = Number(rawEnd);
+
+      if (rawEnd === undefined || rawEnd === null || isNaN(startKm) || isNaN(endKm) || startKm < 0 || endKm < 0) {
+        throw new Error('Valid Current Odometer Reading is mandatory.');
       }
       if (endKm < startKm) {
-        throw new Error(`Ending odometer (${endKm} km) cannot be less than starting odometer (${startKm} km).`);
+        throw new Error(
+          `Current odometer reading (${endKm.toLocaleString('en-IN')} km) cannot be less than previous reading (${startKm.toLocaleString('en-IN')} km).`
+        );
       }
 
       const tripKm = endKm - startKm;
 
+      let timeDiffMinutes = entry.timeDiffMinutes;
+      let timeDiffLabel = entry.timeDiffLabel;
+      if (previousLog) {
+        const prevMs = getLogComparableTimestampMs(previousLog);
+        const currMs = Date.parse(recordedAtIso);
+        if (prevMs > 0 && !isNaN(currMs) && currMs >= prevMs) {
+          timeDiffMinutes = Math.round((currMs - prevMs) / 60000);
+          timeDiffLabel = formatTimeDifferenceLabel(timeDiffMinutes);
+        }
+      }
+
+      const cleanOutside = entry.cleanOutside !== undefined ? !!entry.cleanOutside : !!entry.neatnessChecked;
+      const cleanInside = entry.cleanInside !== undefined ? !!entry.cleanInside : !!entry.neatnessChecked;
+
       const newLog: OdometerLog = {
         ...entry,
         id: `odo-${Date.now()}`,
+        date: entryDate,
+        entryTime,
+        recordedAtIso,
+        previousLogId: previousLog?.id,
+        previousDate: previousLog?.date,
+        previousTime: previousLog?.entryTime,
+        timeDiffMinutes,
+        timeDiffLabel,
         vehicleId: vehicle.id,
         vehicleNumber: vehicle.registrationNumber,
         driverName: entry.driverName.trim(),
@@ -10998,12 +11113,27 @@ export class SheetsDatabaseManager {
         tripKm,
         fuelLitresAdded: Number(entry.fuelLitresAdded) || 0,
         fuelCost: Number(entry.fuelCost) || 0,
-        neatnessChecked: !!entry.neatnessChecked,
+        cleanOutside,
+        cleanInside,
+        hasStepny: !!entry.hasStepny,
+        hasJack: !!entry.hasJack,
+        hasRod: !!entry.hasRod,
+        mobileCheckedInMorning: !!entry.mobileCheckedInMorning,
+        neatnessChecked: cleanOutside && cleanInside,
+        odometerPhoto: typeof entry.odometerPhoto === 'string' && entry.odometerPhoto.startsWith('data:') ? entry.odometerPhoto : undefined,
+        exteriorFrontPhoto: typeof entry.exteriorFrontPhoto === 'string' && entry.exteriorFrontPhoto.startsWith('data:') ? entry.exteriorFrontPhoto : undefined,
+        exteriorLhsPhoto: typeof entry.exteriorLhsPhoto === 'string' && entry.exteriorLhsPhoto.startsWith('data:') ? entry.exteriorLhsPhoto : undefined,
+        exteriorRhsPhoto: typeof entry.exteriorRhsPhoto === 'string' && entry.exteriorRhsPhoto.startsWith('data:') ? entry.exteriorRhsPhoto : undefined,
+        exteriorBackPhoto: typeof entry.exteriorBackPhoto === 'string' && entry.exteriorBackPhoto.startsWith('data:') ? entry.exteriorBackPhoto : undefined,
+        insidePhoto: typeof entry.insidePhoto === 'string' && entry.insidePhoto.startsWith('data:') ? entry.insidePhoto : undefined,
         recordedBy: entry.recordedBy || 'Transport Staff',
+        entryType: entry.entryType || 'General Daily Reading',
       };
 
       this.odometerLogs.unshift(newLog);
-      vehicle.currentOdometer = endKm;
+      if (endKm > (vehicle.currentOdometer || 0)) {
+        vehicle.currentOdometer = endKm;
+      }
 
       // If fuel cost is recorded in the daily log book, directly post fuel expense without nested enqueueWrite deadlock
       if (newLog.fuelCost && newLog.fuelCost > 0) {
@@ -11011,7 +11141,7 @@ export class SheetsDatabaseManager {
         const fuelExpRecord: ExpenseRecord = {
           id: `exp-${Date.now()}`,
           expenseNo: expNo,
-          date: newLog.date || new Date().toISOString().split('T')[0],
+          date: newLog.date || ist.dateStr,
           category: 'Fuel (Diesel / CNG)',
           vehicleId: vehicle.id,
           vehicleNumber: vehicle.registrationNumber,
@@ -11023,7 +11153,7 @@ export class SheetsDatabaseManager {
           requiresApproval: false,
           approvalStatus: 'Approved',
           approvedBy: 'Direct Acceptance (No Approval Required)',
-          approvedAt: new Date().toISOString().split('T')[0],
+          approvedAt: ist.dateStr,
         };
         this.expenses.unshift(fuelExpRecord);
         this.postApprovedExpenseSideEffects(fuelExpRecord, true);
@@ -11251,13 +11381,46 @@ export class SheetsDatabaseManager {
     }
   }
 
+  private resolveExpenseFuelLitres(record: ExpenseRecord, veh?: Vehicle): number {
+    if (Number(record.fuelLitres) > 0) {
+      return Number(record.fuelLitres);
+    }
+    if (!String(record.category || '').toLowerCase().includes('fuel')) {
+      return 0;
+    }
+    const cleanedNarr = String(record.narration || '').replace(/fuel\s*\(\s*diesel\s*\/\s*cng\s*\)/gi, ' ');
+    const hasPetrol = /\bpetrol\b/i.test(cleanedNarr) || cleanedNarr.includes('पेट्रोल');
+    const hasCng = /\bcng\b/i.test(cleanedNarr) || cleanedNarr.includes('सीएनजी');
+    const hasDiesel = /\bdiesel\b/i.test(cleanedNarr) || cleanedNarr.includes('डीजल');
+    const narrMatchCount = Number(hasPetrol) + Number(hasCng) + Number(hasDiesel);
+    const narrFuelType =
+      narrMatchCount === 1
+        ? hasPetrol
+          ? 'Petrol'
+          : hasCng
+          ? 'CNG'
+          : 'Diesel'
+        : undefined;
+    const fuelType = record.fuelType || narrFuelType || veh?.fuelType;
+    if (!fuelType || fuelType === 'Electric') return 0;
+    const explicitRate = Number(record.fuelRate || 0);
+    const cfgRate =
+      fuelType === 'Petrol'
+        ? Number(this.config.fuelRates?.Petrol || 0)
+        : fuelType === 'CNG'
+        ? Number(this.config.fuelRates?.CNG || 0)
+        : Number(this.config.fuelRates?.Diesel || 0);
+    const rate = explicitRate > 0 ? explicitRate : cfgRate;
+    if (rate <= 0) return 0;
+    return Math.round((Number(record.amount || 0) / rate) * 100) / 100;
+  }
+
   private removeExpenseLogbookEffects(prevRecord: ExpenseRecord) {
     const expPrefix = `[Expense ${prevRecord.expenseNo}]`;
-    const prevLitres =
-      Number(prevRecord.fuelLitres) ||
-      (prevRecord.category.toLowerCase().includes('fuel')
-        ? Math.round((prevRecord.amount / 90) * 10) / 10
-        : 0);
+    const prevVeh = this.vehicles.find(
+      v => v.registrationNumber === prevRecord.vehicleNumber || v.id === prevRecord.vehicleId
+    );
+    const prevLitres = this.resolveExpenseFuelLitres(prevRecord, prevVeh);
 
     const keptLogs: OdometerLog[] = [];
     for (const log of this.odometerLogs) {
@@ -11341,11 +11504,7 @@ export class SheetsDatabaseManager {
         if (enteredOdo > prevOdo) {
           veh.currentOdometer = enteredOdo;
         }
-        const litresAdded =
-          Number(record.fuelLitres) ||
-          (record.category.toLowerCase().includes('fuel')
-            ? Math.round((record.amount / 90) * 10) / 10
-            : 0);
+        const litresAdded = this.resolveExpenseFuelLitres(record, veh);
 
         const existingLog = this.odometerLogs.find(
           l => l.vehicleNumber === veh.registrationNumber && l.date === record.date && !l.expenseId
@@ -11564,11 +11723,30 @@ export class SheetsDatabaseManager {
             : existing.driverName || veh?.assignedDriverName,
         odometerReading: hasOdometer ? Number(data.odometerReading) : undefined,
         fuelLitres: hasFuelLitres ? Number(data.fuelLitres) : undefined,
+        fuelType: nextVehNum === 'General' ? undefined : data.fuelType || existing.fuelType,
+        fuelRate:
+          nextVehNum === 'General'
+            ? undefined
+            : data.fuelRate !== undefined
+            ? Number(data.fuelRate) || undefined
+            : existing.fuelRate,
         amount: nextAmount,
         paymentMode: nextMode,
         vendorName: nextVendor,
         billNumber: data.billNumber !== undefined ? data.billNumber : existing.billNumber,
         billPhoto: resolvedBillPhoto,
+        billExtractedSummary:
+          data.billExtractedSummary !== undefined
+            ? data.billExtractedSummary
+            : data.removeBillPhoto
+            ? undefined
+            : existing.billExtractedSummary,
+        billScannedAt:
+          data.billScannedAt !== undefined
+            ? data.billScannedAt
+            : data.removeBillPhoto
+            ? undefined
+            : existing.billScannedAt,
         narration:
           data.narration !== undefined && data.narration.trim()
             ? data.narration.trim()
@@ -11614,6 +11792,142 @@ export class SheetsDatabaseManager {
         'School_Masters',
       ]);
       return updated;
+    });
+  }
+
+  private applyBillExtractionInMemory(
+    expenseId: string,
+    extraction: FuelBillExtractionResult,
+    options?: { savePumpRateToConfig?: boolean; updatedBy?: string }
+  ): { updated: ExpenseRecord; configUpdated: boolean } {
+    const cleanId = String(expenseId || '').trim();
+    const idx = this.expenses.findIndex(e => e.id === cleanId || e.expenseNo === cleanId);
+    if (idx < 0) {
+      throw new Error('Expense record not found.');
+    }
+
+    const existing = this.expenses[idx];
+    const prevSnapshot: ExpenseRecord = { ...existing };
+
+    const validFuelType =
+      extraction.fuelType === 'Diesel' ||
+      extraction.fuelType === 'Petrol' ||
+      extraction.fuelType === 'CNG'
+        ? extraction.fuelType
+        : undefined;
+
+    const extractedRate =
+      extraction.ratePerUnit && Number(extraction.ratePerUnit) > 0
+        ? Math.round(Number(extraction.ratePerUnit) * 100) / 100
+        : undefined;
+
+    const extractedQty =
+      extraction.quantity && Number(extraction.quantity) > 0
+        ? Math.round(Number(extraction.quantity) * 100) / 100
+        : extractedRate && existing.amount > 0
+        ? Math.round((existing.amount / extractedRate) * 100) / 100
+        : undefined;
+
+    const nextBillNumber =
+      (!existing.billNumber || !existing.billNumber.trim()) && extraction.billNumber
+        ? extraction.billNumber
+        : existing.billNumber;
+
+    const scannedAt = new Date().toISOString();
+
+    this.removeExpenseLogbookEffects(prevSnapshot);
+
+    const updated: ExpenseRecord = {
+      ...existing,
+      fuelType: validFuelType || existing.fuelType,
+      fuelRate: extractedRate || existing.fuelRate,
+      fuelLitres: extractedQty || existing.fuelLitres,
+      billNumber: nextBillNumber,
+      billExtractedSummary: extraction.summary,
+      billScannedAt: scannedAt,
+    };
+
+    this.expenses[idx] = updated;
+
+    if (updated.approvalStatus === 'Approved') {
+      this.postApprovedExpenseSideEffects(updated, false);
+    }
+
+    let configUpdated = false;
+    if (options?.savePumpRateToConfig && validFuelType && extractedRate) {
+      this.config.fuelRates = {
+        ...(this.config.fuelRates || {}),
+        [validFuelType]: extractedRate,
+        location: this.config.fuelRates?.location || 'Chainpur, Siwan, Bihar 841203',
+        updatedAt: scannedAt,
+        updatedBy: options.updatedBy || 'Bill Reader',
+      };
+      configUpdated = true;
+    }
+
+    return { updated, configUpdated };
+  }
+
+  public async applyBatchFuelBillExtractions(
+    items: Array<{ expenseId: string; extraction: FuelBillExtractionResult }>,
+    options?: { saveLatestPumpRatesToConfig?: boolean; updatedBy?: string }
+  ): Promise<{ updatedExpenses: ExpenseRecord[]; updatedRates: Partial<Record<'Diesel' | 'Petrol' | 'CNG', number>> }> {
+    return this.enqueueWrite(async () => {
+      const updatedExpenses: ExpenseRecord[] = [];
+      const latestRateByType: Record<string, { date: string; rate: number }> = {};
+
+      for (const item of items) {
+        const { updated } = this.applyBillExtractionInMemory(item.expenseId, item.extraction, {
+          savePumpRateToConfig: false,
+        });
+        updatedExpenses.push(updated);
+
+        if (
+          options?.saveLatestPumpRatesToConfig &&
+          (item.extraction.fuelType === 'Diesel' ||
+            item.extraction.fuelType === 'Petrol' ||
+            item.extraction.fuelType === 'CNG') &&
+          item.extraction.ratePerUnit &&
+          item.extraction.ratePerUnit > 0
+        ) {
+          const ft = item.extraction.fuelType;
+          const dt = item.extraction.billDate || updated.date || '';
+          const prev = latestRateByType[ft];
+          if (!prev || dt >= prev.date) {
+            latestRateByType[ft] = {
+              date: dt,
+              rate: Math.round(Number(item.extraction.ratePerUnit) * 100) / 100,
+            };
+          }
+        }
+      }
+
+      const updatedRates: Partial<Record<'Diesel' | 'Petrol' | 'CNG', number>> = {};
+      if (Object.keys(latestRateByType).length > 0) {
+        const nextFuelRates = { ...(this.config.fuelRates || {}) };
+        for (const ft of ['Diesel', 'Petrol', 'CNG'] as const) {
+          if (latestRateByType[ft]) {
+            nextFuelRates[ft] = latestRateByType[ft].rate;
+            updatedRates[ft] = latestRateByType[ft].rate;
+          }
+        }
+        nextFuelRates.location = nextFuelRates.location || 'Chainpur, Siwan, Bihar 841203';
+        nextFuelRates.updatedAt = new Date().toISOString();
+        nextFuelRates.updatedBy = options?.updatedBy || 'Attached Bill Reader';
+        this.config.fuelRates = nextFuelRates;
+      }
+
+      const tabsToSync = [
+        'Expenses_Fuel_Ledger',
+        'Daily_Log_Book_24H',
+        'Vehicles_Master',
+      ];
+      if (Object.keys(updatedRates).length > 0) {
+        tabsToSync.push('School_Masters');
+      }
+
+      await this.internalSyncToGoogleSheets(false, tabsToSync);
+      return { updatedExpenses, updatedRates };
     });
   }
 
