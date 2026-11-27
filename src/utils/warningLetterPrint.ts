@@ -216,9 +216,13 @@ function buildResolvedLetterContent(
   const formattedFine = lateFine.toLocaleString('en-IN');
   const formattedTotal = totalPayable.toLocaleString('en-IN');
   const schoolDisplay = schoolName || 'Narendra Edu Valley';
-  const wardName = member.name || 'Student';
+  const wardName = member.name || (lang === 'hi' ? 'छात्र/छात्रा' : 'Student');
   const admNo = member.admissionNo || '-';
-  const classSec = `${member.class || '-'}-${member.section || '-'}`;
+  const cleanClassStr =
+    lang === 'hi'
+      ? String(member.class || '-').replace(/^class\s+/i, '').trim() || '-'
+      : member.class || '-';
+  const classSec = `${cleanClassStr}-${member.section || '-'}`;
   const stopName = member.pickupDropStopName || member.villageName || (lang === 'hi' ? 'निर्धारित स्टॉप' : 'Assigned Stop');
   const routeName = member.routeCode || (lang === 'hi' ? 'निर्धारित रूट' : 'Assigned Route');
 
@@ -232,30 +236,30 @@ function buildResolvedLetterContent(
 
     const subjectText =
       stage === 'letter_3'
-        ? `परिवहन सुविधा दिनांक ${formattedStopDate} से बंद (Withdrawn) कर दी गई है — कृपया अपने पाल्य को स्वयं विद्यालय लाएँ (${periodStr})`
+        ? `परिवहन सुविधा दिनांक ${formattedStopDate} से बंद कर दी गई है — कृपया अपने पाल्य को स्वयं विद्यालय लाएँ (${periodStr})`
         : stage === 'letter_2'
         ? `अंतिम चेतावनी: बकाया परिवहन शुल्क (${periodStr}) जमा न होने पर दिनांक ${formattedStopDate} से परिवहन सुविधा बंद कर दी जाएगी`
         : `लंबित परिवहन शुल्क बकाया (${periodStr}) — जमा करने की तिथि: ${formattedDeadline}`;
 
     const introParagraph =
       stage === 'letter_3'
-        ? `आपको सूचित किया जाता है कि आपके पाल्य ${wardName} (प्रवेश संख्या: ${admNo}, कक्षा: ${classSec}, स्टॉप: ${stopName}) के लंबित परिवहन शुल्क का लगातार भुगतान न किए जाने के कारण विद्यालय परिवहन विभाग द्वारा परिवहन सेवा समाप्त कर दी गई है। बकाया परिवहन शुल्क का विस्तृत विवरण नीचे दिया गया है:`
+        ? `आपको सूचित किया जाता है कि आपके पाल्य ${wardName} (प्रवेश संख्या: ${admNo}, कक्षा: ${classSec}, स्टॉप: ${stopName}) के लंबित परिवहन शुल्क का लगातार भुगतान न किए जाने के कारण विद्यालय परिवहन विभाग द्वारा परिवहन सेवा बंद कर दी गई है। बकाया परिवहन शुल्क का विस्तृत विवरण नीचे दिया गया है:`
         : stage === 'letter_2'
-        ? `पूर्व सूचना एवं स्मरण के बावजूद आपके पाल्य ${wardName} (प्रवेश संख्या: ${admNo}, कक्षा: ${classSec}, स्टॉप: ${stopName}) का लंबित परिवहन शुल्क अभी तक जमा नहीं किया गया है। कृपया इसे विद्यालय परिवहन विभाग की ओर से अंतिम और कठोर चेतावनी समझें। बकाया परिवहन शुल्क का विवरण नीचे दिया गया है:`
+        ? `पूर्व सूचना एवं स्मरण के बावजूद आपके पाल्य ${wardName} (प्रवेश संख्या: ${admNo}, कक्षा: ${classSec}, स्टॉप: ${stopName}) का लंबित परिवहन शुल्क अभी तक जमा नहीं किया गया है। कृपया इसे विद्यालय परिवहन विभाग की ओर से अंतिम चेतावनी सूचना समझें। बकाया परिवहन शुल्क का विवरण नीचे दिया गया है:`
         : `यह पत्र विद्यालय परिवहन विभाग की ओर से आपके पाल्य ${wardName} (प्रवेश संख्या: ${admNo}, कक्षा: ${classSec}, स्टॉप: ${stopName}) के लंबित परिवहन शुल्क बकाया के संबंध में एक आधिकारिक स्मरण पत्र है। बकाया परिवहन शुल्क का विस्तृत विवरण नीचे दिया गया है:`;
 
     const primaryNoticeParagraph =
       stage === 'letter_3'
-        ? `परिवहन सुविधा बंद सूचना: आपके पाल्य की विद्यालय परिवहन सुविधा दिनांक ${formattedStopDate} से बंद / वापस (Withdrawn) कर दी गई है। कृपया अपने पाल्य को स्वयं अपने साथ विद्यालय लेकर आएँ और ले जाएँ (अपनी स्वयं की व्यवस्था से), क्योंकि परिवहन सुविधा समाप्त कर दी गई है।`
+        ? `परिवहन सुविधा बंद सूचना: आपके पाल्य की विद्यालय परिवहन सुविधा दिनांक ${formattedStopDate} से बंद एवं वापस ले ली गई है। कृपया अपने पाल्य को स्वयं अपने साथ विद्यालय लेकर आएँ और ले जाएँ (अपनी स्वयं की व्यवस्था से), क्योंकि परिवहन सुविधा समाप्त कर दी गई है।`
         : stage === 'letter_2'
-        ? `कठोर चेतावनी: यदि कुल देय बकाया राशि ₹${formattedTotal} दिनांक ${formattedStopDate} से पहले पूरी तरह जमा नहीं की गई, तो दिनांक ${formattedStopDate} से आपके पाल्य की विद्यालय परिवहन सुविधा बिना किसी अन्य सूचना के तत्काल प्रभाव से बंद कर दी जाएगी।`
+        ? `अंतिम सूचना: यदि कुल देय बकाया राशि ₹${formattedTotal} दिनांक ${formattedDeadline} तक या उससे पहले जमा नहीं की गई, तो दिनांक ${formattedStopDate} से आपके पाल्य की विद्यालय परिवहन सुविधा बिना किसी अन्य सूचना के बंद कर दी जाएगी।`
         : `परिवहन सुविधा के निलंबन से बचने के लिए कृपया कुल देय राशि ₹${formattedTotal} दिनांक ${formattedDeadline} या उससे पहले अनिवार्य रूप से जमा करें।`;
 
     const secondaryNoteParagraph =
       stage === 'letter_3'
-        ? `जब तक कुल लंबित बकाया ₹${formattedTotal} का पूरा भुगतान कर विद्यालय कार्यालय से पुनः परिवहन अनुमति प्राप्त नहीं की जाती, तब तक विद्यालय वाहन द्वारा पिकअप या ड्रॉप सेवा उपलब्ध नहीं होगी।`
+        ? `जब तक कुल लंबित बकाया ₹${formattedTotal} का पूरा भुगतान कर विद्यालय कार्यालय से पुनः परिवहन अनुमति प्राप्त नहीं की जाती, तब तक विद्यालय वाहन द्वारा पिकअप या ड्रॉप सेवा उपलब्ध नहीं होगी। यदि कोई वास्तविक आर्थिक कठिनाई हो, तो कृपया लिखित आवेदन के साथ स्वयं विद्यालय कार्यालय में संपर्क करें।`
         : stage === 'letter_2'
-        ? `कृपया असुविधा से बचने हेतु दिनांक ${formattedDeadline} (अंतिम तिथि ${formattedStopDate} से पूर्व) तक विद्यालय कार्यालय में पूरा शुल्क जमा कर रसीद प्राप्त करें। ${formattedStopDate} से बस/वाहन स्टॉप पर नहीं रुकेगा।`
+        ? `कृपया असुविधा से बचने हेतु दिनांक ${formattedDeadline} (${formattedStopDate} से पूर्व) तक विद्यालय कार्यालय में पूरा शुल्क जमा कर रसीद प्राप्त करें; दिनांक ${formattedStopDate} से वाहन स्टॉप पर नहीं रुकेगा। यदि कोई वास्तविक आर्थिक कठिनाई हो, तो कृपया जमा तिथि (${formattedDeadline}) से पूर्व लिखित आवेदन के साथ स्वयं विद्यालय कार्यालय में संपर्क करें।`
         : `यदि कोई वास्तविक आर्थिक कठिनाई हो, तो कृपया जमा तिथि (${formattedDeadline}) से पूर्व लिखित आवेदन के साथ स्वयं विद्यालय कार्यालय में संपर्क करें।`;
 
     const ackBodyText =
@@ -275,7 +279,7 @@ function buildResolvedLetterContent(
       stage,
       lang,
       schoolDisplay,
-      deptHeading: `${schoolDisplay} — परिवहन विभाग (TRANSPORT DEPARTMENT)`,
+      deptHeading: `${schoolDisplay} — परिवहन विभाग`,
       letterTitle,
       titleColorHex: stage === 'letter_3' ? '#7f1d1d' : stage === 'letter_2' ? '#991b1b' : '#b91c1c',
       titleColorRgb: stage === 'letter_3' ? [127, 29, 29] : stage === 'letter_2' ? [153, 27, 27] : [185, 28, 28],
@@ -308,10 +312,10 @@ function buildResolvedLetterContent(
       primaryNoticeParagraph,
       secondaryNoteParagraph,
       regardsLabel: 'भवदीय,',
-      coordinatorLabel: 'परिवहन समन्वयक (Transport Coordinator)',
+      coordinatorLabel: 'परिवहन समन्वयक',
       sealSignLabel: '(कार्यालय मुहर एवं हस्ताक्षर)',
       cutLineText: '✂ ------------------------ पावती रसीद (यहाँ से फाड़कर कार्यालय में जमा करें) ------------------------',
-      ackTitle: 'पावती रसीद / ACKNOWLEDGEMENT SLIP (अभिभावक द्वारा हस्ताक्षरित कर परिवहन कार्यालय में जमा करें)',
+      ackTitle: 'पावती रसीद (अभिभावक द्वारा हस्ताक्षरित कर परिवहन कार्यालय में जमा करें)',
       ackBodyText,
       ackGuardianLabel: 'अभिभावक का नाम:',
       ackPhoneLabel: 'मोबाइल नंबर:',
@@ -347,21 +351,21 @@ function buildResolvedLetterContent(
     stage === 'letter_3'
       ? `Please be informed that due to continued non-payment of pending transport fee dues of your ward ${wardName} (Admission No: ${admNo}, Class: ${classSec}, Stop: ${stopName}), the School Transport Department has discontinued your ward's transport facility. The statement of unpaid dues is given below:`
       : stage === 'letter_2'
-      ? `Despite earlier reminder notices, the pending transport fee dues of your ward ${wardName} (Admission No: ${admNo}, Class: ${classSec}, Stop: ${stopName}) have not been cleared till date. Please treat this as a STRICT FINAL WARNING from the School Transport Department. The detailed statement of unpaid dues is given below:`
+      ? `Despite earlier reminder notices, the pending transport fee dues of your ward ${wardName} (Admission No: ${admNo}, Class: ${classSec}, Stop: ${stopName}) have not been cleared till date. Please treat this as a final warning notice from the School Transport Department. The detailed statement of unpaid dues is given below:`
       : `This is an official reminder from the School Transport Department regarding the pending transport fee dues of your ward ${wardName} (Admission No: ${admNo}, Class: ${classSec}, Stop: ${stopName}). The detailed statement of unpaid transport dues is given below:`;
 
   const primaryNoticeParagraph =
     stage === 'letter_3'
       ? `TRANSPORT FACILITY STOPPED / WITHDRAWN: Your ward's school transport facility is STOPPED with effect from ${formattedStopDate}. Kindly bring your ward to school along with you (at your own arrangement), as the transport facility has been withdrawn.`
       : stage === 'letter_2'
-      ? `FINAL WARNING NOTICE: If the total payable amount of Rs. ${formattedTotal} is NOT deposited in full before ${formattedStopDate}, the school transport facility for your ward WILL BE STOPPED WITH EFFECT FROM ${formattedStopDate} without any further notice.`
+      ? `FINAL NOTICE: If the total payable amount of Rs. ${formattedTotal} is NOT deposited in full on or before ${formattedDeadline}, the school transport facility for your ward WILL BE STOPPED WITH EFFECT FROM ${formattedStopDate} without any further notice.`
       : `Kindly deposit the total payable amount of Rs. ${formattedTotal} on or before ${formattedDeadline} to avoid suspension of transport facility.`;
 
   const secondaryNoteParagraph =
     stage === 'letter_3'
-      ? `School transport pickup and drop service will remain suspended until all pending transport dues of Rs. ${formattedTotal} are cleared in full and fresh reinstatement approval is issued by the transport office.`
+      ? `School transport pickup and drop service will remain suspended until all pending transport dues of Rs. ${formattedTotal} are cleared in full and fresh reinstatement approval is issued by the transport office. In case of any genuine economic difficulty, please visit the school office in person with a written application.`
       : stage === 'letter_2'
-      ? `You are strictly advised to deposit the overdue amount on or before ${formattedDeadline} (prior to stoppage date ${formattedStopDate}). From ${formattedStopDate} onwards, the transport vehicle will not stop for pickup or drop.`
+      ? `You are advised to deposit the overdue amount on or before ${formattedDeadline} (prior to stoppage date ${formattedStopDate}), as from ${formattedStopDate} onwards the transport vehicle will not stop for pickup or drop. In case of any genuine economic difficulty, please visit the school office in person with a written application before the deposit date (${formattedDeadline}).`
       : `In case of any genuine economic difficulty, please visit the school office in person with a written application before the deposit date (${formattedDeadline}).`;
 
   const ackBodyText =
@@ -452,6 +456,7 @@ export function buildSingleWarningLetterPageXhtml(
   const routeFallback = c.lang === 'hi' ? 'निर्धारित रूट' : 'Assigned Route';
   const issueYear = (item.issueDate || new Date().toISOString().slice(0, 10)).slice(0, 4) || '2026';
 
+  const openBalLabel = c.lang === 'hi' ? 'प्रारंभिक बकाया' : 'OPEN-BAL';
   const duesRowsHtml =
     c.stuInvoices.length > 0
       ? c.stuInvoices
@@ -471,7 +476,7 @@ export function buildSingleWarningLetterPageXhtml(
       : `
                 <tr>
                   <td>${escapeHtml(c.periodStr)}</td>
-                  <td>OPEN-BAL</td>
+                  <td>${escapeHtml(openBalLabel)}</td>
                   <td style="text-align:right;">${escapeHtml(c.currencyPrefix)}${member.monthlyFee || c.baseDues}</td>
                   <td style="text-align:right;">${escapeHtml(c.currencyPrefix)}${member.concessionAmount || 0}</td>
                   <td style="text-align:right;">${escapeHtml(c.currencyPrefix)}0</td>
