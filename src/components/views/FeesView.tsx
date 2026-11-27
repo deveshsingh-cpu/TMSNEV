@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import {
   FeeInvoice, FeeReceipt, FollowUpRecord, WarningLetter,
+  WarningLetterStage, WarningLetterLanguage,
   StudentMember, UserRole, MemberTypeMaster, CampusMaster, Route, Vehicle
 } from '../../types/index.js';
 import { PrintExportToolbar, FilterPopover, openHtmlPrintPreview } from '../../utils/exportPrint.js';
@@ -15,6 +16,9 @@ import {
   getDefault30thOfCurrentMonth,
   formatLetterDateDisplay,
   getApplicableLateFineForStudent,
+  resolveWarningLetterStage,
+  resolveWarningLetterLanguage,
+  getWarningLevelForStage,
   downloadWarningLettersPdf as saveWarningLettersPdfFile,
   printWarningCumReminderLetters as openWarningLettersPrintPreview,
 } from '../../utils/warningLetterPrint.js';
@@ -713,6 +717,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [letterDepositDate, setLetterDepositDate] = useState<string>(() =>
     getDefault30thOfCurrentMonth(todayStr)
   );
+  const [letterStage, setLetterStage] = useState<WarningLetterStage>('letter_1');
+  const [letterLanguage, setLetterLanguage] = useState<WarningLetterLanguage>('en');
+  const [letterStopDate, setLetterStopDate] = useState<string>(() =>
+    getDefault30thOfCurrentMonth(todayStr)
+  );
   const [includeApplicableLateFine, setIncludeApplicableLateFine] = useState<boolean>(true);
   const [isIssuingBulkLetters, setIsIssuingBulkLetters] = useState<boolean>(false);
   const [issuingMemberId, setIssuingMemberId] = useState<string | null>(null);
@@ -723,10 +732,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [warnStudentId, setWarnStudentId] = useState(
     scopedStudents.find((s) => s.balanceDue > 0)?.id || scopedStudents[0]?.id || ''
   );
-  const [warnLevel, setWarnLevel] = useState<WarningLetter['warningLevel']>(
-    'Level 2: Urgent Notice'
-  );
+  const [warnLetterStage, setWarnLetterStage] = useState<WarningLetterStage>('letter_1');
+  const [warnLanguage, setWarnLanguage] = useState<WarningLetterLanguage>('en');
   const [warnDeadline, setWarnDeadline] = useState<string>(() =>
+    getDefault30thOfCurrentMonth(todayStr)
+  );
+  const [warnStopDate, setWarnStopDate] = useState<string>(() =>
     getDefault30thOfCurrentMonth(todayStr)
   );
   const [warnSentVia, setWarnSentVia] = useState<WarningLetter['sentVia']>('Printed Slip');
@@ -739,6 +750,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
       invoices,
       schoolName,
       selectedMonth,
+      letterStage,
+      letterLanguage,
+      effectiveStopDate: letterStopDate,
       customFilename,
     });
 
@@ -747,6 +761,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
       invoices,
       schoolName,
       selectedMonth,
+      letterStage,
+      letterLanguage,
+      effectiveStopDate: letterStopDate,
     });
 
   const handlePrintSingleReceipt = (rec: FeeReceipt, autoPrint = false) => {
@@ -1000,13 +1017,18 @@ export const FeesView: React.FC<FeesViewProps> = ({
   };
 
   const handleIssueSingleMemberLetterDirect = async (st: StudentMember) => {
+    const depositDt = letterDepositDate || getDefault30thOfCurrentMonth(todayStr);
+    const stopDt = letterStopDate || depositDt;
     if (isReadOnly) {
       printWarningCumReminderLetters([
         {
           member: st,
           letterNo: `PREVIEW-${st.admissionNo}`,
           issueDate: todayStr,
-          deadlineDate: letterDepositDate || getDefault30thOfCurrentMonth(todayStr),
+          deadlineDate: depositDt,
+          effectiveStopDate: letterStage !== 'letter_1' ? stopDt : undefined,
+          letterStage,
+          letterLanguage,
           baseOverdueAmount: st.balanceDue,
           lateFineAmount: includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0,
         },
@@ -1016,7 +1038,6 @@ export const FeesView: React.FC<FeesViewProps> = ({
     if (!onIssueWarningLetter) return;
     try {
       setIssuingMemberId(st.id);
-      const depositDt = letterDepositDate || getDefault30thOfCurrentMonth(todayStr);
       const baseDues = Math.max(0, Number(st.balanceDue) || 0);
       const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
       const totalPayable = baseDues + fine;
@@ -1038,15 +1059,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
         overdueAmount: totalPayable,
         periodOverdue: `Pending Dues up to ${selectedMonth}`,
         deadlineDate: depositDt,
-        proposedSuspensionDate: depositDt,
-        warningLevel: 'Level 2: Urgent Notice',
+        proposedSuspensionDate: letterStage !== 'letter_1' ? stopDt : depositDt,
+        effectiveStopDate: letterStage !== 'letter_1' ? stopDt : undefined,
+        letterStage,
+        letterLanguage,
+        warningLevel: getWarningLevelForStage(letterStage),
         sentVia: 'Printed Slip',
         issuedBy: `${currentRole} (${stuCamp} Campus)`,
       });
 
+      const stageTag =
+        letterStage === 'letter_3' ? 'Letter 3 (Transport Stopped)' : letterStage === 'letter_2' ? 'Letter 2 (Final Stoppage Notice)' : 'Letter 1 (Reminder)';
       setStatusMessage({
         type: 'success',
-        text: `Issued Warning cum Reminder Letter ${created?.letterNo || ''} for ${st.name} (Deposit Date: ${formatLetterDateDisplay(depositDt)}). Opening Print / Save as PDF preview...`,
+        text: `Issued ${stageTag} [${letterLanguage === 'hi' ? 'Hindi' : 'English'}] ${created?.letterNo || ''} for ${st.name}. Opening Print / Save as PDF preview...`,
       });
 
       printWarningCumReminderLetters([
@@ -1055,6 +1081,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
           letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
           issueDate: todayStr,
           deadlineDate: depositDt,
+          effectiveStopDate: letterStage !== 'letter_1' ? stopDt : undefined,
+          letterStage,
+          letterLanguage,
           baseOverdueAmount: baseDues,
           lateFineAmount: fine,
         },
@@ -1062,7 +1091,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
     } catch (err: any) {
       setStatusMessage({
         type: 'warning',
-        text: err?.message || 'Failed to issue Warning cum Reminder Letter.',
+        text: err?.message || 'Failed to issue Warning Letter.',
       });
     } finally {
       setIssuingMemberId(null);
@@ -1077,12 +1106,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
         text:
           parsedMinDuesThreshold !== null
             ? `No members match the current dues filter (${letterDuesCompareMode === 'gt' ? 'Above' : 'At least'} ₹${parsedMinDuesThreshold.toLocaleString('en-IN')}).`
-            : 'No members currently have pending fees for bulk Warning cum Reminder Letter generation.',
+            : 'No members currently have pending fees for bulk Warning Letter generation.',
       });
       return;
     }
 
     const depositDt = letterDepositDate || getDefault30thOfCurrentMonth(todayStr);
+    const stopDt = letterStopDate || depositDt;
 
     if (isReadOnly) {
       const previewTargets: PrintableLetterTarget[] = overdueMembers.map((st, i) => ({
@@ -1090,6 +1120,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
         letterNo: `PREVIEW-${String(i + 1).padStart(3, '0')}`,
         issueDate: todayStr,
         deadlineDate: depositDt,
+        effectiveStopDate: letterStage !== 'letter_1' ? stopDt : undefined,
+        letterStage,
+        letterLanguage,
         baseOverdueAmount: Math.max(0, Number(st.balanceDue) || 0),
         lateFineAmount: includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0,
       }));
@@ -1099,6 +1132,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
     try {
       setIsIssuingBulkLetters(true);
+      const resolvedLevel = getWarningLevelForStage(letterStage);
       const entriesPayload: Partial<WarningLetter>[] = overdueMembers.map((st) => {
         const baseDues = Math.max(0, Number(st.balanceDue) || 0);
         const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
@@ -1120,8 +1154,11 @@ export const FeesView: React.FC<FeesViewProps> = ({
           overdueAmount: totalPayable,
           periodOverdue: `Pending Dues up to ${selectedMonth}`,
           deadlineDate: depositDt,
-          proposedSuspensionDate: depositDt,
-          warningLevel: 'Level 2: Urgent Notice',
+          proposedSuspensionDate: letterStage !== 'letter_1' ? stopDt : depositDt,
+          effectiveStopDate: letterStage !== 'letter_1' ? stopDt : undefined,
+          letterStage,
+          letterLanguage,
+          warningLevel: resolvedLevel,
           sentVia: 'Printed Slip',
           issuedBy: `${currentRole} (${stuCamp} Campus)`,
         };
@@ -1148,20 +1185,25 @@ export const FeesView: React.FC<FeesViewProps> = ({
             `WL-${todayStr.slice(0, 4)}-${String(i + 1).padStart(3, '0')}`,
           issueDate: todayStr,
           deadlineDate: depositDt,
+          effectiveStopDate: letterStage !== 'letter_1' ? stopDt : undefined,
+          letterStage,
+          letterLanguage,
           baseOverdueAmount: baseDues,
           lateFineAmount: fine,
         };
       });
 
+      const stageTag =
+        letterStage === 'letter_3' ? 'Letter 3 (Transport Stopped)' : letterStage === 'letter_2' ? 'Letter 2 (Stoppage Notice)' : 'Letter 1 (Reminder)';
       setStatusMessage({
         type: 'success',
-        text: `Issued ${batchTargets.length} Warning cum Reminder Letter(s) with Deposit Date ${formatLetterDateDisplay(depositDt)}. Proceeding to Print / Save as PDF...`,
+        text: `Issued ${batchTargets.length} ${stageTag} [${letterLanguage === 'hi' ? 'Hindi' : 'English'}]. Proceeding to Print / Save as PDF...`,
       });
       printWarningCumReminderLetters(batchTargets);
     } catch (err: any) {
       setStatusMessage({
         type: 'warning',
-        text: err?.message || 'Failed to issue bulk Warning cum Reminder Letters.',
+        text: err?.message || 'Failed to issue bulk Warning Letters.',
       });
     } finally {
       setIsIssuingBulkLetters(false);
@@ -1371,6 +1413,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
     const st = scopedStudents.find((s) => s.id === warnStudentId);
     if (!st) return;
     const depositDt = warnDeadline || getDefault30thOfCurrentMonth(todayStr);
+    const stopDt = warnStopDate || depositDt;
     const baseDues = Math.max(0, Number(st.balanceDue) || 0);
     const fine = includeApplicableLateFine ? getApplicableLateFineForMember(st, todayStr) : 0;
     const totalPayable = baseDues + fine;
@@ -1392,22 +1435,38 @@ export const FeesView: React.FC<FeesViewProps> = ({
       overdueAmount: totalPayable,
       periodOverdue: `Pending Transport Dues (${selectedMonth})`,
       deadlineDate: depositDt,
-      proposedSuspensionDate: depositDt,
-      warningLevel: warnLevel,
+      proposedSuspensionDate: warnLetterStage !== 'letter_1' ? stopDt : depositDt,
+      effectiveStopDate: warnLetterStage !== 'letter_1' ? stopDt : undefined,
+      letterStage: warnLetterStage,
+      letterLanguage: warnLanguage,
+      warningLevel: getWarningLevelForStage(warnLetterStage),
       sentVia: warnSentVia,
       issuedBy: `${currentRole} (${stuCamp} Campus)`,
     });
     setIsWarningModalOpen(false);
-    printWarningCumReminderLetters([
+    openWarningLettersPrintPreview(
+      [
+        {
+          member: st,
+          letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
+          issueDate: todayStr,
+          deadlineDate: depositDt,
+          effectiveStopDate: warnLetterStage !== 'letter_1' ? stopDt : undefined,
+          letterStage: warnLetterStage,
+          letterLanguage: warnLanguage,
+          baseOverdueAmount: baseDues,
+          lateFineAmount: fine,
+        },
+      ],
       {
-        member: st,
-        letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
-        issueDate: todayStr,
-        deadlineDate: depositDt,
-        baseOverdueAmount: baseDues,
-        lateFineAmount: fine,
-      },
-    ]);
+        invoices,
+        schoolName,
+        selectedMonth,
+        letterStage: warnLetterStage,
+        letterLanguage: warnLanguage,
+        effectiveStopDate: warnLetterStage !== 'letter_1' ? stopDt : undefined,
+      }
+    );
   };
 
   const handleTriggerSuspension = async () => {
@@ -2163,6 +2222,46 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {/* Letter Stage Selector (Letter 1 / Letter 2 / Letter 3) */}
+                  <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-300 px-2.5 py-1.5 rounded-xl text-xs">
+                    <span className="font-bold text-amber-950 whitespace-nowrap">Letter Type:</span>
+                    <select
+                      value={letterStage}
+                      onChange={(e) => setLetterStage(e.target.value as WarningLetterStage)}
+                      className="font-bold text-slate-900 bg-transparent focus:outline-hidden cursor-pointer"
+                    >
+                      <option value="letter_1">Letter 1 — Reminder Notice</option>
+                      <option value="letter_2">Letter 2 — Strong Final Stop Notice</option>
+                      <option value="letter_3">Letter 3 — Transport Stopped / Withdrawn</option>
+                    </select>
+                  </div>
+
+                  {/* Language Selector (English / Hindi) */}
+                  <div className="inline-flex items-center rounded-xl border border-indigo-200 bg-indigo-50 p-0.5 text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setLetterLanguage('en')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        letterLanguage === 'en'
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'text-indigo-900 hover:bg-indigo-100'
+                      }`}
+                    >
+                      English
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLetterLanguage('hi')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        letterLanguage === 'hi'
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'text-indigo-900 hover:bg-indigo-100'
+                      }`}
+                    >
+                      हिन्दी (Hindi)
+                    </button>
+                  </div>
+
                   <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-xl text-xs">
                     <span className="font-bold text-rose-900">Deposit By:</span>
                     <input
@@ -2172,6 +2271,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
                       className="font-mono font-bold text-slate-900 bg-transparent focus:outline-hidden"
                     />
                   </div>
+
+                  {letterStage !== 'letter_1' && (
+                    <div className="flex items-center gap-1.5 bg-red-100 border border-red-300 px-2.5 py-1.5 rounded-xl text-xs">
+                      <span className="font-extrabold text-red-900 whitespace-nowrap">
+                        {letterStage === 'letter_2' ? 'Will Stop From:' : 'Stopped From:'}
+                      </span>
+                      <input
+                        type="date"
+                        value={letterStopDate}
+                        onChange={(e) => setLetterStopDate(e.target.value)}
+                        className="font-mono font-extrabold text-red-950 bg-transparent focus:outline-hidden"
+                      />
+                    </div>
+                  )}
 
                   <label className="inline-flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1.5 rounded-xl text-xs font-bold text-slate-800 cursor-pointer">
                     <input
@@ -2513,7 +2626,18 @@ export const FeesView: React.FC<FeesViewProps> = ({
                                   title="Open Member Profile -> Warning Letters to view or upload Acknowledgement Slip"
                                 >
                                   <div className="font-bold text-rose-950 flex items-center justify-between gap-2">
-                                    <span className="font-mono">{latestLetter.letterNo}</span>
+                                    <span className="font-mono flex items-center gap-1">
+                                      <span>{latestLetter.letterNo}</span>
+                                      <span className="px-1 py-0.5 rounded bg-white border border-rose-200 text-[9px] font-extrabold text-rose-800">
+                                        {resolveWarningLetterStage(latestLetter.letterStage, latestLetter.warningLevel) === 'letter_3'
+                                          ? 'L3'
+                                          : resolveWarningLetterStage(latestLetter.letterStage, latestLetter.warningLevel) === 'letter_2'
+                                          ? 'L2'
+                                          : 'L1'}
+                                        {' · '}
+                                        {resolveWarningLetterLanguage(latestLetter.letterLanguage) === 'hi' ? 'HI' : 'EN'}
+                                      </span>
+                                    </span>
                                     <span className="font-mono text-[10px] text-slate-500">
                                       {formatLetterDateDisplay(
                                         latestLetter.issueDate || latestLetter.date || ''
@@ -4863,28 +4987,49 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 </select>
               </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Warning Level *</label>
-                <select
-                  value={warnLevel}
-                  onChange={(e) => setWarnLevel(e.target.value as any)}
-                  className="w-full p-2.5 border border-slate-200 rounded-xl bg-white font-semibold"
-                >
-                  <option value="Level 1: Polite Reminder">Level 1: Polite Reminder</option>
-                  <option value="Level 2: Urgent Notice">Level 2: Urgent Notice</option>
-                  <option value="Level 3: Final Suspension Warning">Level 3: Final Suspension Warning</option>
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Letter Stage / Type *</label>
+                  <select
+                    value={warnLetterStage}
+                    onChange={(e) => setWarnLetterStage(e.target.value as WarningLetterStage)}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl bg-white font-semibold"
+                  >
+                    <option value="letter_1">Letter 1 — Reminder Notice</option>
+                    <option value="letter_2">Letter 2 — Strong Final Stoppage Notice</option>
+                    <option value="letter_3">Letter 3 — Transport Stopped / Withdrawn</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Letter Language *</label>
+                  <select
+                    value={warnLanguage}
+                    onChange={(e) => setWarnLanguage(e.target.value as WarningLetterLanguage)}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl bg-white font-semibold"
+                  >
+                    <option value="en">English</option>
+                    <option value="hi">हिन्दी (Hindi)</option>
+                  </select>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">
-                    Deposit Date (Default 30th) *
+                    {warnLetterStage === 'letter_1'
+                      ? 'Deposit Date (Default 30th) *'
+                      : warnLetterStage === 'letter_2'
+                      ? 'Will Stop Transport From *'
+                      : 'Stopped Effective Date *'}
                   </label>
                   <input
                     type="date"
-                    value={warnDeadline}
-                    onChange={(e) => setWarnDeadline(e.target.value)}
+                    value={warnLetterStage === 'letter_1' ? warnDeadline : warnStopDate}
+                    onChange={(e) =>
+                      warnLetterStage === 'letter_1'
+                        ? setWarnDeadline(e.target.value)
+                        : setWarnStopDate(e.target.value)
+                    }
                     className="w-full p-2.5 border border-rose-300 bg-rose-50/30 rounded-xl font-bold"
                     required
                   />

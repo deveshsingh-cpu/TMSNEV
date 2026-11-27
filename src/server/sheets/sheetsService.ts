@@ -651,6 +651,20 @@ export class SheetsDatabaseManager {
       const issueDate = String(parsedObj?.issueDate || parsedObj?.date || colIssueDate || '2026-11-17').trim();
       const deadlineDate = String(parsedObj?.deadlineDate || row[7] || '2026-11-30').trim();
 
+      const rawWarningLevel = String(parsedObj?.warningLevel || row[8] || 'Letter 1: Reminder Notice');
+      const inferredStage: WarningLetter['letterStage'] =
+        parsedObj?.letterStage === 'letter_1' ||
+        parsedObj?.letterStage === 'letter_2' ||
+        parsedObj?.letterStage === 'letter_3'
+          ? parsedObj.letterStage
+          : rawWarningLevel.includes('3') || rawWarningLevel.toLowerCase().includes('stopped')
+          ? 'letter_3'
+          : rawWarningLevel.toLowerCase().includes('stoppage')
+          ? 'letter_2'
+          : 'letter_1';
+      const inferredLang: WarningLetter['letterLanguage'] =
+        parsedObj?.letterLanguage === 'hi' ? 'hi' : 'en';
+
       results.push({
         ...(parsedObj as any),
         id,
@@ -666,7 +680,10 @@ export class SheetsDatabaseManager {
         overdueAmount,
         deadlineDate,
         proposedSuspensionDate: String(parsedObj?.proposedSuspensionDate || deadlineDate),
-        warningLevel: (parsedObj?.warningLevel || row[8] || 'Level 2: Urgent Notice') as WarningLetter['warningLevel'],
+        effectiveStopDate: parsedObj?.effectiveStopDate ? String(parsedObj.effectiveStopDate) : undefined,
+        letterStage: inferredStage,
+        letterLanguage: inferredLang,
+        warningLevel: rawWarningLevel as WarningLetter['warningLevel'],
         sentVia: (parsedObj?.sentVia || 'Printed Slip') as WarningLetter['sentVia'],
         issuedBy: String(parsedObj?.issuedBy || row[9] || 'Admin').trim(),
         acknowledgementSlip,
@@ -12887,6 +12904,29 @@ export class SheetsDatabaseManager {
     this.explicitlyDeletedIds.delete(newId);
     this.explicitlyDeletedIds.delete(newLetterNo);
 
+    const resolvedStage: WarningLetter['letterStage'] =
+      data.letterStage === 'letter_1' || data.letterStage === 'letter_2' || data.letterStage === 'letter_3'
+        ? data.letterStage
+        : data.warningLevel?.includes('3') || data.warningLevel?.toLowerCase().includes('stopped')
+        ? 'letter_3'
+        : data.warningLevel?.toLowerCase().includes('stoppage')
+        ? 'letter_2'
+        : 'letter_1';
+    const resolvedLanguage: WarningLetter['letterLanguage'] =
+      data.letterLanguage === 'hi' ? 'hi' : 'en';
+    const resolvedDeadline = data.deadlineDate || default30th;
+    const resolvedStopDate =
+      data.effectiveStopDate ||
+      (resolvedStage !== 'letter_1'
+        ? data.proposedSuspensionDate || resolvedDeadline
+        : undefined);
+    const defaultLevelByStage: WarningLetter['warningLevel'] =
+      resolvedStage === 'letter_3'
+        ? 'Letter 3: Transport Stopped / Withdrawn'
+        : resolvedStage === 'letter_2'
+        ? 'Letter 2: Final Stoppage Warning'
+        : 'Letter 1: Reminder Notice';
+
     return {
       id: newId,
       letterNo: newLetterNo,
@@ -12904,9 +12944,12 @@ export class SheetsDatabaseManager {
       lateFineAmount: lateFine,
       totalPayableAmount: totalPayable,
       periodOverdue: data.periodOverdue || 'Pending Transport Dues',
-      deadlineDate: data.deadlineDate || default30th,
-      proposedSuspensionDate: data.proposedSuspensionDate || data.deadlineDate || default30th,
-      warningLevel: data.warningLevel || 'Level 2: Urgent Notice',
+      deadlineDate: resolvedDeadline,
+      proposedSuspensionDate: data.proposedSuspensionDate || resolvedStopDate || resolvedDeadline,
+      effectiveStopDate: resolvedStopDate,
+      letterStage: resolvedStage,
+      letterLanguage: resolvedLanguage,
+      warningLevel: data.warningLevel || defaultLevelByStage,
       sentVia: data.sentVia || 'Printed Slip',
       issuedBy: data.issuedBy || 'Admin',
     };

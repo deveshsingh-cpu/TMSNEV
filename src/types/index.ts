@@ -861,6 +861,9 @@ export interface FollowUpRecord {
 
 export type FeeFollowUpRecord = FollowUpRecord;
 
+export type WarningLetterStage = 'letter_1' | 'letter_2' | 'letter_3';
+export type WarningLetterLanguage = 'en' | 'hi';
+
 export interface WarningLetter {
   id: string;
   letterNo: string;
@@ -875,7 +878,16 @@ export interface WarningLetter {
   lateFineAmount?: number;
   totalPayableAmount?: number;
   deadlineDate: string;
-  warningLevel: 'Level 1: Polite Reminder' | 'Level 2: Urgent Notice' | 'Level 3: Final Suspension Warning';
+  warningLevel:
+    | 'Level 1: Polite Reminder'
+    | 'Level 2: Urgent Notice'
+    | 'Level 3: Final Suspension Warning'
+    | 'Letter 1: Reminder Notice'
+    | 'Letter 2: Final Stoppage Warning'
+    | 'Letter 3: Transport Stopped / Withdrawn';
+  letterStage?: WarningLetterStage;
+  letterLanguage?: WarningLetterLanguage;
+  effectiveStopDate?: string;
   sentVia: 'SMS' | 'WhatsApp' | 'Registered Letter' | 'Printed Slip';
   issuedBy: string;
   issueDate?: string;

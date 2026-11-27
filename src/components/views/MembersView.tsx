@@ -8,7 +8,8 @@ import {
 import {
   StudentMember, CampusId, Village, Route, CampusMaster, MemberTypeMaster,
   FeeInvoice, FeeReceipt, TripAttendanceRecord, DocumentAttachment,
-  FeeFollowUpRecord, WarningLetter, DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest,
+  FeeFollowUpRecord, WarningLetter, WarningLetterStage, WarningLetterLanguage,
+  DisciplineRecord, Vehicle, UserRole, MemberLifecycleRequest,
   Employee, MemberComplaintRecord, ComplaintSeriousness
 } from '../../types/index.js';
 import { PrintExportToolbar, openHtmlPrintPreview, FilterPopover } from '../../utils/exportPrint.js';
@@ -18,6 +19,9 @@ import {
   formatLetterDateDisplay,
   getDefault30thOfCurrentMonth,
   getApplicableLateFineForStudent,
+  resolveWarningLetterStage,
+  resolveWarningLetterLanguage,
+  getWarningLevelForStage,
 } from '../../utils/warningLetterPrint.js';
 import { readFileCompressed } from '../../utils/fileCompressor.js';
 import { api } from '../../services/api.js';
@@ -283,6 +287,14 @@ export const MembersView: React.FC<MembersViewProps> = ({
   const [uploadingAckLetterId, setUploadingAckLetterId] = useState<string | null>(null);
   const [localAckOverrides, setLocalAckOverrides] = useState<Record<string, string>>({});
   const [issuingProfileLetter, setIssuingProfileLetter] = useState(false);
+  const [profileLetterStage, setProfileLetterStage] = useState<WarningLetterStage>('letter_1');
+  const [profileLetterLanguage, setProfileLetterLanguage] = useState<WarningLetterLanguage>('en');
+  const [profileLetterDepositDate, setProfileLetterDepositDate] = useState<string>(() =>
+    getDefault30thOfCurrentMonth(todayStr)
+  );
+  const [profileLetterStopDate, setProfileLetterStopDate] = useState<string>(() =>
+    getDefault30thOfCurrentMonth(todayStr)
+  );
 
   // Special Tab: Permission Letter & Suspension form state
   const [permUntilDate, setPermUntilDate] = useState<string>('');
@@ -1123,7 +1135,8 @@ export const MembersView: React.FC<MembersViewProps> = ({
     try {
       setIssuingProfileLetter(true);
       setFormError(null);
-      const depositDt = getDefault30thOfCurrentMonth(todayStr);
+      const depositDt = profileLetterDepositDate || getDefault30thOfCurrentMonth(todayStr);
+      const stopDt = profileLetterStopDate || depositDt;
       const baseDues = Math.max(0, Number(activeProfileMember.balanceDue) || 0);
       const fine = getApplicableLateFineForStudent(activeProfileMember, invoices, todayStr);
       const totalPayable = baseDues + fine;
@@ -1145,8 +1158,11 @@ export const MembersView: React.FC<MembersViewProps> = ({
         overdueAmount: totalPayable,
         periodOverdue: `Pending Dues up to ${todayStr.slice(0, 7)}`,
         deadlineDate: depositDt,
-        proposedSuspensionDate: depositDt,
-        warningLevel: 'Level 2: Urgent Notice',
+        proposedSuspensionDate: profileLetterStage !== 'letter_1' ? stopDt : depositDt,
+        effectiveStopDate: profileLetterStage !== 'letter_1' ? stopDt : undefined,
+        letterStage: profileLetterStage,
+        letterLanguage: profileLetterLanguage,
+        warningLevel: getWarningLevelForStage(profileLetterStage),
         sentVia: 'Printed Slip',
         issuedBy: `${currentRole} (${stuCampus} Campus)`,
       });
@@ -1158,6 +1174,9 @@ export const MembersView: React.FC<MembersViewProps> = ({
             letterNo: created?.letterNo || `WL-${todayStr.slice(0, 4)}-001`,
             issueDate: todayStr,
             deadlineDate: depositDt,
+            effectiveStopDate: profileLetterStage !== 'letter_1' ? stopDt : undefined,
+            letterStage: profileLetterStage,
+            letterLanguage: profileLetterLanguage,
             baseOverdueAmount: baseDues,
             lateFineAmount: fine,
           },
@@ -1165,10 +1184,13 @@ export const MembersView: React.FC<MembersViewProps> = ({
         {
           invoices,
           schoolName,
+          letterStage: profileLetterStage,
+          letterLanguage: profileLetterLanguage,
+          effectiveStopDate: profileLetterStage !== 'letter_1' ? stopDt : undefined,
         }
       );
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to issue Warning cum Reminder Letter.');
+      setFormError(err?.message || 'Failed to issue Warning Letter.');
     } finally {
       setIssuingProfileLetter(false);
     }
@@ -4002,42 +4024,110 @@ export const MembersView: React.FC<MembersViewProps> = ({
               {/* TAB: WARNING LETTERS & ACKNOWLEDGEMENT SLIPS (DATE-WISE HISTORY) */}
               {profileTab === 'warning_letters' && (
                 <div className="space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3 bg-rose-50/70 border border-rose-200 p-4 rounded-2xl">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-900">
-                        Date-wise Issued Warning Letters History ({memberWarningLetters.length})
-                      </h4>
-                      <p className="text-[11px] text-slate-600 mt-0.5">
-                        Date-wise record of all Warning cum Reminder letters issued to {activeProfileMember.name}. Use <strong>Upload Acknowledgement</strong> in front of each date to attach the signed acknowledgement photo.
-                      </p>
+                  <div className="bg-rose-50/70 border border-rose-200 p-4 rounded-2xl space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-900">
+                          Date-wise Issued Warning Letters History ({memberWarningLetters.length})
+                        </h4>
+                        <p className="text-[11px] text-slate-600 mt-0.5">
+                          Date-wise record of all Warning letters issued to {activeProfileMember.name}. Use <strong>Upload Acknowledgement</strong> in front of each date to attach the signed acknowledgement photo.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                        <span className="px-3 py-1.5 rounded-xl bg-white border border-rose-200 text-slate-800">
+                          Ack Uploaded:{' '}
+                          <span className="text-emerald-700">
+                            {
+                              memberWarningLetters.filter(w => {
+                                const u = localAckOverrides[w.id] || w.acknowledgementSlip || '';
+                                return Boolean(u) && u !== '[ATTACHMENT_STORED]';
+                              }).length
+                            }
+                          </span>{' '}
+                          / {memberWarningLetters.length}
+                        </span>
+                        {!isReadOnly && onIssueWarningLetter && (
+                          <button
+                            type="button"
+                            disabled={issuingProfileLetter}
+                            onClick={handleIssueWarningLetterFromProfile}
+                            className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-400 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                            <span>
+                              {issuingProfileLetter ? 'Issuing...' : '+ Issue & Print Letter'}
+                            </span>
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
-                      <span className="px-3 py-1.5 rounded-xl bg-white border border-rose-200 text-slate-800">
-                        Ack Uploaded:{' '}
-                        <span className="text-emerald-700">
-                          {
-                            memberWarningLetters.filter(w => {
-                              const u = localAckOverrides[w.id] || w.acknowledgementSlip || '';
-                              return Boolean(u) && u !== '[ATTACHMENT_STORED]';
-                            }).length
-                          }
-                        </span>{' '}
-                        / {memberWarningLetters.length}
-                      </span>
-                      {!isReadOnly && onIssueWarningLetter && (
-                        <button
-                          type="button"
-                          disabled={issuingProfileLetter}
-                          onClick={handleIssueWarningLetterFromProfile}
-                          className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-400 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <Printer className="w-3.5 h-3.5" />
-                          <span>
-                            {issuingProfileLetter ? 'Issuing...' : '+ Issue & Print Warning Letter'}
-                          </span>
-                        </button>
-                      )}
-                    </div>
+
+                    {!isReadOnly && onIssueWarningLetter && (
+                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-rose-200/70 text-xs">
+                        <div className="flex items-center gap-1.5 bg-white border border-amber-300 px-2.5 py-1.5 rounded-xl">
+                          <span className="font-bold text-amber-950">Letter Type:</span>
+                          <select
+                            value={profileLetterStage}
+                            onChange={e => setProfileLetterStage(e.target.value as WarningLetterStage)}
+                            className="font-bold text-slate-900 bg-transparent focus:outline-hidden cursor-pointer"
+                          >
+                            <option value="letter_1">Letter 1 — Reminder Notice</option>
+                            <option value="letter_2">Letter 2 — Strong Final Stop Notice</option>
+                            <option value="letter_3">Letter 3 — Transport Stopped / Withdrawn</option>
+                          </select>
+                        </div>
+
+                        <div className="inline-flex items-center rounded-xl border border-indigo-200 bg-white p-0.5 font-bold">
+                          <button
+                            type="button"
+                            onClick={() => setProfileLetterLanguage('en')}
+                            className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                              profileLetterLanguage === 'en'
+                                ? 'bg-indigo-600 text-white'
+                                : 'text-indigo-900 hover:bg-indigo-50'
+                            }`}
+                          >
+                            English
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setProfileLetterLanguage('hi')}
+                            className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                              profileLetterLanguage === 'hi'
+                                ? 'bg-indigo-600 text-white'
+                                : 'text-indigo-900 hover:bg-indigo-50'
+                            }`}
+                          >
+                            हिन्दी (Hindi)
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 bg-white border border-rose-200 px-2.5 py-1.5 rounded-xl">
+                          <span className="font-bold text-rose-900">Deposit By:</span>
+                          <input
+                            type="date"
+                            value={profileLetterDepositDate}
+                            onChange={e => setProfileLetterDepositDate(e.target.value)}
+                            className="font-mono font-bold text-slate-900 bg-transparent focus:outline-hidden"
+                          />
+                        </div>
+
+                        {profileLetterStage !== 'letter_1' && (
+                          <div className="flex items-center gap-1.5 bg-red-100 border border-red-300 px-2.5 py-1.5 rounded-xl">
+                            <span className="font-extrabold text-red-900">
+                              {profileLetterStage === 'letter_2' ? 'Will Stop From:' : 'Stopped From:'}
+                            </span>
+                            <input
+                              type="date"
+                              value={profileLetterStopDate}
+                              onChange={e => setProfileLetterStopDate(e.target.value)}
+                              className="font-mono font-extrabold text-red-950 bg-transparent focus:outline-hidden"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {formError && (
@@ -4055,7 +4145,7 @@ export const MembersView: React.FC<MembersViewProps> = ({
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-600 uppercase">
                             <th className="py-3 px-4">Issue Date &amp; Letter Ref</th>
-                            <th className="py-3 px-3">Overdue Dues &amp; Deposit By</th>
+                            <th className="py-3 px-3">Overdue Dues &amp; Effective Date</th>
                             <th className="py-3 px-3">Upload Acknowledgement (Photo)</th>
                             <th className="py-3 px-3">Issued By</th>
                             <th className="py-3 px-4 text-right">Letter Print / PDF</th>
@@ -4083,14 +4173,27 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                 ackUrl.toLowerCase().endsWith('.pdf'));
                             const isUploadingThis = uploadingAckLetterId === wl.id;
                             const issueDateIso = wl.issueDate || wl.date || todayStr;
+                            const resolvedWlStage = resolveWarningLetterStage(
+                              wl.letterStage,
+                              wl.warningLevel
+                            );
+                            const resolvedWlLang = resolveWarningLetterLanguage(wl.letterLanguage);
+                            const resolvedWlStopDate =
+                              wl.effectiveStopDate ||
+                              (resolvedWlStage !== 'letter_1'
+                                ? wl.proposedSuspensionDate || wl.deadlineDate
+                                : undefined);
                             const letterTarget = {
                               member: activeProfileMember,
                               letterNo: wl.letterNo,
                               issueDate: issueDateIso,
                               deadlineDate:
-                                wl.proposedSuspensionDate ||
                                 wl.deadlineDate ||
+                                wl.proposedSuspensionDate ||
                                 getDefault30thOfCurrentMonth(issueDateIso),
+                              effectiveStopDate: resolvedWlStopDate,
+                              letterStage: resolvedWlStage,
+                              letterLanguage: resolvedWlLang,
                               baseOverdueAmount: recordedBase,
                               lateFineAmount: recordedFine,
                             };
@@ -4101,8 +4204,17 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                   <div className="font-mono font-extrabold text-slate-900 text-xs">
                                     {formatLetterDateDisplay(issueDateIso)}
                                   </div>
-                                  <div className="font-mono font-bold text-[11px] text-rose-700 mt-0.5">
-                                    {wl.letterNo}
+                                  <div className="font-mono font-bold text-[11px] text-rose-700 mt-0.5 flex flex-wrap items-center gap-1">
+                                    <span>{wl.letterNo}</span>
+                                    <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-300 text-[9px] font-extrabold text-slate-800">
+                                      {resolvedWlStage === 'letter_3'
+                                        ? 'Letter 3 (Stopped)'
+                                        : resolvedWlStage === 'letter_2'
+                                        ? 'Letter 2 (Final Stop)'
+                                        : 'Letter 1'}
+                                      {' · '}
+                                      {resolvedWlLang === 'hi' ? 'हिन्दी' : 'EN'}
+                                    </span>
                                   </div>
                                 </td>
                                 <td className="py-3 px-3">
@@ -4114,9 +4226,16 @@ export const MembersView: React.FC<MembersViewProps> = ({
                                     {recordedFine > 0 ? ` + Fine: ₹${recordedFine}` : ''}
                                   </div>
                                   <div className="text-[10px] font-mono font-semibold text-slate-700 mt-0.5">
-                                    Deposit By:{' '}
+                                    {resolvedWlStage === 'letter_3'
+                                      ? 'Stopped From:'
+                                      : resolvedWlStage === 'letter_2'
+                                      ? 'Will Stop From:'
+                                      : 'Deposit By:'}{' '}
                                     {formatLetterDateDisplay(
-                                      wl.proposedSuspensionDate || wl.deadlineDate || ''
+                                      resolvedWlStopDate ||
+                                        wl.deadlineDate ||
+                                        wl.proposedSuspensionDate ||
+                                        ''
                                     )}
                                   </div>
                                 </td>
