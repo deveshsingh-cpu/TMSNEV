@@ -188,7 +188,9 @@ export function openHtmlPrintPreview(
         html: string;
         filename?: string;
         autoPrint?: boolean;
-        onSavePdf?: () => void;
+        onSavePdf?: (
+          onProgress?: (current: number, total: number) => void
+        ) => void | Promise<void>;
         printButtonLabel?: string;
         pdfButtonLabel?: string;
       }
@@ -200,7 +202,9 @@ export function openHtmlPrintPreview(
   let html = '';
   let filename: string | undefined;
   let autoPrint = false;
-  let onSavePdf: (() => void) | undefined;
+  let onSavePdf:
+    | ((onProgress?: (current: number, total: number) => void) => void | Promise<void>)
+    | undefined;
   let printButtonLabel = '🖨️ Print Document';
   let pdfButtonLabel = '📄 Save as PDF';
 
@@ -397,14 +401,51 @@ export function openHtmlPrintPreview(
   };
 
   let savePdfBtn: HTMLButtonElement | null = null;
+  let isGeneratingPdf = false;
   if (onSavePdf) {
     savePdfBtn = document.createElement('button');
     savePdfBtn.type = 'button';
     savePdfBtn.textContent = pdfButtonLabel;
     savePdfBtn.style.cssText =
       'background:#dc2626;color:#ffffff;border:none;padding:9px 16px;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.12);';
-    savePdfBtn.onclick = () => {
-      onSavePdf?.();
+    savePdfBtn.onclick = async () => {
+      if (isGeneratingPdf || !savePdfBtn) return;
+      isGeneratingPdf = true;
+      savePdfBtn.disabled = true;
+      savePdfBtn.style.opacity = '0.8';
+      savePdfBtn.style.cursor = 'wait';
+      savePdfBtn.textContent = '⏳ Generating PDF...';
+      try {
+        await onSavePdf((current, total) => {
+          if (savePdfBtn && total > 1) {
+            savePdfBtn.textContent = `⏳ Preparing PDF (${current}/${total})...`;
+          }
+        });
+        savePdfBtn.textContent = '✅ PDF Saved';
+        setTimeout(() => {
+          if (savePdfBtn && !isGeneratingPdf) {
+            savePdfBtn.textContent = pdfButtonLabel;
+          }
+        }, 2500);
+      } catch (err: any) {
+        const msg = err?.message || 'PDF generation failed. Try Print -> Save as PDF.';
+        savePdfBtn.textContent = '⚠️ Retry PDF';
+        const existingErr = document.getElementById('stms-pdf-error-bar');
+        if (existingErr) existingErr.remove();
+        const errBar = document.createElement('div');
+        errBar.id = 'stms-pdf-error-bar';
+        errBar.style.cssText =
+          'background:#fef2f2;color:#991b1b;padding:8px 16px;font-size:12px;font-weight:700;border-bottom:1px solid #fecaca;';
+        errBar.textContent = msg;
+        topBar.insertAdjacentElement('afterend', errBar);
+      } finally {
+        isGeneratingPdf = false;
+        if (savePdfBtn) {
+          savePdfBtn.disabled = false;
+          savePdfBtn.style.opacity = '1';
+          savePdfBtn.style.cursor = 'pointer';
+        }
+      }
     };
   }
 

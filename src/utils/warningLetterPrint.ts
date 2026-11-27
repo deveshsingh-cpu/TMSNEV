@@ -27,6 +27,7 @@ export interface WarningLetterPrintOptions {
   letterStage?: WarningLetterStage;
   letterLanguage?: WarningLetterLanguage;
   effectiveStopDate?: string;
+  onProgress?: (current: number, total: number) => void;
 }
 
 export function escapeHtml(val: unknown): string {
@@ -630,40 +631,476 @@ export function buildWarningLettersDocumentHtml(
   `;
 }
 
-async function renderXhtmlPageToPngDataUrl(pageXhtml: string): Promise<string> {
-  const width = 794;
-  const height = 1123;
-  const scale = 2;
-  const svgMarkup = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-      <foreignObject x="0" y="0" width="${width}" height="${height}">
-        <div xmlns="http://www.w3.org/1999/xhtml" style="background:#ffffff;padding:18px;box-sizing:border-box;width:${width}px;height:${height}px;font-family:'Noto Sans Devanagari','Kohinoor Devanagari','Mangal','Nirmala UI',Arial,sans-serif;color:#0f172a;">
-          <style>${SHARED_LETTER_CSS}</style>
-          ${pageXhtml}
-        </div>
-      </foreignObject>
-    </svg>
-  `.trim();
+const CANVAS_FONT_STACK =
+  "'Noto Sans Devanagari', 'Kohinoor Devanagari', 'Mangal', 'Nirmala UI', Arial, sans-serif";
 
-  const img = new Image();
-  const dataUri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgMarkup)}`;
+function drawRoundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
 
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = (err) => reject(err);
-    img.src = dataUri;
-  });
+function wrapCanvasText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number
+): string[] {
+  const raw = String(text || '').trim();
+  if (!raw) return [''];
+  const words = raw.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
 
-  const canvas = document.createElement('canvas');
-  canvas.width = width * scale;
-  canvas.height = height * scale;
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      current = candidate;
+    } else {
+      if (current) lines.push(current);
+      if (ctx.measureText(word).width <= maxWidth) {
+        current = word;
+      } else {
+        // Break overly long token cleanly
+        let chunk = '';
+        for (const ch of word) {
+          if (ctx.measureText(chunk + ch).width > maxWidth && chunk) {
+            lines.push(chunk);
+            chunk = ch;
+          } else {
+            chunk += ch;
+          }
+        }
+        current = chunk;
+      }
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length > 0 ? lines : [''];
+}
+
+function renderWarningLetterOnCanvas(
+  canvas: HTMLCanvasElement,
+  item: PrintableLetterTarget,
+  options: WarningLetterPrintOptions
+): string {
+  const W = 1240;
+  const H = 1754;
+  if (canvas.width !== W) canvas.width = W;
+  if (canvas.height !== H) canvas.height = H;
+
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas 2D context unavailable');
+  if (!ctx) throw new Error('Canvas 2D context is unavailable');
+
+  const c = buildResolvedLetterContent(item, options);
+  const { member, letterNo } = item;
+  const guardianFallback = c.lang === 'hi' ? 'अभिभावक' : 'Parent / Guardian';
+  const addrFallback = c.lang === 'hi' ? 'पंजीकृत पता' : 'Registered Address';
+  const stopFallback = c.lang === 'hi' ? 'स्टॉप' : 'Stop';
+  const routeFallback = c.lang === 'hi' ? 'निर्धारित रूट' : 'Assigned Route';
+  const classDisplay =
+    c.lang === 'hi'
+      ? String(member.class || '-').trim().replace(/^class\s*[:.\-]?\s*/i, '').trim() || '-'
+      : member.class || '-';
+  const issueYear =
+    (item.issueDate || new Date().toISOString().slice(0, 10)).slice(0, 4) || '2026';
+
+  // Crisp White Page Background
+  ctx.setLineDash([]);
   ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.scale(scale, scale);
-  ctx.drawImage(img, 0, 0, width, height);
-  return canvas.toDataURL('image/png');
+  ctx.fillRect(0, 0, W, H);
+
+  // Outer Formal Border
+  const marginX = 48;
+  const marginY = 44;
+  const boxW = W - marginX * 2;
+  const boxH = H - marginY * 2;
+  drawRoundedRectPath(ctx, marginX, marginY, boxW, boxH, 16);
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  const innerX = 76;
+  const innerW = W - innerX * 2;
+  const rightX = innerX + innerW;
+  let y = 96;
+
+  // School & Department Heading
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `700 24px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.deptHeading.toUpperCase(), W / 2, y, innerW);
+
+  y += 34;
+  ctx.fillStyle = c.titleColorHex;
+  ctx.font = `700 19.5px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.letterTitle, W / 2, y, innerW);
+
+  y += 18;
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(innerX, y);
+  ctx.lineTo(rightX, y);
+  ctx.stroke();
+
+  // Letter Ref No & Issue Date
+  y += 32;
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `700 17px ${CANVAS_FONT_STACK}`;
+  ctx.textAlign = 'left';
+  ctx.fillText(`${c.refLabel} ${letterNo}`, innerX, y);
+  ctx.textAlign = 'right';
+  ctx.fillText(`${c.dateLabel} ${c.formattedIssue}`, rightX, y);
+  ctx.textAlign = 'left';
+
+  // Recipient Box (dynamic height wrapping)
+  y += 16;
+  ctx.font = `400 16.5px ${CANVAS_FONT_STACK}`;
+  const recMaxW = innerW - 32;
+  const recLine1 = `${c.guardianLabel} ${member.fatherName || guardianFallback} (${c.wardLabel} ${member.name}, ${c.admNoLabel} ${member.admissionNo}, ${c.classLabel} ${classDisplay}-${member.section})`;
+  const recLine2 = `${c.addressLabel} ${member.address || member.villageName || addrFallback} (${member.pickupDropStopName || stopFallback})`;
+  const recLine3 = `${c.phoneLabel} ${member.mobile || member.emergencyContact || '—'}   |   ${c.routeLabel} ${member.routeCode || routeFallback}`;
+  const recWrapped1 = wrapCanvasText(ctx, recLine1, recMaxW);
+  const recWrapped2 = wrapCanvasText(ctx, recLine2, recMaxW);
+  const recWrapped3 = wrapCanvasText(ctx, recLine3, recMaxW);
+  const recLinesTotal = 1 + recWrapped1.length + recWrapped2.length + recWrapped3.length;
+  const recBoxH = 26 + recLinesTotal * 25;
+
+  drawRoundedRectPath(ctx, innerX, y, innerW, recBoxH, 10);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fill();
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  let ry = y + 28;
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `700 16.5px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.toLabel, innerX + 16, ry);
+  ry += 25;
+  ctx.font = `400 16.5px ${CANVAS_FONT_STACK}`;
+  for (const ln of [...recWrapped1, ...recWrapped2, ...recWrapped3]) {
+    ctx.fillText(ln, innerX + 16, ry);
+    ry += 25;
+  }
+  y += recBoxH + 28;
+
+  // Subject
+  ctx.font = `700 17.5px ${CANVAS_FONT_STACK}`;
+  const subjLines = wrapCanvasText(ctx, `${c.subjectLabel} ${c.subjectText}`, innerW);
+  for (const ln of subjLines) {
+    ctx.fillText(ln, innerX, y);
+    y += 25;
+  }
+  y -= 10;
+  ctx.strokeStyle = '#e2e8f0';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(innerX, y);
+  ctx.lineTo(rightX, y);
+  ctx.stroke();
+
+  // Salutation & Intro
+  y += 28;
+  ctx.font = `700 17px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.salutation, innerX, y);
+  y += 28;
+  ctx.font = `400 16.5px ${CANVAS_FONT_STACK}`;
+  const introLines = wrapCanvasText(ctx, c.introParagraph, innerW);
+  for (const ln of introLines) {
+    ctx.fillText(ln, innerX, y);
+    y += 24;
+  }
+  y += 10;
+
+  // Dues Table
+  const colX = [innerX, innerX + 310, innerX + 540, innerX + 678, innerX + 816, innerX + 946, rightX];
+  const drawTableRow = (
+    cells: string[],
+    rowY: number,
+    opts?: { header?: boolean; bold?: boolean }
+  ) => {
+    ctx.font = `${opts?.header || opts?.bold ? 700 : 400} 15px ${CANVAS_FONT_STACK}`;
+    const c0Lines = wrapCanvasText(ctx, cells[0] || '', colX[1] - colX[0] - 18).slice(0, 2);
+    const c1Lines = wrapCanvasText(ctx, cells[1] || '', colX[2] - colX[1] - 18).slice(0, 2);
+    const lineCount = Math.max(c0Lines.length, c1Lines.length, 1);
+    const rowH = lineCount > 1 ? 48 : 34;
+
+    if (opts?.header) {
+      ctx.fillStyle = '#f1f5f9';
+      ctx.fillRect(colX[0], rowY, colX[6] - colX[0], rowH);
+    }
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(colX[0], rowY, colX[6] - colX[0], rowH);
+    for (let k = 1; k < 6; k++) {
+      ctx.beginPath();
+      ctx.moveTo(colX[k], rowY);
+      ctx.lineTo(colX[k], rowY + rowH);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = '#0f172a';
+    ctx.textAlign = 'left';
+    c0Lines.forEach((ln, li) => ctx.fillText(ln, colX[0] + 10, rowY + 22 + li * 18));
+    c1Lines.forEach((ln, li) => ctx.fillText(ln, colX[1] + 10, rowY + 22 + li * 18));
+
+    ctx.textAlign = 'right';
+    ctx.fillText(cells[2] || '', colX[3] - 10, rowY + 22);
+    ctx.fillText(cells[3] || '', colX[4] - 10, rowY + 22);
+    ctx.fillText(cells[4] || '', colX[5] - 10, rowY + 22);
+    ctx.font = `700 15px ${CANVAS_FONT_STACK}`;
+    ctx.fillText(cells[5] || '', colX[6] - 10, rowY + 22);
+    ctx.textAlign = 'left';
+    return rowY + rowH;
+  };
+
+  y = drawTableRow(
+    [c.thPeriod, c.thInvoice, c.thBaseFee, c.thConcession, c.thPaid, c.thBalanceDue],
+    y,
+    { header: true }
+  );
+
+  const openBalLabel = c.lang === 'hi' ? 'प्रारंभिक बकाया' : 'OPEN-BAL';
+  const maxInvoiceRows = Math.min(c.stuInvoices.length, 6);
+  if (maxInvoiceRows > 0) {
+    for (let r = 0; r < maxInvoiceRows; r++) {
+      const inv = c.stuInvoices[r];
+      y = drawTableRow(
+        [
+          String(inv.month || ''),
+          String(inv.invoiceNo || ''),
+          `${c.currencyPrefix}${inv.baseFee}`,
+          `${c.currencyPrefix}${inv.concession}`,
+          `${c.currencyPrefix}${inv.paidAmount}`,
+          `${c.currencyPrefix}${inv.balanceDue}`,
+        ],
+        y
+      );
+    }
+    if (c.stuInvoices.length > maxInvoiceRows) {
+      const extraBal = c.stuInvoices
+        .slice(maxInvoiceRows)
+        .reduce((s, inv) => s + (inv.balanceDue || 0), 0);
+      y = drawTableRow(
+        [
+          c.lang === 'hi'
+            ? `+${c.stuInvoices.length - maxInvoiceRows} अन्य माह`
+            : `+${c.stuInvoices.length - maxInvoiceRows} more`,
+          c.lang === 'hi' ? 'समेकित' : 'CONSOLIDATED',
+          '-',
+          '-',
+          '-',
+          `${c.currencyPrefix}${extraBal}`,
+        ],
+        y
+      );
+    }
+  } else {
+    y = drawTableRow(
+      [
+        c.periodStr,
+        openBalLabel,
+        `${c.currencyPrefix}${member.monthlyFee || c.baseDues}`,
+        `${c.currencyPrefix}${member.concessionAmount || 0}`,
+        `${c.currencyPrefix}0`,
+        `${c.currencyPrefix}${c.baseDues}`,
+      ],
+      y
+    );
+  }
+
+  const drawSummaryRow = (label: string, val: string, rowY: number, mode: 'normal' | 'fine' | 'total') => {
+    const rowH = mode === 'total' ? 38 : 33;
+    if (mode === 'total') {
+      ctx.fillStyle = '#fef2f2';
+      ctx.fillRect(colX[0], rowY, colX[6] - colX[0], rowH);
+    }
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(colX[0], rowY, colX[6] - colX[0], rowH);
+    ctx.beginPath();
+    ctx.moveTo(colX[5], rowY);
+    ctx.lineTo(colX[5], rowY + rowH);
+    ctx.stroke();
+
+    ctx.textAlign = 'right';
+    ctx.font = `${mode === 'total' ? 800 : 700} ${mode === 'total' ? 16.5 : 15}px ${CANVAS_FONT_STACK}`;
+    ctx.fillStyle = mode === 'total' ? '#991b1b' : mode === 'fine' && c.lateFine > 0 ? '#be123c' : '#334155';
+    ctx.fillText(label, colX[5] - 12, rowY + (mode === 'total' ? 25 : 22));
+    ctx.fillStyle = mode === 'total' ? '#b91c1c' : mode === 'fine' && c.lateFine > 0 ? '#be123c' : '#0f172a';
+    ctx.fillText(val, colX[6] - 10, rowY + (mode === 'total' ? 25 : 22));
+    ctx.textAlign = 'left';
+    return rowY + rowH;
+  };
+
+  y = drawSummaryRow(
+    c.summaryPendingLabel,
+    `${c.currencyPrefix}${c.baseDues.toLocaleString('en-IN')}`,
+    y,
+    'normal'
+  );
+  y = drawSummaryRow(
+    c.lateFine > 0 ? c.summaryFineAppliedLabel : c.summaryFineConditionalLabel,
+    c.lateFine > 0
+      ? `+ ${c.currencyPrefix}${c.lateFine.toLocaleString('en-IN')}`
+      : `${c.currencyPrefix}0`,
+    y,
+    'fine'
+  );
+  y = drawSummaryRow(
+    c.summaryTotalLabel,
+    `${c.currencyPrefix}${c.totalPayable.toLocaleString('en-IN')}`,
+    y,
+    'total'
+  );
+
+  // Notice / Warning Block
+  y += 22;
+  const noticeInnerW = c.stage === 'letter_1' ? innerW : innerW - 32;
+  ctx.font = `700 16.5px ${CANVAS_FONT_STACK}`;
+  const primaryLines = wrapCanvasText(ctx, c.primaryNoticeParagraph, noticeInnerW);
+  ctx.font = `400 15.5px ${CANVAS_FONT_STACK}`;
+  const secondaryLines = wrapCanvasText(ctx, c.secondaryNoteParagraph, noticeInnerW);
+  const noticeContentH = primaryLines.length * 24 + secondaryLines.length * 23 + 12;
+
+  if (c.stage === 'letter_2' || c.stage === 'letter_3') {
+    const calloutH = noticeContentH + 22;
+    drawRoundedRectPath(ctx, innerX, y, innerW, calloutH, 10);
+    ctx.fillStyle = c.stage === 'letter_3' ? '#fef2f2' : '#fff1f2';
+    ctx.fill();
+    ctx.strokeStyle = c.titleColorHex;
+    ctx.lineWidth = c.stage === 'letter_3' ? 2.5 : 2;
+    ctx.stroke();
+
+    let ny = y + 26;
+    ctx.fillStyle = c.titleColorHex;
+    ctx.font = `700 16.5px ${CANVAS_FONT_STACK}`;
+    for (const ln of primaryLines) {
+      ctx.fillText(ln, innerX + 16, ny);
+      ny += 24;
+    }
+    ny += 4;
+    ctx.fillStyle = '#0f172a';
+    ctx.font = `400 15.5px ${CANVAS_FONT_STACK}`;
+    for (const ln of secondaryLines) {
+      ctx.fillText(ln, innerX + 16, ny);
+      ny += 23;
+    }
+    y += calloutH + 26;
+  } else {
+    ctx.fillStyle = c.titleColorHex;
+    ctx.font = `700 16.5px ${CANVAS_FONT_STACK}`;
+    for (const ln of primaryLines) {
+      ctx.fillText(ln, innerX, y);
+      y += 24;
+    }
+    y += 4;
+    ctx.fillStyle = '#0f172a';
+    ctx.font = `400 15.5px ${CANVAS_FONT_STACK}`;
+    for (const ln of secondaryLines) {
+      ctx.fillText(ln, innerX, y);
+      y += 23;
+    }
+    y += 22;
+  }
+
+  // Signature Row
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `700 16.5px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.regardsLabel, innerX, y);
+  ctx.fillText(c.coordinatorLabel, innerX, y + 24);
+  ctx.font = `400 16px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.schoolDisplay, innerX, y + 48);
+  ctx.font = `italic 15.5px ${CANVAS_FONT_STACK}`;
+  ctx.textAlign = 'right';
+  ctx.fillText(c.sealSignLabel, rightX, y + 48);
+  ctx.textAlign = 'left';
+
+  // Tear-Off Acknowledgement Slip
+  ctx.font = `400 15px ${CANVAS_FONT_STACK}`;
+  const ackBodyLines = wrapCanvasText(ctx, c.ackBodyText, innerW - 32);
+  const ackBoxH = 122 + ackBodyLines.length * 22;
+  const maxAllowedAckTop = H - marginY - 22 - ackBoxH;
+  const slipTop = Math.min(Math.max(y + 82, 1345), maxAllowedAckTop - 22);
+
+  ctx.strokeStyle = '#64748b';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([8, 6]);
+  ctx.beginPath();
+  ctx.moveTo(innerX, slipTop);
+  ctx.lineTo(rightX, slipTop);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = '#64748b';
+  ctx.font = `700 13.5px ${CANVAS_FONT_STACK}`;
+  ctx.textAlign = 'center';
+  const cleanCutLabel = c.cutLineText.replace(/[✂-]/g, '').trim();
+  ctx.fillText(`✂ ${cleanCutLabel}`, W / 2, slipTop - 8, innerW);
+
+  const ackBoxY = slipTop + 16;
+  drawRoundedRectPath(ctx, innerX, ackBoxY, innerW, ackBoxH, 12);
+  ctx.fillStyle = '#fffbeb';
+  ctx.fill();
+  ctx.setLineDash([7, 5]);
+  ctx.strokeStyle = '#334155';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `700 15.5px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(c.ackTitle, W / 2, ackBoxY + 28, innerW - 24);
+
+  ctx.textAlign = 'left';
+  ctx.font = `400 15px ${CANVAS_FONT_STACK}`;
+  let ay = ackBoxY + 56;
+  for (const ln of ackBodyLines) {
+    ctx.fillText(ln, innerX + 16, ay);
+    ay += 22;
+  }
+
+  const gy = ay + 18;
+  ctx.font = `700 15.5px ${CANVAS_FONT_STACK}`;
+  ctx.fillText(`${c.ackGuardianLabel} ${member.fatherName || '________________'}`, innerX + 16, gy);
+  ctx.fillText(`${c.ackPhoneLabel} ${member.mobile || '________________'}`, W / 2 + 20, gy);
+  ctx.fillText(`${c.ackReceiptDateLabel} ____/____/${issueYear}`, innerX + 16, gy + 32);
+  ctx.fillText(`${c.ackSignLabel} ______________________`, W / 2 + 20, gy + 32);
+
+  return canvas.toDataURL('image/jpeg', 0.88);
+}
+
+function saveJsPdfBlobDownload(doc: jsPDF, outName: string) {
+  const finalName = outName.endsWith('.pdf') ? outName : `${outName}.pdf`;
+  const blob = doc.output('blob');
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = finalName;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
 }
 
 export async function downloadWarningLettersPdf(
@@ -671,8 +1108,13 @@ export async function downloadWarningLettersPdf(
   options: WarningLetterPrintOptions = {}
 ) {
   if (targetMembers.length === 0) return;
-  const { customFilename } = options;
+  const { customFilename, onProgress } = options;
   const todayIso = new Date().toISOString().slice(0, 10);
+  const outName =
+    customFilename ||
+    (targetMembers.length === 1
+      ? `warning_letter_${targetMembers[0].letterNo}.pdf`
+      : `bulk_warning_letters_${todayIso}.pdf`);
 
   const hasNonLatinContent = targetMembers.some((item) => {
     const lang = resolveWarningLetterLanguage(item.letterLanguage || options.letterLanguage);
@@ -685,28 +1127,22 @@ export async function downloadWarningLettersPdf(
   });
 
   // For Hindi / Devanagari Unicode letters, jsPDF's built-in Helvetica cannot shape Devanagari glyphs.
-  // Render exact UTF-8 browser-shaped XHTML pages onto high-DPI canvases and embed into A4 PDF!
+  // Draw directly onto a pure same-origin 2D canvas (never tainted, uses native browser HarfBuzz/Skia shaper)
+  // and embed crisp compressed JPEG pages into A4 jsPDF.
   if (hasNonLatinContent) {
-    try {
-      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      for (let i = 0; i < targetMembers.length; i++) {
-        if (i > 0) doc.addPage();
-        const pageXhtml = buildSingleWarningLetterPageXhtml(targetMembers[i], options);
-        const pngDataUrl = await renderXhtmlPageToPngDataUrl(pageXhtml);
-        doc.addImage(pngDataUrl, 'PNG', 0, 0, 210, 297);
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const sharedCanvas = document.createElement('canvas');
+    for (let i = 0; i < targetMembers.length; i++) {
+      if (i > 0) doc.addPage();
+      const jpegDataUrl = renderWarningLetterOnCanvas(sharedCanvas, targetMembers[i], options);
+      doc.addImage(jpegDataUrl, 'JPEG', 0, 0, 210, 297);
+      onProgress?.(i + 1, targetMembers.length);
+      if ((i + 1) % 3 === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
-      const outName =
-        customFilename ||
-        (targetMembers.length === 1
-          ? `warning_letter_${targetMembers[0].letterNo}.pdf`
-          : `bulk_warning_letters_${todayIso}.pdf`);
-      doc.save(outName.endsWith('.pdf') ? outName : `${outName}.pdf`);
-      return;
-    } catch {
-      // If browser blocks foreignObject canvas export, fall back cleanly to Print / Save as PDF preview
-      printWarningCumReminderLetters(targetMembers, options, true);
-      return;
     }
+    saveJsPdfBlobDownload(doc, outName);
+    return;
   }
 
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -716,6 +1152,9 @@ export async function downloadWarningLettersPdf(
 
   targetMembers.forEach((item, idx) => {
     if (idx > 0) doc.addPage();
+    if (idx === targetMembers.length - 1 || (idx + 1) % 10 === 0) {
+      onProgress?.(idx + 1, targetMembers.length);
+    }
     const { member, letterNo } = item;
     const c = buildResolvedLetterContent(item, options);
 
@@ -1014,12 +1453,7 @@ export async function downloadWarningLettersPdf(
     doc.text('Signature of Guardian: ______________________', pageW / 2 + 4, gY + 10);
   });
 
-  const outName =
-    customFilename ||
-    (targetMembers.length === 1
-      ? `warning_letter_${targetMembers[0].letterNo}.pdf`
-      : `bulk_warning_letters_${todayIso}.pdf`);
-  doc.save(outName.endsWith('.pdf') ? outName : `${outName}.pdf`);
+  saveJsPdfBlobDownload(doc, outName);
 }
 
 export function printWarningCumReminderLetters(
@@ -1036,7 +1470,7 @@ export function printWarningCumReminderLetters(
   const stage = resolveWarningLetterStage(first?.letterStage || options.letterStage);
   const lang = resolveWarningLetterLanguage(first?.letterLanguage || options.letterLanguage);
   const stageShort = getWarningLetterStageLabel(stage, lang);
-  const langLabel = lang === 'hi' ? 'Hindi (हिन्दी)' : 'English';
+  const langLabel = lang === 'hi' ? 'हिन्दी (Hindi)' : 'English';
   const stopOrDeposit =
     stage === 'letter_1'
       ? `Deposit Date: ${formatLetterDateDisplay(first.deadlineDate)}`
@@ -1053,7 +1487,7 @@ export function printWarningCumReminderLetters(
     title:
       targetMembers.length === 1
         ? `${stageShort} — ${first.member.name} (${first.letterNo})`
-        : `Bulk ${stageShort} (${targetMembers.length} Members)`,
+        : `${stageShort} (${targetMembers.length} Members)`,
     subtitle: `${stopOrDeposit} • Language: ${langLabel} • Includes Dues Statement & Acknowledgement Slip`,
     html,
     filename: baseFile,
@@ -1062,7 +1496,7 @@ export function printWarningCumReminderLetters(
       targetMembers.length === 1 ? '🖨️ Print Letter' : `🖨️ Print Letters (${targetMembers.length})`,
     pdfButtonLabel:
       targetMembers.length === 1 ? '📄 Save as PDF' : `📄 Save as PDF (${targetMembers.length})`,
-    onSavePdf: () =>
+    onSavePdf: (onProgress) =>
       downloadWarningLettersPdf(targetMembers, {
         invoices,
         schoolName,
@@ -1071,6 +1505,7 @@ export function printWarningCumReminderLetters(
         letterLanguage: options.letterLanguage,
         effectiveStopDate: options.effectiveStopDate,
         customFilename: `${baseFile}.pdf`,
+        onProgress,
       }),
   });
 }
